@@ -1,0 +1,26 @@
+# 由 home-manager 管理(agent/dsh/dsh.nix)。机器级偏好,适用于
+# web / headless 所有 profile(dsh 层序:bundle patches → profile patch →
+# 本文件 → --patch overlays)。如需追加自定义 patch 行,请直接编辑
+# dsh.nix 中此文件对应的内容。
+
+# ── llm-retry-default-5.patch → 插件行配置迁移 ─────────────────────────
+# 原补丁把 retry-policy.ts 的 DEFAULT_MAX_RETRIES 从 2 提到 5
+# (provider 未显式配置 retryPolicy 时生效)。dsh 的 retry policy 本来就是
+# provider 插件的配置字段(RetryPolicySchema),这里改为声明式配置:
+# 为当前所有 provider 显式设置 maxRetries: 5。
+# settings.yaml 的用户设置层会逐键深合并到这里的 base 上,所以 web
+# Models 页写入的 apiKeyEnv 等字段不会覆盖 retryPolicy。
+# 新添加的 provider 若也要 5 次重试,在 Models 页为其配置 retryPolicy 即可。
+- id: llm-deepseek
+  config:
+    retryPolicy:
+      mode: normal
+      maxRetries: 5
+
+- id: llm-pi-ai
+  config:
+    providers:
+      minimax-cn:
+        retryPolicy:
+          mode: normal
+          maxRetries: 5

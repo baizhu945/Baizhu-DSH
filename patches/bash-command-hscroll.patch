@@ -1,0 +1,116 @@
+diff --git a/packages/client/ui-primitives/src/TerminalBlock.tsx b/packages/client/ui-primitives/src/TerminalBlock.tsx
+--- a/packages/client/ui-primitives/src/TerminalBlock.tsx
++++ b/packages/client/ui-primitives/src/TerminalBlock.tsx
+@@ -251,12 +251,17 @@
+             </div>
+           ))}
+         </div>
+-        {status !== undefined && <Pill className={css.status}>{status}</Pill>}
+-        {!running && !empty && (
+-          <button type="button" className={css.copyButton} onClick={onCopy}>
+-            {copied ? copy.copied : copy.copy}
+-          </button>
+-        )}
++        {/* Status pill and copy control share one sticky wrapper: it pins to the
++            header's top-right corner through BOTH scroll axes, so neither control
++            rides off-screen while a long command scrolls horizontally. */}
++        <div className={css.actions}>
++          {status !== undefined && <Pill className={css.status}>{status}</Pill>}
++          {!running && !empty && (
++            <button type="button" className={css.copyButton} onClick={onCopy}>
++              {copied ? copy.copied : copy.copy}
++            </button>
++          )}
++        </div>
+       </div>
+       {!running && (empty
+         ? <div className={css.empty}>{copy.noOutput}</div>
+diff --git a/packages/client/ui-primitives/src/TerminalBlock.module.css b/packages/client/ui-primitives/src/TerminalBlock.module.css
+--- a/packages/client/ui-primitives/src/TerminalBlock.module.css
++++ b/packages/client/ui-primitives/src/TerminalBlock.module.css
+@@ -47,9 +47,13 @@
+   padding: 9px 14px 9px var(--dsl-terminal-gutter);
+   border-top-left-radius: var(--dsl-terminal-radius);
+   border-top-right-radius: var(--dsl-terminal-radius);
+-  /* A long multi-line command scrolls inside the banner (same cap as the
+-     IN/OUT card's sections) instead of pushing the output off screen. */
++  /* A long multi-line command scrolls vertically inside the banner (same cap
++     as the IN/OUT card's sections) instead of pushing the output off screen;
++     a long single line scrolls horizontally with the output's scrollbar
++     treatment instead of shrinking into an ellipsis. The status/copy wrapper
++     pins to the top-right so neither control rides away with the command. */
+   max-height: 150px;
++  overflow-x: auto;
+   overflow-y: auto;
+ }
+ 
+@@ -71,12 +75,14 @@
+   border-bottom: 1px solid var(--dsw-alias-border-l2);
+ }
+ 
+-/* One row per command line. The prompt column is the only element allowed to
+-   shrink; the status pill and the copy control keep their intrinsic width. */
++/* One row per command line. The prompt column keeps its content's intrinsic
++   width, so a command wider than the card overflows into the header's
++   horizontal scroll instead of being truncated; the status pill and the copy
++   control keep their intrinsic width beside it. */
+ .prompt {
+   display: flex;
+   flex-direction: column;
+-  min-width: 0;
++  min-width: max-content;
+   flex: 1;
+   font: var(--dsl-terminal-font);
+ }
+@@ -118,31 +124,40 @@
+ 
+ /* `pre`, not `nowrap`: the prompt row renders the command verbatim, and
+    `nowrap` collapses the repeated spaces, tabs, and alignment of an indented
+-   continuation. Both hold the single row and the ellipsis. */
++   continuation. The line keeps its intrinsic width — the header owns the
++   horizontal scroll, so there is no per-line ellipsis to hide the command. */
+ .command {
+-  min-width: 0;
+   color: var(--dsw-alias-label-primary);
+-  overflow: hidden;
+-  text-overflow: ellipsis;
+   white-space: pre;
+ }
+ 
+-/* Capped to the prompt's line height (Pill's own 24px height would exceed a
+-   smaller-font prompt row and stretch the banner). Sticky against the
+-   banner's own scroll so the pill and the copy control stay in reach while a
+-   long command scrolls underneath. */
+-.status {
++/* Status pill + copy control ride in one sticky wrapper: it pins to the
++   header's top-right corner through both scroll axes, so neither control
++   moves while a long command scrolls underneath or past it. The wrapper
++   paints the card surface, so command text cannot bleed through its gap. */
++.actions {
+   flex: none;
+   position: sticky;
+   top: 0;
++  right: 0;
++  display: flex;
++  align-items: center;
++  gap: 12px;
++  height: var(--dsl-terminal-line-height);
++  background-color: var(--dsw-alias-markdown-code-block);
++}
++
++/* Capped to the prompt's line height (Pill's own 24px height would exceed a
++   smaller-font prompt row and stretch the banner); the wrapper supplies the
++   stickiness, so these stay plain flex items. */
++.status {
++  flex: none;
+   height: var(--dsl-terminal-line-height);
+   color: var(--dsw-alias-state-error-primary);
+ }
+ 
+ .copyButton {
+   flex: none;
+-  position: sticky;
+-  top: 0;
+   /* Card surface, not transparent: the control is sticky over the banner's
+      own scroll, so scrolled command text must not bleed through it. */
+   background-color: var(--dsw-alias-markdown-code-block);

@@ -1,0 +1,350 @@
+diff -ruN base/packages/client/ui-conversation/src/client/chat/ReasoningRow.module.css final/packages/client/ui-conversation/src/client/chat/ReasoningRow.module.css
+--- base/packages/client/ui-conversation/src/client/chat/ReasoningRow.module.css	1970-01-01 08:00:01.000000000 +0800
++++ final/packages/client/ui-conversation/src/client/chat/ReasoningRow.module.css	2026-08-15 15:28:52.271137473 +0800
+@@ -74,6 +74,30 @@
+   word-break: break-word;
+ }
+ 
++/* Bottom collapse affordance under the expanded Think body: always visible,
++   indented to the same left edge as the reasoning text, so a long reasoning
++   trace can be folded back up without scrolling to the header row. */
++.collapseButton {
++  display: inline-flex;
++  align-self: flex-start;
++  align-items: center;
++  gap: 4px;
++  margin: 4px 0 2px 22px;
++  padding: 2px 8px;
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 999px;
++  background: var(--dsw-alias-bg-base);
++  color: var(--dsw-alias-label-secondary);
++  font-size: 11px;
++  line-height: 16px;
++  cursor: pointer;
++}
++
++.collapseButton:hover {
++  background: var(--dsw-alias-interactive-bg-hover-solid);
++  color: var(--dsw-alias-label-primary);
++}
++
+ @media (prefers-reduced-motion: reduce) {
+   .root[data-state='running'] .row::after {
+     animation: none;
+diff -ruN base/packages/client/ui-conversation/src/client/chat/ReasoningRow.tsx final/packages/client/ui-conversation/src/client/chat/ReasoningRow.tsx
+--- base/packages/client/ui-conversation/src/client/chat/ReasoningRow.tsx	2026-08-15 15:13:38.261294005 +0800
++++ final/packages/client/ui-conversation/src/client/chat/ReasoningRow.tsx	2026-08-15 15:28:40.025755901 +0800
+@@ -1,6 +1,6 @@
+ /** Assistant reasoning disclosure, independent of Tool-call presentation. */
+ import { useEffect, useRef, useState } from 'react'
+-import { DisclosureRow, IconThinkOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
++import { DisclosureRow, IconChevronUpOutline14, IconThinkOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { ChatViewSlotProps } from '../contract/slots.ts'
+ import { useThrottledVisualUpdate } from './use-throttled-visual-update.ts'
+ import a11yCss from './accessibility.module.css'
+@@ -63,6 +63,14 @@
+         )}
+       >
+         <div className={css.thinkBody}>{text}</div>
++        <button
++          type="button"
++          className={css.collapseButton}
++          onClick={() => { setExpanded(false) }}
++        >
++          <IconChevronUpOutline14 />
++          {t('row.collapse')}
++        </button>
+       </DisclosureRow>
+     </div>
+   )
+diff -ruN base/packages/client/ui-conversation/src/client/locales.ts final/packages/client/ui-conversation/src/client/locales.ts
+--- base/packages/client/ui-conversation/src/client/locales.ts	2026-08-15 15:13:38.262732585 +0800
++++ final/packages/client/ui-conversation/src/client/locales.ts	2026-08-15 15:18:08.859958416 +0800
+@@ -150,6 +150,7 @@
+   'row.running': '运行中',
+   'row.failed': '失败',
+   'row.stopped': '已停止',
++  'row.collapse': '折叠',
+   'queue.count': '{n} 条排队消息',
+   'queue.edit': '编辑排队消息',
+   'queue.edit.unsupported': '包含非文本内容，暂不支持编辑',
+@@ -320,6 +321,7 @@
+   'row.running': 'Running',
+   'row.failed': 'Failed',
+   'row.stopped': 'Stopped',
++  'row.collapse': 'Collapse',
+   'queue.count': '{n} queued messages',
+   'queue.edit': 'Edit queued message',
+   'queue.edit.unsupported': 'Contains non-text content; editing is not supported yet',
+diff -ruN base/packages/client/ui-skill/src/client/locales.ts final/packages/client/ui-skill/src/client/locales.ts
+--- base/packages/client/ui-skill/src/client/locales.ts	1970-01-01 08:00:01.000000000 +0800
++++ final/packages/client/ui-skill/src/client/locales.ts	2026-08-15 15:18:08.860069591 +0800
+@@ -8,6 +8,7 @@
+   'row.running': '正在加载 skill',
+   'row.failed': 'skill 加载失败',
+   'row.stopped': 'skill 加载已中止',
++  'row.collapse': '折叠',
+   'row.instructions': '说明',
+   'menu.userOnly': '仅用户',
+ } satisfies Record<string, string>
+@@ -20,6 +21,7 @@
+   'row.running': 'Loading skill',
+   'row.failed': 'Skill load failed',
+   'row.stopped': 'Skill load stopped',
++  'row.collapse': 'Collapse',
+   'row.instructions': 'Instructions',
+   'menu.userOnly': 'user-only',
+ } satisfies Record<SkillKey, string>
+diff -ruN base/packages/client/ui-skill/src/client/SkillRow.module.css final/packages/client/ui-skill/src/client/SkillRow.module.css
+--- base/packages/client/ui-skill/src/client/SkillRow.module.css	1970-01-01 08:00:01.000000000 +0800
++++ final/packages/client/ui-skill/src/client/SkillRow.module.css	2026-08-15 15:18:08.860179185 +0800
+@@ -189,6 +189,30 @@
+   color: var(--dsw-alias-label-primary);
+ }
+ 
++/* Bottom collapse affordance under the expanded body: same pill geometry as
++   Inspect but always visible, so the instructions card can be folded from its
++   bottom edge without scrolling back to the header row. */
++.collapseButton {
++  display: inline-flex;
++  align-self: flex-start;
++  align-items: center;
++  gap: 4px;
++  margin: 4px 0 2px 4px;
++  padding: 2px 8px;
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 999px;
++  background: var(--dsw-alias-bg-base);
++  color: var(--dsw-alias-label-secondary);
++  font-size: 11px;
++  line-height: 16px;
++  cursor: pointer;
++}
++
++.collapseButton:hover {
++  background: var(--dsw-alias-interactive-bg-hover-solid);
++  color: var(--dsw-alias-label-primary);
++}
++
+ .visuallyHidden {
+   position: absolute;
+   width: 1px;
+diff -ruN base/packages/client/ui-skill/src/client/SkillRow.tsx final/packages/client/ui-skill/src/client/SkillRow.tsx
+--- base/packages/client/ui-skill/src/client/SkillRow.tsx	1970-01-01 08:00:01.000000000 +0800
++++ final/packages/client/ui-skill/src/client/SkillRow.tsx	2026-08-15 15:18:08.860246158 +0800
+@@ -4,7 +4,7 @@
+ 
+ import { useState, type KeyboardEvent, type ReactNode } from 'react'
+ import {
+-  IconChevronDownOutline14, IconInspectOutline12, IconSkillOutline16, StateDot,
++  IconChevronDownOutline14, IconChevronUpOutline14, IconInspectOutline12, IconSkillOutline16, StateDot,
+ } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
+ import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+@@ -164,6 +164,10 @@
+               Inspect
+             </button>
+           ) : null}
++          <button type="button" className={css.collapseButton} onClick={() => { setExpanded(false) }}>
++            <IconChevronUpOutline14 />
++            {t('row.collapse')}
++          </button>
+         </div>
+       ) : null}
+     </div>
+diff -ruN base/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css final/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
+--- base/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css	1970-01-01 08:00:01.000000000 +0800
++++ final/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css	2026-08-15 15:18:08.860316192 +0800
+@@ -171,6 +171,30 @@
+   color: var(--dsw-alias-label-primary);
+ }
+ 
++/* Bottom collapse affordance under the expanded body: same pill geometry as
++   Inspect but always visible, so a very long card can be folded back up from
++   its bottom edge without scrolling to the row header. */
++.collapseButton {
++  display: inline-flex;
++  align-self: flex-start;
++  align-items: center;
++  gap: 4px;
++  margin: 4px 0 2px 4px;
++  padding: 2px 8px;
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 999px;
++  background: var(--dsw-alias-bg-base);
++  color: var(--dsw-alias-label-secondary);
++  font-size: 11px;
++  line-height: 16px;
++  cursor: pointer;
++}
++
++.collapseButton:hover {
++  background: var(--dsw-alias-interactive-bg-hover-solid);
++  color: var(--dsw-alias-label-primary);
++}
++
+ /* Expanded-body scroll wrapper for the run_code CodeBlock; the IN/OUT card
+    and the terminal card scroll INSIDE their own surface instead, so the
+    scrollbar sits within the rounded card. */
+diff -ruN base/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx final/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
+--- base/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx	2026-08-15 15:13:38.261361724 +0800
++++ final/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx	2026-08-15 15:18:08.860389488 +0800
+@@ -20,7 +20,7 @@
+ import { useState, useEffect, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+ import clsx from 'clsx'
+ import {
+-  CodeBlock, DiffBlock, DisclosureRow, IconInspectOutline12, ReadBlock, SearchBlock, StateDot, TerminalBlock, WebBlock,
++  CodeBlock, DiffBlock, DisclosureRow, IconChevronUpOutline14, IconInspectOutline12, ReadBlock, SearchBlock, StateDot, TerminalBlock, WebBlock,
+ } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { WebBlockProps } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+@@ -307,6 +307,15 @@
+               Inspect
+             </button>
+           )}
++          {/* 底部折叠按钮:长工具卡无需滚回顶部,在展开内容的底部即可收起 */}
++          <button
++            type="button"
++            className={css.collapseButton}
++            onClick={() => { setExpanded(false) }}
++          >
++            <IconChevronUpOutline14 />
++            {t('row.collapse')}
++          </button>
+         </div>
+       </DisclosureRow>
+     </div>
+diff -ruN base/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css final/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
+--- base/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css	1970-01-01 08:00:01.000000000 +0800
++++ final/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css	2026-08-15 15:18:08.860458216 +0800
+@@ -228,6 +228,30 @@
+   color: var(--dsw-alias-label-primary);
+ }
+ 
++/* Bottom collapse affordance under the expanded body: same pill geometry as
++   Inspect but always visible, so a long terminal card can be folded from its
++   bottom edge without scrolling back to the header row. */
++.collapseButton {
++  display: inline-flex;
++  align-self: flex-start;
++  align-items: center;
++  gap: 4px;
++  margin: 4px 0 2px 4px;
++  padding: 2px 8px;
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 999px;
++  background: var(--dsw-alias-bg-base);
++  color: var(--dsw-alias-label-secondary);
++  font-size: 11px;
++  line-height: 16px;
++  cursor: pointer;
++}
++
++.collapseButton:hover {
++  background: var(--dsw-alias-interactive-bg-hover-solid);
++  color: var(--dsw-alias-label-primary);
++}
++
+ 
+ .visuallyHidden {
+   position: absolute;
+diff -ruN base/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx final/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
+--- base/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx	1970-01-01 08:00:01.000000000 +0800
++++ final/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx	2026-08-15 15:18:08.860514965 +0800
+@@ -17,7 +17,7 @@
+ import type { Context } from '@deepseek-ai/cordis'
+ import clsx from 'clsx'
+ import {
+-  IconApiOutline14, IconChevronDownOutline14, IconInspectOutline12, StateDot, TerminalBlock,
++  IconApiOutline14, IconChevronDownOutline14, IconChevronUpOutline14, IconInspectOutline12, StateDot, TerminalBlock,
+ } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+ import type { ToolCallViewProps } from '../../contract/slots.ts'
+@@ -157,6 +157,10 @@
+               Inspect
+             </button>
+           )}
++          <button type="button" className={css.collapseButton} onClick={() => { setExpanded(false) }}>
++            <IconChevronUpOutline14 />
++            {t('row.collapse')}
++          </button>
+         </div>
+       )}
+     </div>
+diff -ruN base/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css final/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
+--- base/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css	1970-01-01 08:00:01.000000000 +0800
++++ final/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css	2026-08-15 15:18:08.860580416 +0800
+@@ -281,6 +281,30 @@
+   color: var(--dsw-alias-label-primary);
+ }
+ 
++/* Bottom collapse affordance under the expanded body: same pill geometry as
++   Inspect but always visible, so a long source card can be folded from its
++   bottom edge without scrolling back to the header row. */
++.collapseButton {
++  display: inline-flex;
++  align-self: flex-start;
++  align-items: center;
++  gap: 4px;
++  margin: 4px 0 2px 4px;
++  padding: 2px 8px;
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 999px;
++  background: var(--dsw-alias-bg-base);
++  color: var(--dsw-alias-label-secondary);
++  font-size: 11px;
++  line-height: 16px;
++  cursor: pointer;
++}
++
++.collapseButton:hover {
++  background: var(--dsw-alias-interactive-bg-hover-solid);
++  color: var(--dsw-alias-label-primary);
++}
++
+ .visuallyHidden {
+   position: absolute;
+   width: 1px;
+diff -ruN base/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx final/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx
+--- base/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx	1970-01-01 08:00:01.000000000 +0800
++++ final/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx	2026-08-15 15:18:08.860640231 +0800
+@@ -2,7 +2,7 @@
+ 
+ import { useId, useState, type ReactNode } from 'react'
+ import {
+-  CodeBlock, DisclosureRow, IconCodeOutline16, IconInspectOutline12, StateDot,
++  CodeBlock, DisclosureRow, IconChevronUpOutline14, IconCodeOutline16, IconInspectOutline12, StateDot,
+ } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+ import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
+@@ -164,6 +164,10 @@
+               Inspect
+             </button>
+           )}
++          <button type="button" className={css.collapseButton} onClick={() => { setExpanded(false) }}>
++            <IconChevronUpOutline14 />
++            {t('row.collapse')}
++          </button>
+         </div>
+       </DisclosureRow>
+     </div>
+diff -ruN base/packages/extensions/ui-cordis/src/client/locales.ts final/packages/extensions/ui-cordis/src/client/locales.ts
+--- base/packages/extensions/ui-cordis/src/client/locales.ts	1970-01-01 08:00:01.000000000 +0800
++++ final/packages/extensions/ui-cordis/src/client/locales.ts	2026-08-15 15:18:08.860693523 +0800
+@@ -9,6 +9,7 @@
+   'row.updateTitle': '更新 Cordis 插件',
+   'row.stopTitle': '停止 Cordis 插件',
+   'row.removeTitle': '移除 Cordis 插件',
++  'row.collapse': '折叠',
+   'purpose.missing': '(未填写用途)',
+   'status.idle': '待激活',
+   'status.awaitingApproval': '待审批',
+@@ -72,6 +73,7 @@
+   'row.updateTitle': 'Update Cordis Plugin',
+   'row.stopTitle': 'Stop Cordis Plugin',
+   'row.removeTitle': 'Remove Cordis Plugin',
++  'row.collapse': 'Collapse',
+   'purpose.missing': '(no purpose given)',
+   'status.idle': 'Ready',
+   'status.awaitingApproval': 'Awaiting approval',

@@ -1,0 +1,343 @@
+# Cross-process durable-session ownership lease + stale-writer revision guard.
+#
+# 修复两类“历史加载失败(corrupt Zstandard session log)”上游竞态:
+#   1. 进程 A 持有 live 会话持续追加,进程 B 对同一会话做冷恢复(detached repair)
+#      把合成的 step/end、turn/end、session/end-seed 交错写进 A 的日志,
+#      seq 与 A 尚未落盘的 chunk 批次重叠,产生 seq 回退;
+#   2. 长期存活的旧会话实例(如等待 stdin 审批的 headless runner)在另一实例
+#      接管日志后,仍以过期 cursor 把携带陈旧 seq 的事件(如 agent/inbox/spliced)
+#      追加到文件末尾。
+#
+# 方案(仅修改 session-persistence 的 PersistenceCoordinator):
+#   - 每个会话工件增加 `<log>.lock` 租约文件(内容为持有者 pid):
+#     * live 会话绑定/接管/冷恢复提交前必须先持有租约;持有者进程存活时,
+#       其他进程拒绝写(报错并给出 pid),旧进程死掉后租约按 pid 回收;
+#     * 无属主(detached)的 append / crash repair 短暂持有租约,写完即释放;
+#     * 会话退役时释放;SIGKILL 残留的租约由下个持有者按 pid 活性回收。
+#   - 追加写入前对比 state.revision 与磁盘 revision:发现外部写入时,以
+#     磁盘前缀重新对齐 cursor,只追加真正未持久化的后缀;前缀不再匹配则
+#     拒绝陈旧写入,避免 seq 重叠/回退。
+#
+# 维护说明:升级 dsh 源码(rev/hash)时若该文件变更,需重新生成此 patch。
+
+--- a/packages/session/session-persistence/src/coordinator.ts	2026-08-15 17:42:40.838220086 +0800
++++ b/packages/session/session-persistence/src/coordinator.ts	2026-08-15 18:03:24.414840119 +0800
+@@ -22,6 +22,8 @@
+ import { observeQueuedAbort, SessionPreparations } from './preparations.ts'
+ import type { SessionPreparationReservation } from './preparations.ts'
+ import { SessionWriteBehind } from './write-behind.ts'
++import { mkdir, open, readFile, rm } from 'node:fs/promises'
++import { dirname } from 'node:path'
+ 
+ /** Default number of detached session preparations retained by a coordinator. */
+ export const DEFAULT_PREPARED_SESSION_CACHE_SIZE = 5
+@@ -32,6 +34,24 @@
+ /** Largest write batching delay accepted by Node's timer implementation. */
+ export const MAX_WRITE_BATCH_DELAY_MS = MAX_TIMER_DELAY_MS
+ 
++/** Suffix appended to one session artifact's path for its cross-process owner lease. */
++const DURABLE_LEASE_SUFFIX = '.lock'
++
++/** Whether a pid currently refers to a live process (EPERM means "exists, not ours"). */
++function isProcessAlive(pid: number): boolean {
++  try {
++    process.kill(pid, 0)
++    return true
++  } catch (error) {
++    return (error as NodeJS.ErrnoException).code === 'EPERM'
++  }
++}
++
++/** Whether an error is the EEXIST this lock protocol expects. */
++function isEEXIST(error: unknown): boolean {
++  return typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === 'EEXIST'
++}
++
+ /** Durable session contents failed validation after a successful backend read. */
+ export class SessionPersistenceCorruptionError extends Error {
+   /**
+@@ -232,6 +252,11 @@
+    * same id (a collision) instead of silently no-opping.
+    */
+   owner?: Session
++  /**
++   * Durable revision observed at the last successful state mutation. Appends
++   * re-check it so a foreign writer is detected before overlapping seqs land.
++   */
++  revision?: SessionPersistenceRevision
+ }
+ 
+ /** One live session's initialization and bounded write-behind controller. */
+@@ -694,19 +719,46 @@
+     let state = this.states.get(id)
+     if (state === undefined) state = await this.adopt(id)
+ 
+-    // Contiguity contract: each event's seq must continue the stored log.
+-    for (const [i, event] of events.entries()) {
+-      if (event.seq !== state.cursor + i) {
+-        throw new Error(`append seq mismatch for "${id}": expected ${state.cursor + i} at index ${i}, got ${event.seq}`)
++    // Cross-process ownership: only the lease holder may write this artifact.
++    // A live foreign holder means another process owns the session; a stale
++    // holder (dead pid) is reclaimed. Ownerless writes (detached appends)
++    // take the lease transiently and release it again below.
++    const lease = await this.holdLease(state.meta)
++    try {
++      // A foreign durable write since our last mutation means our cursor may
++      // be stale. Reconcile against the stored prefix before validating seqs,
++      // so a buffered batch writes only its truly unpublished suffix.
++      if (state.revision !== undefined) {
++        const current = await this.backend.readStoredRevision(id)
++        if (current !== state.revision) await this.reconcileLiveState(id, state)
+       }
+-    }
+ 
+-    await this.backend.appendBatch(state.meta, events, state.materialized)
+-    // The durable write is the transaction: mark materialized + advance the
+-    // cursor as soon as it commits (uniform across backends).
+-    state.materialized = true
+-    state.cursor += events.length
+-    this.preparations.invalidate(id)
++      // Contiguity contract: each event's seq must continue the stored log.
++      // Events the reconciled log already contains are dropped here.
++      const fresh = events.filter(event => event.seq >= state.cursor)
++      for (const [i, event] of fresh.entries()) {
++        if (event.seq !== state.cursor + i) {
++          throw new Error(`append seq mismatch for "${id}": expected ${state.cursor + i} at index ${i}, got ${event.seq}`)
++        }
++      }
++
++      if (fresh.length === 0) {
++        const observed = await this.backend.readStoredRevision(id)
++        if (observed !== undefined) state.revision = observed
++        return
++      }
++
++      await this.backend.appendBatch(state.meta, fresh, state.materialized)
++      // The durable write is the transaction: mark materialized + advance the
++      // cursor as soon as it commits (uniform across backends).
++      state.materialized = true
++      state.cursor += fresh.length
++      const observed = await this.backend.readStoredRevision(id)
++      if (observed !== undefined) state.revision = observed
++      this.preparations.invalidate(id)
++    } finally {
++      if (state.owner === undefined) await this.releaseLease(lease)
++    }
+   }
+ 
+   /**
+@@ -940,12 +992,20 @@
+     if (existing?.owner !== undefined) {
+       throw new Error(`session "${id}" already has a live persistence owner`)
+     }
+-    if (!await this.isPreparedSourceCurrent(source)) return undefined
+-    if (source.tornMarker !== undefined || source.closers.length > 0) {
+-      await this.backend.commitRepair(source.inspection.meta, source.tornMarker, source.closers)
+-      // The repair changed the durable revision. Reload the exact committed
+-      // graph instead of associating the old in-memory view with a newer revision.
+-      return undefined
++    // Detached repair still mutates the artifact: take the lease transiently
++    // so a live owner in another process can never have synthetic closers
++    // interleaved into its log, and re-check the revision under the lease.
++    const lease = await this.holdLease(source.inspection.meta)
++    try {
++      if (!await this.isPreparedSourceCurrent(source)) return undefined
++      if (source.tornMarker !== undefined || source.closers.length > 0) {
++        await this.backend.commitRepair(source.inspection.meta, source.tornMarker, source.closers)
++        // The repair changed the durable revision. Reload the exact committed
++        // graph instead of associating the old in-memory view with a newer revision.
++        return undefined
++      }
++    } finally {
++      await this.releaseLease(lease)
+     }
+     const state = existing ?? {
+       meta: source.inspection.meta,
+@@ -955,6 +1015,7 @@
+     state.meta = source.inspection.meta
+     state.cursor = cursor
+     state.materialized = true
++    state.revision = await this.backend.readStoredRevision(id) ?? source.revision
+     this.states.set(id, state)
+     return {
+       source,
+@@ -1043,6 +1104,92 @@
+     }
+   }
+ 
++  /** Resolve the cross-process owner lease path for one session artifact. */
++  private leasePath(meta: SessionHeader): string | undefined {
++    const location = this.backend.locate?.(meta)
++    return location === undefined ? undefined : `${location.path}${DURABLE_LEASE_SUFFIX}`
++  }
++
++  /** Read the pid recorded in a lease file, or `undefined` when absent or invalid. */
++  private async leaseHolder(path: string): Promise<number | undefined> {
++    let text: string
++    try {
++      text = await readFile(path, 'utf8')
++    } catch {
++      return undefined
++    }
++    const pid = Number(text.trim())
++    return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
++  }
++
++  /**
++   * Ensure this process holds the artifact's owner lease. A live foreign
++   * holder refuses (another process owns the session); a stale holder is
++   * reclaimed atomically. Returns the lease path, or `undefined` when the
++   * backend names no per-session artifact (coordination degrades to the
++   * revision guard only).
++   */
++  private async holdLease(meta: SessionHeader): Promise<string | undefined> {
++    const path = this.leasePath(meta)
++    if (path === undefined) return undefined
++    for (;;) {
++      const holder = await this.leaseHolder(path)
++      if (holder === process.pid) return path
++      if (holder !== undefined && isProcessAlive(holder)) {
++        throw new Error(`session "${meta.id}" is live in another process (pid ${holder}); refusing to write its durable log`)
++      }
++      // A dead holder's lease must be removed BEFORE the exclusive create,
++      // otherwise open('wx') would retry against the same stale file forever.
++      if (holder !== undefined) await rm(path, { force: true })
++      try {
++        // A lazy session may not have materialized its directory yet.
++        await mkdir(dirname(path), { recursive: true })
++        const handle = await open(path, 'wx', 0o600)
++        try {
++          await handle.writeFile(`${process.pid}\n`)
++        } finally {
++          await handle.close()
++        }
++        return path
++      } catch (error) {
++        // A concurrent creator won the lease; re-read the holder and either
++        // adopt it (our pid: HMR/re-acquire) or refuse it (foreign live pid).
++        if (!isEEXIST(error)) throw error
++      }
++    }
++  }
++
++  /** Release a lease this process holds; a lease held by anyone else stays. */
++  private async releaseLease(path: string | undefined): Promise<void> {
++    if (path === undefined) return
++    try {
++      const text = (await readFile(path, 'utf8')).trim()
++      if (text === `${process.pid}`) await rm(path, { force: true })
++    } catch {
++      /* already gone */
++    }
++  }
++
++  /**
++   * Re-sync local state after a foreign durable write was observed. When the
++   * stored prefix still reproduces this live session's own log, the cursor
++   * advances so the pending batch appends only its unpublished suffix; a
++   * diverged stored log is a collision and refuses instead of writing
++   * overlapping seqs.
++   */
++  private async reconcileLiveState(id: SessionId, state: SessionState): Promise<void> {
++    const stored = await this.backend.loadStored(id)
++    if (stored === undefined) {
++      throw new Error(`session "${id}" durable log disappeared while a live session was attached`)
++    }
++    const storedEvents = snapshotStoredEvents(stored.events, id)
++    if (state.owner === undefined || !seedCoversPrefix(state.owner.events, storedEvents)) {
++      throw new Error(`session "${id}" durable log changed underneath this live session and no longer matches its event log (another process owns it); refusing stale append`)
++    }
++    state.cursor = storedEvents.length
++    state.revision = stored.revision
++  }
++
+   private assertVersion(meta: SessionHeader): void {
+     if (meta.version === SESSION_FORMAT_VERSION) return
+     throw this.unsupported(meta, sessionFormatVersionRefusal(meta.id, meta.version))
+@@ -1154,9 +1301,13 @@
+   private async retireCore(session: Session): Promise<void> {
+     await this.flush(session)
+     const id = session.header.id
+-    await this.serialize(id, () => {
++    await this.serialize(id, async () => {
++      const state = this.states.get(id)
+       this.live.delete(session)
+-      if (this.states.get(id)?.owner === session) this.states.delete(id)
++      if (state?.owner === session) {
++        this.states.delete(id)
++        await this.releaseLease(this.leasePath(state.meta))
++      }
+     })
+   }
+ 
+@@ -1199,10 +1350,14 @@
+       init: Promise.resolve(),
+       writes: this.createWriteBehind(session, () => live.init),
+     }
+-    if (suffix.length > 0) {
+-      live.init = this.serialize(session.id, () => this.appendCore(session.id, suffix))
+-      live.init.catch(() => { /* observed by flush/dispose through the controller */ })
+-    }
++    // The detached repair released its transient lease; claim durable
++    // ownership here (before any buffered write drains) and then persist
++    // only the suffix beyond the repaired prefix.
++    live.init = this.serialize(session.id, async () => {
++      await this.holdLease(state.meta)
++      if (suffix.length > 0) await this.appendCore(session.id, suffix)
++    })
++    live.init.catch(() => { /* observed by flush/dispose through the controller */ })
+     return live
+   }
+ 
+@@ -1254,6 +1409,7 @@
+         if (!await this.seedMatchesPersisted(id, seed, tracked.cursor)) {
+           throw new Error(`session "${id}" is already persisted with ${tracked.cursor} event(s) that do not match this live session (id collision)`)
+         }
++        await this.holdLease(tracked.meta)
+         tracked.owner = session
+         // Persist the seed SUFFIX beyond the persisted prefix. Constructor seed
+         // events never emit session/event, so the buffer never sees them.
+@@ -1288,7 +1444,10 @@
+     // the id is detected as a collision (case 1) rather than silently no-opped.
+     const created = this.states.get(id)
+     /* v8 ignore next -- create() always sets the state for the id */
+-    if (created !== undefined) created.owner = session
++    if (created !== undefined) {
++      await this.holdLease(meta)
++      created.owner = session
++    }
+     if (seed.length > 0) await this.appendCore(id, seed)
+   }
+ 
+@@ -1310,14 +1469,23 @@
+     if (!seedCoversPrefix(seed, storedEvents)) {
+       throw new Error(`session "${session.header.id}" already has a persisted log on disk that does not match this live session (id collision)`)
+     }
+-    // Truncate-only repair (no closers): the open turn is NOT closed here.
+-    if (tornMarker !== undefined) await this.backend.commitRepair(meta, tornMarker, [])
+-    this.states.set(session.header.id, {
+-      meta: { ...meta },
+-      cursor: storedEvents.length,
+-      materialized: true,
+-      owner: session,
+-    })
++    // Bind the live owner BEFORE mutating the artifact, so a cold repair in
++    // another process can never interleave with this session's stream.
++    const lease = await this.holdLease(meta)
++    try {
++      // Truncate-only repair (no closers): the open turn is NOT closed here.
++      if (tornMarker !== undefined) await this.backend.commitRepair(meta, tornMarker, [])
++      this.states.set(session.header.id, {
++        meta: { ...meta },
++        cursor: storedEvents.length,
++        materialized: true,
++        owner: session,
++        revision: await this.backend.readStoredRevision(session.header.id) ?? stored.revision,
++      })
++    } catch (error) {
++      await this.releaseLease(lease)
++      throw error
++    }
+     const suffix = seed.slice(storedEvents.length)
+     if (suffix.length > 0) await this.appendCore(session.header.id, suffix)
+   }

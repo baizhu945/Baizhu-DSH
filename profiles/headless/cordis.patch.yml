@@ -1,0 +1,22 @@
+# 由 home-manager 管理(agent/dsh/dsh.nix)。如需追加自定义 patch 行,
+# 请直接编辑 dsh.nix 中此文件对应的内容(改后 home-manager switch 生效)。
+
+# ── headless-cc-connect.patch → 插件迁移 ────────────────────────────────
+# 禁用内置 headless-startup / headless-runner,改挂两个本地插件:
+#   cc-connect-startup  解析 --session-id/--model/--mode/--jsonl 并提供服务
+#   cc-connect-runner   创建/恢复会话、固定权限旋钮、JSONL 流式输出、
+#                      stdin 审批应答、confirm 模式写/执行询问
+# 行为与原补丁完全一致,且 dsh 源码不再需要 headless-cc-connect.patch。
+- id: headless-startup
+  disabled: true
+
+- id: headless-runner
+  disabled: true
+
+- insert:
+    - id: cc-connect-startup
+      name: './plugins/cc-connect-startup.mjs'
+
+    - id: cc-connect-runner
+      name: './plugins/cc-connect-runner.mjs'
+      inject: [ccConnectStartup]
