@@ -15,7 +15,18 @@ let
     pname = "dsh";
     src = dshSrc;
     fetcherVersion = 4; # 26.11 起 pnpm_11 仅支持 fetcherVersion 4
-    hash = "sha256-oCh1BpS9K+tyzN+x1HXTNHi/D0tirLbuskiX7wyGlBA=";
+
+    # 更新 nix-channel 后 pnpm 11 fetchPnpmDeps 要从 npm registry 拉取全部
+    # 平台可选依赖(1200+ 包);直连 registry.npmjs.org 在大并发下频繁超时
+    # (curl error 23 / UND_ERR_SOCKET)。改用国内镜像并放宽 pnpm 网络参数。
+    prePnpmInstall = ''
+      export NIX_NPM_REGISTRY=https://registry.npmmirror.com
+      pnpm config set fetch-timeout 600000
+      pnpm config set fetch-retries 5
+      pnpm config set network-concurrency 4
+    '';
+
+    hash = "sha256-aySHq0ywTMM5q7YuGHZrV3yQE3bwppgGfWH3wRnHCXk=";
   };
 
   dsh = pkgs.stdenv.mkDerivation {
@@ -94,7 +105,8 @@ in
   imports = [
     ./skills.nix
     ./web-ui.nix
-    ./presets.nix
+    ./presets/dsh-anchored-standard.nix
+    ./presets/dsh-router-standard.nix
   ];
 
   home.packages = [
