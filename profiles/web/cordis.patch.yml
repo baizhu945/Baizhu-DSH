@@ -23,6 +23,18 @@
     - id: approval-tweaks
       name: 'dsh-baizhu-approval'
 
+    # OpenAI 账号登录插件:注册 openai-codex provider(ChatGPT Plus/Pro token
+    # plan),提供 /openai-login、/openai-logout、/openai-status 命令。
+    # 真实文件部署见 dsh.nix home.activation.dshPlugins(不能是符号链接)。
+    - id: openai-codex-account
+      name: './plugins/openai-codex-account.mjs'
+
+    # OpenAI 账号登录的 Web UI 分节(设置 → OpenAI 账号):浏览器半体通过
+    # dsh.client 自动加载,host 半体为空。包文件部署见 dsh.nix
+    # home.activation.dshPlugins(真实拷贝到 web profile node_modules)。
+    - id: openai-account-ui
+      name: 'dsh-openai-account-ui'
+
 # ── dsh-web-ui v0.2.0 全家桶 ────────────────────────────────────────────
 # https://github.com/zhu1090093659/dsh-web-ui/releases/tag/v0.2.0
 # 聚合包自身的 cordis.patch.yml 负责插入全部保留 UI 家族；本地 staging

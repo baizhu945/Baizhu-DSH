@@ -12,8 +12,8 @@ let
   dshPresetSrc = pkgs.fetchFromGitHub {
     owner = "xiaobright";
     repo = "dsh-anchored-standard";
-    rev = "6472c1c9431dcfd9072be23bff781b76fe7146c0";
-    hash = "sha256-R+QCRXtB16fObeVTpz6aXPabGAkWtl/mR+hvW7dNmAw=";
+    rev = "25f21aefaf8ddc414da54d2e581e43740d977c6e";
+    hash = "sha256-0jHUSCLVAeL4tx/zhN208hN1GN2rlP2pN5jevJSrfl4=";
   };
 in
 {

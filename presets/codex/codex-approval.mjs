@@ -9,8 +9,9 @@ export const name = 'codex-approval-boundary'
 export const inject = ['tools', 'permissionPresets']
 
 const ASK_TOOLS = new Set([
-  'exec_command',
-  'write_stdin',
+  // Code Mode itself is only an orchestration boundary. Approval remains on
+  // the authority-bearing nested command/edit calls, exactly as in native mode.
+  'shell_command',
   'apply_patch',
 ])
 

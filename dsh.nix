@@ -194,7 +194,9 @@ in
   home.activation.dshPlugins = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
     run mkdir -p \
       "$HOME/.dsh/profiles/headless/plugins" \
+      "$HOME/.dsh/profiles/web/plugins" \
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval" \
+      "$HOME/.dsh/profiles/web/node_modules/dsh-openai-account-ui" \
       "$HOME/.dsh/profiles/node_modules/@deepseek-ai"
     run install -m 644 ${./profiles/headless/plugins/cc-connect-startup.mjs} \
       "$HOME/.dsh/profiles/headless/plugins/cc-connect-startup.mjs"
@@ -206,6 +208,17 @@ in
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval/index.mjs"
     run install -m 644 ${./profiles/web/node_modules/dsh-baizhu-approval/client.js} \
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval/client.js"
+    run install -m 644 ${./profiles/web/node_modules/dsh-openai-account-ui/package.json} \
+      "$HOME/.dsh/profiles/web/node_modules/dsh-openai-account-ui/package.json"
+    run install -m 644 ${./profiles/web/node_modules/dsh-openai-account-ui/index.mjs} \
+      "$HOME/.dsh/profiles/web/node_modules/dsh-openai-account-ui/index.mjs"
+    run install -m 644 ${./profiles/web/node_modules/dsh-openai-account-ui/client.js} \
+      "$HOME/.dsh/profiles/web/node_modules/dsh-openai-account-ui/client.js"
+
+    # OpenAI 账号登录插件:带 bare import(pi-ai / dsh-llm),符号链接会被 ESM
+    # realpath 到 /nix/store 导致找不到依赖,因此必须真实拷贝到 profile 插件目录。
+    run install -m 644 ${./profiles/web/plugins/openai-codex-account.mjs} \
+      "$HOME/.dsh/profiles/web/plugins/openai-codex-account.mjs"
 
     # Codex preset's PTY backend is shipped in the dsh installation but is not
     # part of the Web bundle's automatic dependency heal set. Keep its three

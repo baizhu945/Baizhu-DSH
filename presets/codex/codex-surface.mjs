@@ -1,25 +1,18 @@
 /**
- * Codex-shaped model surface over dsh capability seams.
+ * Codex-compatible end-tool surface for the dsh Code Mode presentation.
  *
- * This plugin is mounted only by the codex agent preset. It does not replace
- * dsh's host sandbox, approval, filesystem, persistence, skills, or subagent
- * providers. It only gives the model the names and argument shapes used by
- * OpenAI Codex where dsh already has an equivalent capability.
- *
- * Besides the model-facing surface, every tool carries `presentCall` /
- * `presentResult` presentation metadata so the Web UI renders Codex tool
- * calls as readable terminal / diff / plan / ask cards instead of raw JSON
- * argument blobs and raw text dumps. This mirrors how dsh's native tools
- * (bash, fs edit, todo) present themselves and keeps human consumption of
- * the transcript tractable.
+ * The host remains authoritative for sandboxing, approval, filesystem access,
+ * attachments, user interaction, persistence, and subagent providers. This
+ * scoped adapter changes model-facing names and wire shapes only for sessions
+ * selecting the Codex preset.
  */
 const createRequire = process.getBuiltinModule('node:module').createRequire
+const nodePath = process.getBuiltinModule('node:path')
 const dshHome = process.env.DSH_HOME ?? `${process.env.HOME ?? '/home/baizhu945'}/.dsh`
 const requireFromDsh = createRequire(`${dshHome}/profiles/codex-surface.cjs`)
 const toolsEntry = requireFromDsh.resolve('@deepseek-ai/dsh-tools')
 const { defineTool } = await import(toolsEntry)
 
-const sessions = new WeakMap()
 const IMAGE_EXTENSIONS = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -28,6 +21,12 @@ const IMAGE_EXTENSIONS = {
   '.gif': 'image/gif',
 }
 
+const HIDDEN_HOST_SECTIONS = new Set([
+  'harness:identity',
+  'harness:source',
+  'app:web-surface',
+])
+
 const textOutput = {
   schema: {
     type: 'object',
@@ -35,66 +34,6 @@ const textOutput = {
     properties: { text: { type: 'string', required: true } },
   },
   render: (_args, value) => [{ type: 'text', text: value.text }],
-}
-
-/**
- * Terminal presentation helpers shared by `exec_command` and `write_stdin`.
- * The model-facing text carries a trailing marker (mirroring the `[exit code:
- * N]` contract dsh's shell tools use) so a UI can split the body from the
- * exit-status pill at replay time without access to the structured result.
- */
-function renderExecOutput(value) {
-  const markers = []
-  if (value.exit_code !== undefined && value.exit_code !== null) {
-    markers.push(`[exit code: ${value.exit_code}]`)
-  } else if (value.session_id !== undefined && value.session_id !== null) {
-    markers.push(`[session still running; session_id: ${value.session_id}]`)
-  }
-  if (markers.length === 0) return value.output
-  const body = value.output.length > 0 && !value.output.endsWith('\n') ? `${value.output}\n` : value.output
-  return body + markers.join('\n')
-}
-
-/** Split a rendered exec/write_stdin result into its output body and markers. */
-function parseExecOutput(text) {
-  const lines = text.split('\n')
-  const markers = []
-  while (lines.length > 0) {
-    const last = lines[lines.length - 1]
-    const exit = /^\[exit code: (-?\d+)\]$/.exec(last)
-    const session = /^\[session still running; session_id: (.+)\]$/.exec(last)
-    if (exit !== null) {
-      markers.push({ kind: 'exit', exitCode: Number(exit[1]) })
-      lines.pop()
-      continue
-    }
-    if (session !== null) {
-      markers.push({ kind: 'session', sessionId: session[1] })
-      lines.pop()
-      continue
-    }
-    break
-  }
-  return { body: lines.join('\n'), markers }
-}
-
-/** Present a completed exec/write_stdin call as a terminal card. */
-function presentTerminalResult(args, result) {
-  if (result.isError) return undefined
-  const block = result.content.length === 1 ? result.content[0] : undefined
-  if (block === undefined || block.type !== 'text') return undefined
-  const { body, markers } = parseExecOutput(block.text)
-  const exit = markers.find(marker => marker.kind === 'exit')
-  const session = markers.find(marker => marker.kind === 'session')
-  if (exit !== undefined && exit.exitCode !== 0) {
-    return { card: 'terminal', output: body, exitCode: exit.exitCode }
-  }
-  // Clean exit 0 or a still-running session: no error pill, but keep the
-  // session hint in the output so the model-facing fact is not lost to the UI.
-  const output = session !== undefined
-    ? `${body}${body.length > 0 && !body.endsWith('\n') ? '\n' : ''}[session still running; session_id: ${session.sessionId}]`
-    : body
-  return { card: 'terminal', output }
 }
 
 function agentOf(exec) {
@@ -106,21 +45,193 @@ function cwdOf(agent) {
   return agent.session.header.cwd ?? process.cwd()
 }
 
-async function terminalOf(ctx, agent, cwd, signal) {
-  const existing = sessions.get(agent)
-  if (existing !== undefined) return existing
-  const opened = await ctx.terminals.spawn(agent, { type: 'shell', cwd }, signal)
-  const session = { id: opened.sessionId, cwd }
-  sessions.set(agent, session)
-  return session
+function xmlEscape(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;')
 }
 
-function terminalResult(value, sessionId) {
-  const status = value.sessionStatus
-  return {
-    output: value.viewport,
-    ...status.kind === 'exited' ? { exit_code: status.exitCode ?? undefined } : { session_id: sessionId },
+function localDate() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date())
+  const part = type => parts.find(entry => entry.type === type)?.value ?? '00'
+  return `${part('year')}-${part('month')}-${part('day')}`
+}
+
+/** Remove deployment/UI announcements while preserving tool, skill, plan, and Code Mode sections. */
+function registerPromptBoundary(ctx) {
+  ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+    const assembled = await next()
+    return {
+      ...assembled,
+      sections: assembled.sections.filter(section => (
+        !HIDDEN_HOST_SECTIONS.has(section.name)
+        && !section.name.startsWith('plugin:')
+      )),
+    }
+  })
+
+  ctx.systemPrompt.context({
+    name: 'codex:environment',
+    order: -100,
+    text: context => {
+      const agent = context.agent
+      if (agent === undefined) return ''
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+      return [
+        '<environment_context>',
+        `  <cwd>${xmlEscape(cwdOf(agent))}</cwd>`,
+        '  <shell>bash</shell>',
+        `  <current_date>${localDate()}</current_date>`,
+        `  <timezone>${xmlEscape(timezone)}</timezone>`,
+        '</environment_context>',
+      ].join('\n')
+    },
+  })
+}
+
+function shellWorkdir(agent, requested) {
+  const base = cwdOf(agent)
+  if (requested === undefined || requested.length === 0) return base
+  return nodePath.isAbsolute(requested) ? requested : nodePath.resolve(base, requested)
+}
+
+function formatCollectedStream(stream) {
+  const suffix = stream.truncated
+    ? `\n[output truncated; full output: ${stream.spillPath ?? '(unavailable)'}]`
+    : ''
+  return `${stream.text}${suffix}`
+}
+
+function shellOutput(result) {
+  const stdout = formatCollectedStream(result.stdout)
+  const stderr = formatCollectedStream(result.stderr)
+  const chunks = []
+  if (stdout.length > 0) chunks.push(stdout)
+  if (stderr.length > 0) chunks.push(`[stderr]\n${stderr}`)
+  return chunks.length === 0 ? '(no output)' : chunks.join('\n')
+}
+
+function renderShellResult(value) {
+  const markers = []
+  if (value.timed_out) markers.push(`[timed out after ${value.timeout_ms}ms]`)
+  if (value.signal !== null) markers.push(`[killed by signal: ${value.signal}]`)
+  if (value.exit_code !== null) markers.push(`[exit code: ${value.exit_code}]`)
+  return `${value.output}${markers.length > 0 ? `\n${markers.join('\n')}` : ''}`
+}
+
+function parseShellResult(text) {
+  const lines = text.split('\n')
+  let exitCode
+  let signal
+  while (lines.length > 0) {
+    const last = lines.at(-1)
+    const exit = /^\[exit code: (-?\d+)\]$/.exec(last)
+    const killed = /^\[killed by signal: (.+)\]$/.exec(last)
+    if (exit !== null) {
+      exitCode = Number(exit[1])
+      lines.pop()
+      continue
+    }
+    if (killed !== null) {
+      signal = killed[1]
+      lines.pop()
+      continue
+    }
+    break
   }
+  return { output: lines.join('\n'), exitCode, signal }
+}
+
+function presentTerminalResult(result) {
+  if (result.isError) return undefined
+  const block = result.content.length === 1 ? result.content[0] : undefined
+  if (block === undefined || block.type !== 'text') return undefined
+  const parsed = parseShellResult(block.text)
+  return {
+    card: 'terminal',
+    output: parsed.output,
+    ...(parsed.exitCode !== undefined ? { exitCode: parsed.exitCode } : {}),
+    ...(parsed.signal !== undefined ? { signal: parsed.signal } : {}),
+  }
+}
+
+/** Upstream Luna uses a fresh shell_command process rather than a persistent PTY. */
+function registerShellCommand(ctx) {
+  ctx.tools.register(defineTool({
+    name: 'shell_command',
+    description: 'Runs a shell command and returns its output. Always set workdir when it matters; do not use cd unless necessary.',
+    parameters: {
+      command: { type: 'string', required: true, description: 'Shell script to run in the configured Bash execution environment.' },
+      workdir: { type: 'string', description: 'Working directory for the command. Defaults to the turn cwd.' },
+      timeout_ms: { type: 'number', description: 'Maximum command runtime. Defaults to the host shell policy.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          output: { type: 'string', required: true },
+          exit_code: {
+            required: true,
+            oneOf: [{ type: 'integer' }, { type: 'null' }],
+          },
+          signal: {
+            required: true,
+            oneOf: [{ type: 'string' }, { type: 'null' }],
+          },
+          timed_out: { type: 'boolean', required: true },
+          timeout_ms: { type: 'number', required: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderShellResult(value) }],
+      presentationMeta: (_args, value) => ({
+        ...(value.exit_code !== null ? { exitCode: value.exit_code } : {}),
+        ...(value.signal !== null ? { signal: value.signal } : {}),
+      }),
+    },
+    async execute(args, exec) {
+      const agent = agentOf(exec)
+      if (typeof args.command !== 'string' || args.command.trim().length === 0) {
+        throw new Error('invalid command: expected a non-empty string')
+      }
+      if (args.timeout_ms !== undefined && (!Number.isFinite(args.timeout_ms) || args.timeout_ms <= 0)) {
+        throw new Error(`invalid timeout_ms: expected a positive number, got ${String(args.timeout_ms)}`)
+      }
+      const sandboxPolicy = ctx.get('sandboxPolicy')?.resolve({ session: agent.session })
+      const result = await ctx.shell.run(ctx.shell.resolve({
+        command: args.command,
+        workdir: shellWorkdir(agent, args.workdir),
+        ...(args.timeout_ms !== undefined ? { timeoutMs: args.timeout_ms } : {}),
+        signal: exec.signal,
+        ...(sandboxPolicy !== undefined ? { sandboxPolicy } : {}),
+      }))
+      if (result.aborted) throw new Error('tool call aborted')
+      return {
+        output: shellOutput(result),
+        exit_code: result.exitCode,
+        signal: result.signal,
+        timed_out: result.timedOut,
+        timeout_ms: result.timeoutMs,
+      }
+    },
+    presentCall(args) {
+      return {
+        card: 'terminal',
+        title: args.command,
+        ...(args.workdir !== undefined ? { cwd: args.workdir } : {}),
+      }
+    },
+    presentResult(_args, result) {
+      return presentTerminalResult(result)
+    },
+  }))
 }
 
 function patchPath(header) {
@@ -129,8 +240,8 @@ function patchPath(header) {
   return match[1]
 }
 
-function findBlock(lines, needle) {
-  for (let index = 0; index <= lines.length - needle.length; index++) {
+function findBlock(lines, needle, start = 0) {
+  for (let index = start; index <= lines.length - needle.length; index++) {
     if (needle.every((line, offset) => lines[index + offset] === line)) return index
   }
   return -1
@@ -141,6 +252,7 @@ function applyHunks(original, patchLines, path) {
   const lines = original.split('\n')
   if (hadTrailingNewline) lines.pop()
   let cursor = 0
+  let searchFrom = 0
   let changed = false
   while (cursor < patchLines.length) {
     if (!patchLines[cursor].startsWith('@@')) {
@@ -151,19 +263,17 @@ function applyHunks(original, patchLines, path) {
     const hunk = []
     while (cursor < patchLines.length && !patchLines[cursor].startsWith('@@')) {
       const line = patchLines[cursor]
-      if (line === '*** End of File') {
-        // Trailing EOF marker terminates the hunk body; treat as context end.
-        break
-      }
+      if (line === '*** End of File') break
       if (![' ', '+', '-'].includes(line[0])) throw new Error(`invalid apply_patch hunk for ${path}`)
       hunk.push(line)
       cursor++
     }
     const oldLines = hunk.filter(line => line[0] !== '+').map(line => line.slice(1))
     const newLines = hunk.filter(line => line[0] !== '-').map(line => line.slice(1))
-    const index = findBlock(lines, oldLines)
+    const index = findBlock(lines, oldLines, searchFrom)
     if (index < 0) throw new Error(`apply_patch context did not match ${path}`)
     lines.splice(index, oldLines.length, ...newLines)
+    searchFrom = index + newLines.length
     changed = true
   }
   if (!changed) throw new Error(`apply_patch contained no hunks for ${path}`)
@@ -183,7 +293,10 @@ async function writePatchedFile(ctx, exec, path, content, expectedVersion) {
 }
 
 async function applyPatch(ctx, exec, patch) {
-  const lines = patch.replace(/^\*\*\* Begin Patch\s*\n?/, '').replace(/\n?\*\*\* End Patch\s*$/, '').split('\n')
+  const lines = patch
+    .replace(/^\*\*\* Begin Patch\s*\n?/, '')
+    .replace(/\n?\*\*\* End Patch\s*$/, '')
+    .split('\n')
   const results = []
   const diffs = []
   let cursor = 0
@@ -194,9 +307,11 @@ async function applyPatch(ctx, exec, patch) {
     }
     const header = lines[cursor]
     if (header === '*** End of File') {
-      // Optional trailing marker; skip it and continue with any following file.
       cursor++
       continue
+    }
+    if (header.startsWith('*** Move to:')) {
+      throw new Error('apply_patch move is unavailable because the host filesystem seam has no policy-preserving rename operation')
     }
     const path = patchPath(header)
     cursor++
@@ -209,7 +324,7 @@ async function applyPatch(ctx, exec, patch) {
       continue
     }
     if (header.startsWith('*** Delete File:')) {
-      throw new Error(`apply_patch delete is not supported by the dsh filesystem seam: ${path}`)
+      throw new Error('apply_patch delete is unavailable because the host filesystem seam has no policy-preserving delete operation')
     }
     const agent = agentOf(exec)
     const target = await ctx.fs.resolve(path, { cwd: cwdOf(agent), signal: exec.signal })
@@ -217,7 +332,7 @@ async function applyPatch(ctx, exec, patch) {
     if (info === undefined || info.type !== 'file') throw new Error(`apply_patch target is not a regular file: ${path}`)
     const original = await ctx.fs.readText(target, exec.signal)
     ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec)
-    const next = applyHunks(original, body, path)
+    const next = applyHunks(original, body, target.displayPath)
     results.push(await writePatchedFile(ctx, exec, path, next, info.version))
     diffs.push({ path: target.displayPath, oldText: original, newText: next })
   }
@@ -225,96 +340,90 @@ async function applyPatch(ctx, exec, patch) {
   return { files: results, diffs }
 }
 
-function registerExecCommand(ctx) {
+function registerApplyPatch(ctx) {
   ctx.tools.register(defineTool({
-    name: 'exec_command',
-    description: 'Runs a command in a persistent PTY, returning output or a session id for ongoing interaction.',
-    parameters: {
-      cmd: { type: 'string', required: true, description: 'Shell command to execute.' },
-      workdir: { type: 'string', description: 'Working directory for the command. Defaults to the turn cwd.' },
-      tty: { type: 'boolean', description: 'True allocates a PTY for the command; false or omitted uses plain pipes.' },
-      yield_time_ms: { type: 'number', description: 'Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.' },
-      max_output_tokens: { type: 'number', description: 'Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.' },
-      shell: { type: 'string', description: 'Shell binary to launch. Defaults to the user\'s default shell.' },
-      login: { type: 'boolean', description: 'True runs the shell with -l/-i semantics; false disables them.' },
-    },
+    name: 'apply_patch',
+    description: 'Apply a focused text patch. Pass standard *** Begin Patch / *** End Patch text in patch. Add and Update are supported; policy-preserving Delete and Move are unavailable on this host filesystem seam.',
+    parameters: { patch: { type: 'string', required: true, description: 'Free-form patch text.' } },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          output: { type: 'string', required: true },
-          exit_code: { type: 'integer' },
-          session_id: { type: 'string' },
+          files: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                path: { type: 'string', required: true },
+                operation: { type: 'string', required: true },
+              },
+            },
+          },
+          diffs: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                path: { type: 'string', required: true },
+                oldText: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
+                newText: { type: 'string', required: true },
+              },
+            },
+          },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: renderExecOutput(value) }],
-      presentationMeta: (_args, value) => ({
-        exitCode: value.exit_code ?? undefined,
-        sessionId: value.session_id ?? undefined,
-      }),
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.files.map(file => `${file.operation} ${file.path}`).join('\n'),
+      }],
+      presentationMeta: (_args, value) => ({ diffs: value.diffs }),
     },
     async execute(args, exec) {
-      const agent = agentOf(exec)
-      const session = await terminalOf(ctx, agent, args.workdir ?? cwdOf(agent), exec.signal)
-      const operation = ctx.terminals.startSend(agent, session.id, {
-        text: args.cmd,
-        submit: true,
-        signal: exec.signal,
-      })
-      return terminalResult(await operation.done, session.id)
+      return applyPatch(ctx, exec, args.patch)
     },
     presentCall(args) {
+      const headers = args.patch
+        .split('\n')
+        .filter(line => line.startsWith('*** '))
+        .filter(line => line !== '*** Begin Patch' && line !== '*** End Patch')
       return {
-        card: 'terminal',
-        title: args.cmd,
-        ...args.workdir !== undefined ? { cwd: args.workdir } : {},
+        card: 'generic',
+        title: headers.length > 0 ? `Apply patch — ${headers[0]}` : 'Apply patch',
+        kind: 'edit',
+        content: headers.length > 0 ? [{ type: 'text', text: headers.join('\n') }] : undefined,
       }
     },
-    presentResult(args, result) {
-      return presentTerminalResult(args, result)
+    presentResult(_args, result) {
+      if (result.isError) return undefined
+      const diffs = narrowDiffs(result.meta)
+      return diffs === undefined ? undefined : { card: 'diff', title: 'Patch applied', diffs }
     },
   }))
 }
 
-function registerWriteStdin(ctx) {
-  ctx.tools.register(defineTool({
-    name: 'write_stdin',
-    description: 'Writes characters to an existing persistent PTY session and returns recent output.',
-    parameters: {
-      session_id: { type: 'string', required: true, description: 'Identifier of the running exec session.' },
-      chars: { type: 'string', description: 'Bytes to write to stdin. Defaults to empty, which polls without writing.' },
-      yield_time_ms: { type: 'number', description: 'Wait before yielding output. Non-empty writes default to 250 ms; empty polls wait a few seconds.' },
-      max_output_tokens: { type: 'number', description: 'Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.' },
-    },
-    output: textOutput,
-    async execute(args, exec) {
-      const agent = agentOf(exec)
-      const operation = ctx.terminals.startSend(agent, args.session_id, {
-        text: args.chars ?? '',
-        submit: false,
-        signal: exec.signal,
-      })
-      return { text: (await operation.done).viewport }
-    },
-    presentCall(args) {
-      return {
-        card: 'terminal',
-        title: args.chars || '(send input)',
-        description: `Terminal session ${args.session_id}`,
-      }
-    },
-    presentResult(_args, result) {
-      return presentTerminalResult(_args, result)
-    },
-  }))
+function narrowDiffs(meta) {
+  if (typeof meta !== 'object' || meta === null) return undefined
+  const diffs = meta.diffs
+  if (!Array.isArray(diffs) || diffs.length === 0) return undefined
+  const valid = diffs.every(diff => (
+    typeof diff === 'object' && diff !== null
+    && typeof diff.path === 'string'
+    && typeof diff.newText === 'string'
+    && (diff.oldText === null || typeof diff.oldText === 'string')
+  ))
+  return valid ? diffs : undefined
 }
 
 function registerViewImage(ctx) {
   ctx.tools.register(defineTool({
     name: 'view_image',
-    description: 'View a local image file from the filesystem when visual inspection is needed.',
-    parameters: { path: { type: 'string', required: true, description: 'Local image path.' } },
+    description: 'View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.',
+    parameters: { path: { type: 'string', required: true, description: 'Local filesystem path to an image file.' } },
     output: {
       schema: {
         type: 'object',
@@ -343,7 +452,8 @@ function registerViewImage(ctx) {
     },
     async execute(args, exec) {
       const agent = agentOf(exec)
-      const mediaType = IMAGE_EXTENSIONS[args.path.slice(args.path.lastIndexOf('.')).toLowerCase()]
+      const extension = args.path.slice(args.path.lastIndexOf('.')).toLowerCase()
+      const mediaType = IMAGE_EXTENSIONS[extension]
       if (mediaType === undefined) throw new Error(`view_image only accepts PNG/JPEG/WebP/GIF paths: ${args.path}`)
       const attachments = ctx.get('attachments')
       if (attachments === undefined) throw new Error('view_image requires a durable attachment service')
@@ -360,16 +470,8 @@ function registerViewImage(ctx) {
     },
     presentResult(args, result) {
       if (result.isError) return undefined
-      const image = result.content.find(block => block.type === 'image')
-      const content = []
-      const body = result.content.find(block => block.type === 'text')
-      if (body !== undefined) content.push(body)
-      if (image !== undefined) content.push(image)
-      return {
-        card: 'generic',
-        title: `View image ${args.path}`,
-        content: content.length > 0 ? content : undefined,
-      }
+      const content = result.content.filter(block => block.type === 'text' || block.type === 'image')
+      return { card: 'generic', title: `View image ${args.path}`, content: content.length > 0 ? content : undefined }
     },
   }))
 }
@@ -377,7 +479,7 @@ function registerViewImage(ctx) {
 function registerPlan(ctx) {
   ctx.tools.register(defineTool({
     name: 'update_plan',
-    description: 'Updates the task plan. Provide an optional explanation and a list of plan items, each with a step and status. At most one step can be in_progress at a time.',
+    description: 'Updates the task plan. Provide an optional explanation and a list of plan items. At most one step can be in_progress at a time.',
     parameters: {
       explanation: { type: 'string', description: 'Optional explanation for this plan update.' },
       plan: {
@@ -387,17 +489,23 @@ function registerPlan(ctx) {
           type: 'object',
           additionalProperties: false,
           properties: {
-            step: { type: 'string', required: true },
-            status: { type: 'string', required: true, enum: ['pending', 'in_progress', 'completed'] },
+            step: { type: 'string', required: true, description: 'Task step text.' },
+            status: { type: 'string', required: true, enum: ['pending', 'in_progress', 'completed'], description: 'Step status.' },
           },
         },
       },
     },
     output: textOutput,
     async execute(args, exec) {
+      const agent = agentOf(exec)
+      if (ctx.get('planMode')?.get(agent)?.active === true) {
+        throw new Error('update_plan is a TODO/checklist tool and is not allowed in Plan mode')
+      }
+      const active = args.plan.filter(item => item.status === 'in_progress')
+      if (active.length > 1) throw new Error('at most one plan item may be in_progress')
       const todos = args.plan.map(item => ({ content: item.step, status: item.status }))
-      agentOf(exec).session.append('todo/write', { todos })
-      return { text: `Plan updated: ${todos.length} steps.` }
+      agent.session.append('todo/write', { todos })
+      return { text: 'Plan updated' }
     },
     presentCall(args) {
       const active = args.plan.find(item => item.status === 'in_progress')
@@ -405,20 +513,12 @@ function registerPlan(ctx) {
         card: 'generic',
         title: active ? `Update plan — ${active.step}` : 'Update plan',
         kind: 'other',
-        content: [{
-          type: 'text',
-          text: args.plan.map(item => `- [${item.status}] ${item.step}`).join('\n'),
-        }],
+        content: [{ type: 'text', text: args.plan.map(item => `- [${item.status}] ${item.step}`).join('\n') }],
       }
     },
-    presentResult(args, result) {
+    presentResult(_args, result) {
       if (result.isError) return undefined
-      const block = result.content.length === 1 ? result.content[0] : undefined
-      return {
-        card: 'generic',
-        title: 'Plan updated',
-        content: block !== undefined ? [block] : [{ type: 'text', text: args.plan.map(item => `- [${item.status}] ${item.step}`).join('\n') }],
-      }
+      return { card: 'generic', title: 'Plan updated', content: result.content }
     },
   }))
 }
@@ -431,6 +531,7 @@ function registerQuestions(ctx) {
       questions: {
         type: 'array',
         required: true,
+        description: 'Questions to show the user. Prefer 1 and do not exceed 3.',
         items: {
           type: 'object',
           additionalProperties: false,
@@ -441,7 +542,7 @@ function registerQuestions(ctx) {
             options: {
               type: 'array',
               required: true,
-              description: 'Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with "(Recommended)". Do not include an "Other" option; the client adds it automatically.',
+              description: 'Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with "(Recommended)". Do not include an Other option.',
               items: {
                 type: 'object',
                 additionalProperties: false,
@@ -458,7 +559,15 @@ function registerQuestions(ctx) {
     output: textOutput,
     async execute(args, exec) {
       const agent = agentOf(exec)
-      if (ctx.get('planMode')?.get(agent).active !== true) throw new Error('request_user_input is only available in Plan mode')
+      if (ctx.get('planMode')?.get(agent)?.active !== true) {
+        throw new Error('request_user_input is unavailable in Default mode')
+      }
+      if (args.questions.length < 1 || args.questions.length > 3) {
+        throw new Error('request_user_input requires one to three questions')
+      }
+      if (args.questions.some(question => question.options.length < 2 || question.options.length > 3)) {
+        throw new Error('request_user_input requires two to three options for every question')
+      }
       const value = await ctx.userQuestions.ask({ questions: args.questions, agent, signal: exec.signal })
       return { text: JSON.stringify(value) }
     },
@@ -467,278 +576,271 @@ function registerQuestions(ctx) {
         card: 'generic',
         title: `Ask user${args.questions.length > 1 ? ` (${args.questions.length} questions)` : ''}`,
         kind: 'other',
-        content: args.questions.map(q => ({
+        content: args.questions.map(question => ({
           type: 'text',
-          text: `**${q.header}** — ${q.question}\n  ${q.options.map(o => o.label).join(' / ')}`,
+          text: `**${question.header}** — ${question.question}\n  ${question.options.map(option => option.label).join(' / ')}`,
         })),
       }
     },
-    presentResult(args, result) {
+    presentResult(_args, result) {
       if (result.isError) return undefined
-      const block = result.content.length === 1 ? result.content[0] : undefined
-      return {
-        card: 'generic',
-        title: 'User answered',
-        content: block !== undefined ? [block] : undefined,
-      }
+      return { card: 'generic', title: 'User answered', content: result.content }
     },
   }))
-}
-
-function registerApplyPatch(ctx) {
-  ctx.tools.register(defineTool({
-    name: 'apply_patch',
-    description: 'Apply a patch to edit files. Use the standard *** Begin Patch / *** End Patch format with *** Add File / *** Update File / *** Delete File headers.',
-    parameters: { patch: { type: 'string', required: true, description: 'Free-form patch text.' } },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          files: {
-            type: 'array',
-            required: true,
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                path: { type: 'string', required: true },
-                operation: { type: 'string', required: true },
-              },
-            },
-          },
-          diffs: {
-            type: 'array',
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                path: { type: 'string', required: true },
-                oldText: { oneOf: [{ type: 'string' }, { type: 'null' }] },
-                newText: { type: 'string', required: true },
-              },
-            },
-          },
-        },
-      },
-      render: (_args, value) => [{
-        type: 'text',
-        text: value.files.map(file => `${file.operation} ${file.path}`).join('\n'),
-      }],
-      presentationMeta: (_args, value) => ({ diffs: value.diffs ?? [] }),
-    },
-    async execute(args, exec) {
-      const value = await applyPatch(ctx, exec, args.patch)
-      return { files: value.files, diffs: value.diffs }
-    },
-    presentCall(args) {
-      // Show the first file header lines as a readable preview of what will change.
-      const headers = args.patch
-        .split('\n')
-        .filter(line => line.startsWith('*** '))
-        .filter(line => line !== '*** Begin Patch' && line !== '*** End Patch')
-      return {
-        card: 'generic',
-        title: headers.length > 0 ? `Apply patch — ${headers[0]}` : 'Apply patch',
-        kind: 'edit',
-        content: headers.length > 0 ? [{ type: 'text', text: headers.join('\n') }] : undefined,
-      }
-    },
-    presentResult(args, result) {
-      if (result.isError) return undefined
-      const diffs = narrowDiffs(result.meta)
-      if (diffs === undefined) return undefined
-      return { card: 'diff', title: 'Patch applied', diffs }
-    },
-  }))
-}
-
-/** Narrow an opaque `presentationMeta` payload to valid FileDiff objects. */
-function narrowDiffs(meta) {
-  if (typeof meta !== 'object' || meta === null) return undefined
-  const diffs = meta.diffs
-  if (!Array.isArray(diffs) || diffs.length === 0) return undefined
-  const valid = diffs.every(diff =>
-    typeof diff === 'object' && diff !== null
-    && typeof diff.path === 'string'
-    && typeof diff.newText === 'string'
-    && (diff.oldText === null || typeof diff.oldText === 'string')
-  )
-  return valid ? diffs : undefined
 }
 
 function registerCurrentTime(ctx) {
   ctx.tools.register(defineTool({
-    name: 'current_time',
+    name: 'clock__curr_time',
     description: 'Return the current time in UTC.',
     parameters: {},
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: {
-          current_time: { type: 'string', required: true },
-        },
+        properties: { current_time: { type: 'string', required: true } },
       },
       render: (_args, value) => [{ type: 'text', text: value.current_time }],
     },
-    async execute(_args, exec) {
+    async execute() {
       const now = new Date()
       const pad = number => String(number).padStart(2, '0')
-      const current_time = `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())} UTC`
-      return { current_time }
-    },
-    presentCall() {
-      return { card: 'generic', title: 'Read current UTC time', kind: 'read' }
-    },
-    presentResult(_args, result) {
-      if (result.isError) return undefined
-      const block = result.content.length === 1 ? result.content[0] : undefined
       return {
-        card: 'generic',
-        title: 'Current UTC time',
-        content: block !== undefined ? [block] : undefined,
+        current_time: `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())} UTC`,
       }
     },
   }))
 }
 
-function registerAgents(ctx) {
-  const sourceFor = parent => ({ kind: 'coordinator', form: 'relay', senderSessionId: parent.session.id })
-  const start = async (args, exec) => {
-    const parent = agentOf(exec)
-    const child = await ctx.subagents.startContinuable({
-      provider: 'spawn',
-      label: args.task_name,
-      request: { parent, prompt: [{ type: 'text', text: args.message }] },
-      signal: exec.signal,
-    })
-    return { text: `spawned agent ${child.childId}` }
+function agentStatusSchema() {
+  return {
+    oneOf: [
+      { type: 'string', enum: ['pending_init', 'running', 'interrupted', 'shutdown', 'not_found'] },
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: { completed: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] } },
+      },
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: { errored: { type: 'string', required: true } },
+      },
+    ],
   }
+}
+
+function statusOf(ctx, id) {
+  const child = ctx.agents.get(id)
+  if (child === undefined) return 'not_found'
+  return child.status === 'running' ? 'running' : { completed: null }
+}
+
+function sourceFor(parent) {
+  return { kind: 'coordinator', form: 'relay', senderSessionId: parent.session.id }
+}
+
+async function directChildren(ctx, parent, signal) {
+  const rows = await ctx.subagents.listChildren(parent.session.id, signal)
+  return rows.filter(row => row.kind === 'child' && row.mode === 'continuable')
+}
+
+function renderJsonOutput() {
+  return {
+    render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+  }
+}
+
+async function waitForIdle(ctx, target, signal) {
+  const child = ctx.agents.get(target)
+  if (child === undefined || child.status === 'idle') return target
+  await child.whenIdle()
+  if (signal.aborted) throw new Error('tool call aborted')
+  return target
+}
+
+function timeoutPromise(timeoutMs, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(undefined), timeoutMs)
+    const abort = () => {
+      clearTimeout(timer)
+      reject(new Error('tool call aborted'))
+    }
+    if (signal.aborted) abort()
+    else signal.addEventListener('abort', abort, { once: true })
+  })
+}
+
+/** Luna's upstream catalog selects the V1 collaboration surface. */
+function registerAgents(ctx) {
   ctx.tools.register(defineTool({
     name: 'spawn_agent',
-    description: 'Spawn a background sub-agent for a concrete bounded task.',
+    description: 'Spawn a background agent for a concrete bounded task. Spawned agents inherit the current model by default.',
     parameters: {
-      task_name: { type: 'string', required: true, description: 'Task name.' },
-      message: { type: 'string', required: true, description: 'Task instructions.' },
+      message: { type: 'string', required: true, description: 'Initial plain-text task for the new agent.' },
+      fork_context: { type: 'boolean', description: 'True forks completed parent history; false or omitted starts from only the task.' },
+      model: { type: 'string', description: 'Optional model override for the new agent.' },
     },
-    output: textOutput,
-    execute: start,
-    presentCall(args) {
-      return { card: 'generic', title: `Spawn agent — ${args.task_name}`, kind: 'other', content: [{ type: 'text', text: args.message }] }
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          agent_id: { type: 'string', required: true },
+          nickname: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
+        },
+      },
+      ...renderJsonOutput('Agent spawned'),
     },
-    presentResult(_args, result) {
-      if (result.isError) return undefined
-      const block = result.content.length === 1 ? result.content[0] : undefined
-      return { card: 'generic', title: 'Agent spawned', content: block !== undefined ? [block] : undefined }
+    async execute(args, exec) {
+      const parent = agentOf(exec)
+      const provider = args.fork_context === true ? 'fork' : 'spawn'
+      if (!ctx.subagents.list().includes(provider)) throw new Error(`subagent provider is unavailable: ${provider}`)
+      const child = await ctx.subagents.startContinuable({
+        provider,
+        label: args.message.trim().slice(0, 80) || 'subagent',
+        request: {
+          parent,
+          prompt: [{ type: 'text', text: args.message }],
+          ...(args.model !== undefined ? {
+            agentOptions: { model: args.model },
+          } : {}),
+        },
+        signal: exec.signal,
+      })
+      return { agent_id: child.childId, nickname: null }
     },
   }))
+
   ctx.tools.register(defineTool({
     name: 'send_input',
-    description: 'Send a message to an existing sub-agent.',
+    description: 'Send a message to an existing agent. Use interrupt=true to redirect its current work immediately.',
     parameters: {
-      target: { type: 'string', required: true, description: 'Agent id.' },
-      message: { type: 'string', required: true, description: 'Message text.' },
+      target: { type: 'string', required: true, description: 'Agent id to message (from spawn_agent).' },
+      message: { type: 'string', required: true, description: 'Plain-text message to send to the agent.' },
+      interrupt: { type: 'boolean', description: 'True interrupts the current turn before queueing this message.' },
     },
-    output: textOutput,
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { submission_id: { type: 'string', required: true } },
+      },
+      ...renderJsonOutput('Input queued'),
+    },
     async execute(args, exec) {
       const parent = agentOf(exec)
-      await ctx.subagents.followup(parent, args.target, [{ type: 'text', text: args.message }], { source: sourceFor(parent), signal: exec.signal })
-      return { text: `message queued for ${args.target}` }
-    },
-    presentCall(args) {
-      return { card: 'generic', title: `Send input to ${args.target}`, kind: 'other', content: [{ type: 'text', text: args.message }] }
-    },
-    presentResult(_args, result) {
-      if (result.isError) return undefined
-      const block = result.content.length === 1 ? result.content[0] : undefined
-      return { card: 'generic', title: 'Input queued', content: block !== undefined ? [block] : undefined }
+      if (args.interrupt === true) {
+        ctx.subagents.interrupt(args.target, { kind: 'ancestor', agent: parent })
+      }
+      const submissionId = await ctx.subagents.followup(
+        parent,
+        args.target,
+        [{ type: 'text', text: args.message }],
+        { source: sourceFor(parent), signal: exec.signal },
+      )
+      return { submission_id: submissionId }
     },
   }))
+
   ctx.tools.register(defineTool({
     name: 'resume_agent',
-    description: 'Resume an existing sub-agent with a follow-up task.',
-    parameters: {
-      target: { type: 'string', required: true, description: 'Agent id.' },
-      message: { type: 'string', required: true, description: 'Follow-up task.' },
+    description: 'Make a previously created agent available for later send_input calls. dsh cold-resumes it automatically when input is sent.',
+    parameters: { id: { type: 'string', required: true, description: 'Agent id to resume.' } },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { status: { ...agentStatusSchema(), required: true } },
+      },
+      ...renderJsonOutput('Agent ready'),
     },
-    output: textOutput,
     async execute(args, exec) {
       const parent = agentOf(exec)
-      await ctx.subagents.followup(parent, args.target, [{ type: 'text', text: args.message }], { source: sourceFor(parent), signal: exec.signal })
-      return { text: `resumed agent ${args.target}` }
-    },
-    presentCall(args) {
-      return { card: 'generic', title: `Resume ${args.target}`, kind: 'other', content: [{ type: 'text', text: args.message }] }
-    },
-    presentResult(_args, result) {
-      if (result.isError) return undefined
-      const block = result.content.length === 1 ? result.content[0] : undefined
-      return { card: 'generic', title: 'Agent resumed', content: block !== undefined ? [block] : undefined }
+      const rows = await directChildren(ctx, parent, exec.signal)
+      if (!rows.some(row => row.id === args.id)) return { status: 'not_found' }
+      const live = ctx.agents.get(args.id)
+      return { status: live?.status === 'running' ? 'running' : { completed: null } }
     },
   }))
-  ctx.tools.register(defineTool({
-    name: 'interrupt_agent',
-    description: 'Interrupt a sub-agent current turn.',
-    parameters: { target: { type: 'string', required: true, description: 'Agent id.' } },
-    output: textOutput,
-    async execute(args, exec) {
-      ctx.subagents.interrupt(args.target, { kind: 'ancestor', agent: agentOf(exec) })
-      return { text: `interrupt requested for ${args.target}` }
-    },
-    presentCall(args) {
-      return { card: 'generic', title: `Interrupt ${args.target}`, kind: 'other' }
-    },
-    presentResult(_args, result) {
-      if (result.isError) return undefined
-      const block = result.content.length === 1 ? result.content[0] : undefined
-      return { card: 'generic', title: 'Interrupt requested', content: block !== undefined ? [block] : undefined }
-    },
-  }))
-  ctx.tools.register(defineTool({
-    name: 'list_agents',
-    description: 'List active sub-agents.',
-    parameters: {},
-    output: textOutput,
-    async execute(_args, exec) {
-      const rows = await ctx.subagents.listChildren(agentOf(exec).session.id, exec.signal)
-      return { text: rows.length === 0 ? '(no subagents)' : rows.map(row => `${row.id} [${row.status}] — ${row.label}`).join('\n') }
-    },
-    presentCall() {
-      return { card: 'generic', title: 'List sub-agents', kind: 'other' }
-    },
-    presentResult(_args, result) {
-      if (result.isError) return undefined
-      const block = result.content.length === 1 ? result.content[0] : undefined
-      return { card: 'generic', title: 'Sub-agents', content: block !== undefined ? [block] : undefined }
-    },
-  }))
+
   ctx.tools.register(defineTool({
     name: 'wait_agent',
-    description: 'Inspect sub-agent status; use this when waiting for delegated work.',
-    parameters: { ids: { type: 'array', items: { type: 'string' } } },
-    output: textOutput,
-    async execute(_args, exec) {
-      const rows = await ctx.subagents.listChildren(agentOf(exec).session.id, exec.signal)
-      return { text: rows.length === 0 ? '(no subagents)' : rows.map(row => `${row.id} [${row.status}] — ${row.label}`).join('\n') }
+    description: 'Wait for agents to become idle. Returns empty status on timeout; completion content also arrives through the runtime settlement notice.',
+    parameters: {
+      targets: { type: 'array', required: true, items: { type: 'string' }, description: 'Agent ids to wait on. Multiple ids wait for whichever becomes idle first.' },
+      timeout_ms: { type: 'number', description: 'Timeout in milliseconds. Defaults to 30000; maximum 3600000.' },
     },
-    presentCall() {
-      return { card: 'generic', title: 'Wait for sub-agents', kind: 'other' }
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          status: {
+            type: 'object',
+            required: true,
+            additionalProperties: true,
+          },
+          timed_out: { type: 'boolean', required: true },
+        },
+      },
+      ...renderJsonOutput('Agent status'),
     },
-    presentResult(_args, result) {
-      if (result.isError) return undefined
-      const block = result.content.length === 1 ? result.content[0] : undefined
-      return { card: 'generic', title: 'Sub-agent status', content: block !== undefined ? [block] : undefined }
+    async execute(args, exec) {
+      const parent = agentOf(exec)
+      if (args.targets.length === 0) throw new Error('wait_agent requires at least one target')
+      const timeoutMs = Math.min(3_600_000, Math.max(0, args.timeout_ms ?? 30_000))
+      const rows = await directChildren(ctx, parent, exec.signal)
+      const known = new Set(rows.map(row => row.id))
+      const unknown = args.targets.filter(target => !known.has(target))
+      if (unknown.length > 0) {
+        return { status: Object.fromEntries(unknown.map(target => [target, 'not_found'])), timed_out: false }
+      }
+      const winner = await Promise.race([
+        ...args.targets.map(target => waitForIdle(ctx, target, exec.signal)),
+        timeoutPromise(timeoutMs, exec.signal),
+      ])
+      if (winner === undefined) return { status: {}, timed_out: true }
+      return { status: { [winner]: statusOf(ctx, winner) }, timed_out: false }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'close_agent',
+    description: 'Stop an agent current turn when it is no longer needed. Its durable session remains available for an explicit later follow-up.',
+    parameters: { target: { type: 'string', required: true, description: 'Agent id to stop.' } },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { previous_status: { ...agentStatusSchema(), required: true } },
+      },
+      ...renderJsonOutput('Agent stopped'),
+    },
+    async execute(args, exec) {
+      const parent = agentOf(exec)
+      const previousStatus = statusOf(ctx, args.target)
+      ctx.subagents.interrupt(args.target, { kind: 'ancestor', agent: parent })
+      return { previous_status: previousStatus }
     },
   }))
 }
 
 export const name = 'codex-surface'
-export const inject = ['tools', 'terminals', 'userQuestions', 'subagents', 'fs', 'attachments']
+export const inject = [
+  'tools',
+  'shell',
+  'userQuestions',
+  'subagents',
+  'agents',
+  'fs',
+  'attachments',
+  'systemPrompt',
+]
 
 export function apply(ctx) {
-  registerExecCommand(ctx)
-  registerWriteStdin(ctx)
+  registerPromptBoundary(ctx)
+  registerShellCommand(ctx)
   registerApplyPatch(ctx)
   registerViewImage(ctx)
   registerPlan(ctx)
