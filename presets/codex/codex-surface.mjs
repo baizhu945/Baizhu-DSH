@@ -12,6 +12,7 @@ const dshHome = process.env.DSH_HOME ?? `${process.env.HOME ?? '/home/baizhu945'
 const requireFromDsh = createRequire(`${dshHome}/profiles/codex-surface.cjs`)
 const toolsEntry = requireFromDsh.resolve('@deepseek-ai/dsh-tools')
 const { defineTool } = await import(toolsEntry)
+const { structuredPatch } = requireFromDsh('diff')
 
 const IMAGE_EXTENSIONS = {
   '.png': 'image/png',
@@ -280,6 +281,86 @@ function applyHunks(original, patchLines, path) {
   return lines.join('\n') + (hadTrailingNewline ? '\n' : '')
 }
 
+/** Match dsh-tool-fs: one three-line-context FileDiff per applied hunk. */
+function computeHunkDiffs(path, before, after) {
+  const patch = structuredPatch('', '', before, after, undefined, undefined, { context: 3 })
+  const diffs = []
+  for (const hunk of patch.hunks) {
+    const oldLines = []
+    const newLines = []
+    for (const line of hunk.lines) {
+      if (line.startsWith('\\')) continue
+      const text = line.slice(1)
+      if (line.startsWith('-')) oldLines.push(text)
+      else if (line.startsWith('+')) newLines.push(text)
+      else {
+        oldLines.push(text)
+        newLines.push(text)
+      }
+    }
+    diffs.push({
+      path,
+      oldText: oldLines.length > 0 ? oldLines.join('\n') : null,
+      newText: newLines.join('\n'),
+    })
+  }
+  return diffs
+}
+
+/** Build a pure approval-time preview from the patch text itself. */
+function previewPatchDiffs(patch) {
+  const lines = patch
+    .replace(/^\*\*\* Begin Patch\s*\n?/, '')
+    .replace(/\n?\*\*\* End Patch\s*$/, '')
+    .split('\n')
+  const diffs = []
+  let cursor = 0
+  while (cursor < lines.length) {
+    const header = lines[cursor]
+    if (!header.startsWith('*** ')) {
+      cursor++
+      continue
+    }
+    if (header === '*** End of File' || header.startsWith('*** Move to:')) {
+      cursor++
+      continue
+    }
+    const path = patchPath(header)
+    cursor++
+    const body = []
+    while (cursor < lines.length && !lines[cursor].startsWith('*** ')) body.push(lines[cursor++])
+    if (header.startsWith('*** Add File:')) {
+      const newText = body.filter(line => line.startsWith('+')).map(line => line.slice(1)).join('\n') + '\n'
+      diffs.push({ path, oldText: null, newText })
+      continue
+    }
+    if (header.startsWith('*** Delete File:')) continue
+    let hunkCursor = 0
+    while (hunkCursor < body.length) {
+      if (!body[hunkCursor].startsWith('@@')) {
+        hunkCursor++
+        continue
+      }
+      hunkCursor++
+      const oldLines = []
+      const newLines = []
+      while (hunkCursor < body.length && !body[hunkCursor].startsWith('@@')) {
+        const line = body[hunkCursor++]
+        if (![' ', '+', '-'].includes(line[0])) continue
+        const text = line.slice(1)
+        if (line[0] !== '+') oldLines.push(text)
+        if (line[0] !== '-') newLines.push(text)
+      }
+      diffs.push({
+        path,
+        oldText: oldLines.length > 0 ? oldLines.join('\n') : null,
+        newText: newLines.join('\n'),
+      })
+    }
+  }
+  return diffs
+}
+
 async function writePatchedFile(ctx, exec, path, content, expectedVersion) {
   const agent = agentOf(exec)
   const target = await ctx.fs.resolve(path, { cwd: cwdOf(agent), signal: exec.signal })
@@ -334,7 +415,7 @@ async function applyPatch(ctx, exec, patch) {
     ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec)
     const next = applyHunks(original, body, target.displayPath)
     results.push(await writePatchedFile(ctx, exec, path, next, info.version))
-    diffs.push({ path: target.displayPath, oldText: original, newText: next })
+    diffs.push(...computeHunkDiffs(target.displayPath, original, next))
   }
   if (results.length === 0) throw new Error('apply_patch contained no file operations')
   return { files: results, diffs }
@@ -387,15 +468,14 @@ function registerApplyPatch(ctx) {
       return applyPatch(ctx, exec, args.patch)
     },
     presentCall(args) {
-      const headers = args.patch
-        .split('\n')
-        .filter(line => line.startsWith('*** '))
-        .filter(line => line !== '*** Begin Patch' && line !== '*** End Patch')
+      const diffs = previewPatchDiffs(args.patch)
+      if (diffs.length === 0) return { card: 'generic', title: 'Apply patch', kind: 'edit' }
+      const locations = [...new Set(diffs.map(diff => diff.path))].map(path => ({ path }))
       return {
-        card: 'generic',
-        title: headers.length > 0 ? `Apply patch — ${headers[0]}` : 'Apply patch',
-        kind: 'edit',
-        content: headers.length > 0 ? [{ type: 'text', text: headers.join('\n') }] : undefined,
+        card: 'diff',
+        title: locations.length === 1 ? `Apply patch — ${locations[0].path}` : `Apply patch — ${locations.length} files`,
+        diffs,
+        locations,
       }
     },
     presentResult(_args, result) {

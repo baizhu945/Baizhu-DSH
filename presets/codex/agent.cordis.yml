@@ -19,14 +19,14 @@
 - id: codex-approval-boundary
   name: './codex-approval.mjs'
 
-# Current GPT-5.6 Codex models are code-mode-only in the upstream catalog. dsh
-# exposes the equivalent fresh TypeScript worker as `run_code` and generates a
-# typed SDK for the scoped end-tool catalog. This declaration affects only this
-# agent preset; native tools remain unchanged for every other preset.
+# Current GPT-5.6 Codex models use Code Mode upstream. dsh also exposes the
+# native forms in this preset so ordinary command/edit calls can use their
+# terminal and diff presenters in WebUI; `run_code` remains available for real
+# multi-tool orchestration. This affects only sessions selecting this preset.
 - id: codex-tool-presentation
   name: '@deepseek-ai/dsh-agent-tool-presentation'
   config:
-    mode: code
+    mode: both
 
 # Codex-shaped end tools. They inherit the host-owned sandboxed shell, fs,
 # attachment, interaction, and subagent services; no authority is recreated or
@@ -65,7 +65,7 @@
       - For answer, explanation, review, or diagnosis requests, inspect and report; do not infer authorization for unrelated mutation.
       - For change or build requests, implement the requested change, verify it in proportion to risk, and continue until the task is complete or genuinely blocked.
       - Build context from the workspace before editing. Prefer `rg` for text and file discovery.
-      - Use `shell_command` for shell work and `apply_patch` for focused text edits. Do not use shell redirection, ad-hoc scripts, or another patch command to bypass `apply_patch` for ordinary file edits.
+      - Call `shell_command` and `apply_patch` directly for ordinary single commands and focused edits so the UI can render terminal and diff cards. Use `run_code` only when multiple tool calls genuinely need orchestration or intermediate-value processing. Do not use shell redirection, ad-hoc scripts, or another patch command to bypass `apply_patch` for ordinary file edits.
       - Preserve user changes and dirty worktrees. Do not create commits or branches unless asked. Do not fix unrelated failures.
       - Start validation with the narrowest relevant check, then broaden only when useful. Never claim an edit, command, test, or build succeeded without observing its result.
       - Use `update_plan` only for non-trivial execution work. Keep at most one item in progress and do not repeat the complete plan after updating it.
