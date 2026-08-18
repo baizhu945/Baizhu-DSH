@@ -14,21 +14,21 @@ import { dirname, join, relative, resolve } from 'node:path'
 const ROOT = resolve(process.argv[2] ?? '.')
 const OUT = resolve(process.argv[3])
 
-// dsh-web-ui-all 的 12 个直接依赖 + 聚合包自身(13 个),即聚合包
-// cordis.patch.yml 里全部 insert 行的宿主。目录名与 npm 包名保持一致,
-// 部署时直接落到 @linxin666 scope 下。
+// v0.2.0 的聚合包自身 + 12 个保留家族包。梁神模式由上游聚合包依赖，
+// 但本地声明式 staging 刻意不部署该包；live-stats 已在上游移除。
+// 目录名与 npm 包名保持一致，部署时直接落到 @linxin666 scope 下。
 const FAMILY = [
   ['packages/dsh-web-ui-all', '@linxin666/dsh-web-ui-all'],
   ['packages/dsh-web-ui-settings', '@linxin666/dsh-client-ui-web-ui-settings'],
+  ['packages/dsh-community-plugins', '@linxin666/dsh-client-ui-community-plugins'],
   ['packages/dsh-aionui-panel', '@linxin666/dsh-client-ui-aionui-panel'],
   ['packages/dsh-task-board', '@linxin666/dsh-client-ui-task-board'],
   ['packages/dsh-git-graph', '@linxin666/dsh-client-ui-git-graph'],
   ['packages/dsh-pet', '@linxin666/dsh-pet'],
   ['packages/dsh-remote-web-ui', '@linxin666/dsh-remote-web-ui'],
-  ['packages/dsh-live-stats', '@linxin666/dsh-live-stats'],
   ['packages/dsh-ssh', '@linxin666/dsh-ssh'],
   ['packages/dsh-tool-describe-image', '@linxin666/dsh-tool-describe-image'],
-  ['packages/dsh-liangshen', '@linxin666/dsh-liangshen'],
+  ['packages/dsh-skill-explorer', '@linxin666/dsh-client-ui-skill-explorer'],
   ['packages/dsh-skins', '@linxin666/dsh-skins'],
   ['packages/skins/skin-center', '@linxin666/dsh-client-ui-skin-center'],
 ]
@@ -42,6 +42,10 @@ const DEPS_START = [
   'ssh2',
   'zod',
   'ws',
+  // dsh-web-ui-all's right panel is an external npm plugin rather than a
+  // workspace package.  It is referenced by the aggregate cordis patch, so
+  // it must be staged into the profile even though it is not under packages/.
+  'dsh-better-sidebar',
 ]
 
 function isInsideNodeModules(srcPath, srcRoot) {
@@ -59,8 +63,28 @@ for (const [srcRel, pkgName] of FAMILY) {
     recursive: true,
     filter: (candidate) => !isInsideNodeModules(candidate, src),
   })
-  const pj = JSON.parse(readFileSync(join(dst, 'package.json'), 'utf8'))
+  const packageJsonPath = join(dst, 'package.json')
+  const pj = JSON.parse(readFileSync(packageJsonPath, 'utf8'))
   if (pj.name !== pkgName) throw new Error(`package name mismatch for ${srcRel}: ${pj.name}`)
+
+  // v0.2.0's aggregate package still depends on dsh-liangshen and its
+  // generated patch still inserts web-ui-liangshen. This local deployment
+  // deliberately omits that optional family, so filter both declarations from
+  // the staged aggregate only. The source checkout and pnpm build remain
+  // untouched; the resulting store artifact is self-consistent.
+  if (pkgName === '@linxin666/dsh-web-ui-all') {
+    const patchPath = join(dst, 'cordis.patch.yml')
+    const patch = readFileSync(patchPath, 'utf8')
+    const filteredPatch = patch.replace(
+      /# from \.\.\/dsh-liangshen\n- insert:\n    - id: web-ui-liangshen\n      name: '@linxin666\/dsh-liangshen'\n\n?/,
+      '',
+    )
+    writeFileSync(patchPath, filteredPatch)
+    if (pj.dependencies?.['@linxin666/dsh-liangshen'] !== undefined) {
+      delete pj.dependencies['@linxin666/dsh-liangshen']
+      writeFileSync(packageJsonPath, `${JSON.stringify(pj, null, 2)}\n`)
+    }
+  }
 }
 
 // Flatten the runtime closure. The monorepo was installed with

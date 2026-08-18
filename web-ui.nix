@@ -9,12 +9,12 @@ let
   # 全部构建出来,再由 home.activation 真实拷贝到
   # ~/.dsh/profiles/web/node_modules/@linxin666/。insert 行见
   # profiles/web/cordis.patch.yml,与聚合包 cordis.patch.yml 完全一致。
-  # 版本 0.1.15;hash 由 nix-prefetch-url --unpack 计算。
+  # 最新正式 release v0.2.0 @ 3b52d49c；本地 staging 会排除梁神包。
   dshWebUiSrc = pkgs.fetchFromGitHub {
     owner = "zhu1090093659";
     repo = "dsh-web-ui";
-    rev = "ae03e272f9517375f8c04eeb184b3cf50e5476a5";
-    hash = "sha256-3XB2oX0/7BxAQbYOZscYqvM7Wx57K0/LE+Ld4d1eChY=";
+    rev = "3b52d49c973e28db7a75398519b3e73db54dcf81";
+    hash = "sha256-kbE25UiJfaIS3h7wCYMTcokwrc/7dkKero1uQRvq32c=";
   };
 
   # 声明式 pnpm 依赖(fetchPnpmDeps 为 fixed-output 派生;hash 由仓库自带
@@ -23,12 +23,12 @@ let
     pname = "dsh-web-ui";
     src = dshWebUiSrc;
     fetcherVersion = 4;
-    hash = "sha256-j3F57Jl+AC6ZCxeFik08vsztOZOXJoDrBD5mno1LNqY=";
+    hash = "sha256-lvLWn56WKdq6Q7WNTi1PtJXEPm168YCzYZmTdGE+qEY=";
   };
 
   dshWebUi = pkgs.stdenv.mkDerivation {
     pname = "dsh-web-ui";
-    version = "0.1.15";
+    version = "0.2.0";
     src = dshWebUiSrc;
 
     pnpmDeps = dshWebUiPnpmDeps;
@@ -109,7 +109,8 @@ in
       [ -z "$name" ] && continue
       dest="$HOME/.dsh/profiles/web/node_modules/$name"
       # 作用域父目录(@linxin666/@standard-schema)由 cp -r 保留为只读,
-      # 删其子目录前必须先让父目录可写。
+      # 删其子目录前必须先让父目录可写;mkidr -p 兜底确保父目录存在。
+      run mkdir -p "$(dirname "$dest")"
       run chmod u+w "$(dirname "$dest")"
       if [ -L "$dest" ]; then
         run /run/current-system/sw/bin/remove-without-permission -f "$dest"
@@ -122,11 +123,28 @@ in
     run cp -r ${dshWebUi}/packages/. \
       "$HOME/.dsh/profiles/web/node_modules/"
 
-    # 运行时依赖闭包(schemastery/zod/ssh2/ws/cloudflared + 传递依赖),
+    # v0.1.15 曾由本模块部署、v0.2.0 已移除的旧 family。只清理这两个
+    # 明确属于本模块旧 staging 的目录，避免旧梁神行或 live-stats 行残留。
+    for stale in dsh-liangshen dsh-live-stats; do
+      dest="$HOME/.dsh/profiles/web/node_modules/@linxin666/$stale"
+      if [ -L "$dest" ]; then
+        run /run/current-system/sw/bin/remove-without-permission -f "$dest"
+      elif [ -e "$dest" ]; then
+        run chmod -R u+w "$dest"
+        run /run/current-system/sw/bin/remove-without-permission -rf "$dest"
+      fi
+    done
+
+    # 运行时依赖闭包(schemastery/zod/ssh2/ws/cloudflared/
+    # dsh-better-sidebar + 传递依赖),
     # 同样先按 manifest 清理旧版本再整层拷贝。
+    # 注意:新依赖可能引入全新 scope 父目录(@codemirror/@lezer/@marijn 等),
+    # 它们尚未被 cp 创建,直接对 curdir 做 chmod 会因目录不存在而失败;
+    # 在 set -eu 下会让整个激活提前退出(mkdir -p 幂等,先确保父目录存在再让其可写)。
     while IFS= read -r name; do
       [ -z "$name" ] && continue
       dest="$HOME/.dsh/profiles/web/node_modules/$name"
+      run mkdir -p "$(dirname "$dest")"
       run chmod u+w "$(dirname "$dest")"
       if [ -L "$dest" ]; then
         run /run/current-system/sw/bin/remove-without-permission -f "$dest"

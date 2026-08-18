@@ -23,16 +23,12 @@
     - id: approval-tweaks
       name: 'dsh-baizhu-approval'
 
-# ── dsh-web-ui 全家桶(zhu1090093659/dsh-web-ui)────────────────────────
-# https://github.com/zhu1090093659/dsh-web-ui
-# 官方装法 `dsh plugin --profile web add @linxin666/dsh-web-ui-all` 经 pnpm
-# 把 12 个家族包收进 profile 并追加 package.json;这里由 home-manager
-# 声明式等效:包体真实文件部署见 web-ui.nix 的 home.activation.dshWebUi,
-# 下面 12 行 insert 与聚合包 dsh-web-ui-all 的 cordis.patch.yml 完全一致
-# (任务看板/Git 图谱/右侧面板/鲸鱼娘宠物/移动端远程/SSH/图像理解/
-# 梁神预设/实时令牌统计/设置中心/皮肤中心,含 dsh-skins 全部皮肤资产)。
-# 皮肤中心运行时切换皮肤会自行管理 ~/.dsh/cordis.patch.yml 的
-# dsh-skin managed 区段与本 profile 的皮肤包符号链接。
+# ── dsh-web-ui v0.2.0 全家桶 ────────────────────────────────────────────
+# https://github.com/zhu1090093659/dsh-web-ui/releases/tag/v0.2.0
+# 聚合包自身的 cordis.patch.yml 负责插入全部保留 UI 家族；本地 staging
+# 在构建阶段过滤上游的 dsh-liangshen 行和依赖，因此这里不再重复插入
+# 旧版家族行，也不会把梁神模式带回 Web profile。
+# 皮肤中心运行时仍自行管理 ~/.dsh/cordis.patch.yml 的 dsh-skin 区段。
 - insert:
     - id: ui-web-ui-compat
       name: '@linxin666/dsh-web-ui-all'
@@ -40,6 +36,10 @@
 - insert:
     - id: ui-web-ui-settings
       name: '@linxin666/dsh-client-ui-web-ui-settings'
+
+- insert:
+    - id: ui-community-plugins
+      name: '@linxin666/dsh-client-ui-community-plugins'
 
 - insert:
     - id: ui-dsh-aionui-panel
@@ -62,10 +62,6 @@
       name: '@linxin666/dsh-remote-web-ui'
 
 - insert:
-    - id: live-stats
-      name: '@linxin666/dsh-live-stats'
-
-- insert:
     - id: ssh
       name: '@linxin666/dsh-ssh'
 
@@ -74,12 +70,16 @@
       name: '@linxin666/dsh-tool-describe-image'
 
 - insert:
-    - id: liangshen
-      name: '@linxin666/dsh-liangshen'
+    - id: ui-skill-explorer
+      name: '@linxin666/dsh-client-ui-skill-explorer'
 
 - insert:
-    - id: ui-skin-center
+    - id: web-ui-skin-center
       name: '@linxin666/dsh-client-ui-skin-center'
+
+- insert:
+    - id: web-ui-better-sidebar
+      name: 'dsh-better-sidebar'
 
 # ── 权限预设表 ──────────────────────────────────────────────────────────
 # dsh 三个内置模式保持原样(Read Only / Workspace Write / Full Access);

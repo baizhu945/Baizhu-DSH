@@ -38,17 +38,38 @@ in
     };
 
     # ---- anthropics/skills ----
-    ".dsh/skills/docx".source = "${anthropics-skills-repo}/skills/docx";
-    ".dsh/skills/pptx".source = "${anthropics-skills-repo}/skills/pptx";
-    ".dsh/skills/xlsx".source = "${anthropics-skills-repo}/skills/xlsx";
-    ".dsh/skills/pdf".source = "${anthropics-skills-repo}/skills/pdf";
-    ".dsh/skills/canvas-design".source = "${anthropics-skills-repo}/skills/canvas-design";
+    ".dsh/skills/docx" = {
+      source = "${anthropics-skills-repo}/skills/docx";
+      recursive = true;
+    };
+    ".dsh/skills/pptx" = {
+      source = "${anthropics-skills-repo}/skills/pptx";
+      recursive = true;
+    };
+    ".dsh/skills/xlsx" = {
+      source = "${anthropics-skills-repo}/skills/xlsx";
+      recursive = true;
+    };
+    ".dsh/skills/pdf" = {
+      source = "${anthropics-skills-repo}/skills/pdf";
+      recursive = true;
+    };
+    ".dsh/skills/canvas-design" = {
+      source = "${anthropics-skills-repo}/skills/canvas-design";
+      recursive = true;
+    };
 
     # ---- anbeime/skill ----
-    ".dsh/skills/media-processor".source = "${anbeime-skills-repo}/skills/media-processor/media-processor";
+    ".dsh/skills/media-processor" = {
+      source = "${anbeime-skills-repo}/skills/media-processor/media-processor";
+      recursive = true;
+    };
 
     # ---- addyosmani/agent-skills ----
-    ".dsh/skills/idea-refine".source = "${agent-skills-repo}/skills/idea-refine";
+    ".dsh/skills/idea-refine" = {
+      source = "${agent-skills-repo}/skills/idea-refine";
+      recursive = true;
+    };
 
     # ---- superpowers ----
     ".dsh/skills/superpowers" = {

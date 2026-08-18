@@ -70,6 +70,14 @@ let
       cd node_modules/node-pty && node-gyp rebuild && cd ../..
       npm run build
       runHook postBuild
+      # 把 DeepSeek V4 正式版注入 pi-ai 的 OpenRouter 目录快照。
+      # 根因:dsh 构建时锁定的 @earendil-works/pi-ai@0.82.1 内置目录快照
+      # 早于 0731 / 0813 正式版上线,只收录了 0423 预览版
+      # (deepseek/deepseek-v4-flash、deepseek/deepseek-v4-pro);而 discovery
+      # 对目录路由直接短路返回内置目录,从不联网查询 OpenRouter /models,
+      # 所以列表永远无法自愈。这里在构建期把正式版补进内置目录数据,
+      # 重启 dsh 后 4 个版本(flash/pro × 预览/正式)都会出现在模型列表。
+      python3 ${./patches/inject-openrouter-models.py} ${./patches/openrouter-extra-models.json}
     '';
 
     # 产物 = 完整源码树 + node_modules(运行时经扁平链接加载 @deepseek-ai/* 插件)
@@ -107,6 +115,7 @@ in
     ./web-ui.nix
     ./presets/dsh-anchored-standard.nix
     ./presets/dsh-router-standard.nix
+    ./presets/dsh-codex.nix
   ];
 
   home.packages = [
@@ -132,26 +141,44 @@ in
 
     ".dsh/profiles/web/plugins/confirm-writes.mjs".source = ./profiles/web/plugins/confirm-writes.mjs;
 
-    ".dsh/profiles/web/cordis.patch.yml".source = ./profiles/web/cordis.patch.yml;
-
     ".dsh/profiles/headless/cordis.patch.yml".source = ./profiles/headless/cordis.patch.yml;
   };
 
-  # 机器级 boot patch 的真实文件初始化(不用 home.file 符号链接):
-  # dsh-web-ui 皮肤中心在运行时会把 ~/.dsh/cordis.patch.yml 原子改写为
-  # 真实文件并维护 "dsh-skin managed" 区段(用户换肤选择);若继续用
-  # home.file 管理,下一次 switch 的 linkGeneration 会判定现有文件
-  # clobber 冲突。因此这里只负责播种:目标不存在或还是旧符号链接时,
-  # 把模板真实安装过去;已经是真实文件(皮肤中心写过)则原样保留。
-  home.activation.dshBootPatch = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
-    bootPatch="$HOME/.dsh/cordis.patch.yml"
-    if [ -L "$bootPatch" ]; then
-      run /run/current-system/sw/bin/remove-without-permission -f "$bootPatch"
-    fi
-    if [ ! -e "$bootPatch" ]; then
-      run mkdir -p "$HOME/.dsh"
-      run install -m 644 ${./home-cordis.patch.yml} "$bootPatch"
-    fi
+  # Web/profile cordis patches are runtime-owned files. dsh and the Web UI
+  # rewrite them atomically (the skin center maintains its managed section),
+  # so they must not be home.file symlinks into /nix/store. Seed a missing
+  # target or replace an old Nix link; when an existing real file drifts from
+  # the declarative template (e.g. a plugin row was added/removed in dsh.nix),
+  # reconcile it back to the template while preserving the skin center's
+  # runtime-owned "dsh-skin managed" section (the user's skin choices).
+  # 否则每次模板更新后运行时文件永远停留在旧播种,新加的行(如
+  # web-ui-better-sidebar / web-ui-skin-center)不会生效,导致功能缺失。
+  home.activation.dshRuntimePatches = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
+    seedRuntimePatch() {
+      target="$1"
+      template="$2"
+      if [ -L "$target" ]; then
+        run /run/current-system/sw/bin/remove-without-permission -f "$target"
+      fi
+      if [ ! -e "$target" ]; then
+        run mkdir -p "$(dirname "$target")"
+        run install -m 644 "$template" "$target"
+      else
+        run chmod u+rw "$target"
+        if ! cmp -s "$target" "$template"; then
+          # 仅保留皮肤中心运行时维护的 auto-generated 区段,其余以模板为准。
+          managed="$(sed -n '/^# --- dsh-skin managed/,$p' "$target" 2>/dev/null || true)"
+          run install -m 644 "$template" "$target.tmp"
+          if [ -n "$managed" ]; then
+            printf '\n%s\n' "$managed" >> "$target.tmp"
+          fi
+          run mv "$target.tmp" "$target"
+        fi
+      fi
+    }
+
+    seedRuntimePatch "$HOME/.dsh/cordis.patch.yml" "${./home-cordis.patch.yml}"
+    seedRuntimePatch "$HOME/.dsh/profiles/web/cordis.patch.yml" "${./profiles/web/cordis.patch.yml}"
   '';
 
   # 插件文件的真实文件部署
@@ -167,7 +194,8 @@ in
   home.activation.dshPlugins = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
     run mkdir -p \
       "$HOME/.dsh/profiles/headless/plugins" \
-      "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval"
+      "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval" \
+      "$HOME/.dsh/profiles/node_modules/@deepseek-ai"
     run install -m 644 ${./profiles/headless/plugins/cc-connect-startup.mjs} \
       "$HOME/.dsh/profiles/headless/plugins/cc-connect-startup.mjs"
     run install -m 644 ${./profiles/headless/plugins/cc-connect-runner.mjs} \
@@ -178,5 +206,23 @@ in
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval/index.mjs"
     run install -m 644 ${./profiles/web/node_modules/dsh-baizhu-approval/client.js} \
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval/client.js"
+
+    # Codex preset's PTY backend is shipped in the dsh installation but is not
+    # part of the Web bundle's automatic dependency heal set. Keep its three
+    # bare imports resolvable from a user-authored preset without changing any
+    # host composition or other preset.
+    for package in dsh-terminal dsh-terminal-bash dsh-tool-terminal dsh-tools; do
+      target="$HOME/.dsh/profiles/node_modules/@deepseek-ai/$package"
+      if [ -L "$target" ]; then
+        run /run/current-system/sw/bin/remove-without-permission -f "$target"
+      elif [ -e "$target" ]; then
+        run /run/current-system/sw/bin/remove-without-permission -rf "$target"
+      fi
+      if [ "$package" = dsh-tools ]; then
+        run ln -s "${dsh}/packages/core/tools" "$target"
+      else
+        run ln -s "${dsh}/packages/terminal/''${package#dsh-}" "$target"
+      fi
+    done
   '';
 }

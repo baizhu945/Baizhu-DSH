@@ -1,0 +1,66 @@
+{
+  "deepseek/deepseek-v4-flash-0731": {
+    "id": "deepseek/deepseek-v4-flash-0731",
+    "name": "DeepSeek: DeepSeek V4 Flash 0731",
+    "api": "openai-completions",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "provider": "openrouter",
+    "reasoning": true,
+    "input": [
+      "text"
+    ],
+    "cost": {
+      "input": 0.14,
+      "output": 0.28,
+      "cacheRead": 0.028,
+      "cacheWrite": 0
+    },
+    "contextWindow": 1048576,
+    "maxTokens": 393216,
+    "compat": {
+      "supportsDeveloperRole": false,
+      "thinkingFormat": "openrouter",
+      "requiresReasoningContentOnAssistantMessages": true
+    },
+    "thinkingLevelMap": {
+      "minimal": null,
+      "low": null,
+      "medium": null,
+      "high": "high",
+      "max": null,
+      "xhigh": "xhigh"
+    }
+  },
+  "deepseek/deepseek-v4-pro-0813": {
+    "id": "deepseek/deepseek-v4-pro-0813",
+    "name": "DeepSeek: DeepSeek V4 Pro 0813",
+    "api": "openai-completions",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "provider": "openrouter",
+    "reasoning": true,
+    "input": [
+      "text"
+    ],
+    "cost": {
+      "input": 0.435,
+      "output": 0.87,
+      "cacheRead": 0.003625,
+      "cacheWrite": 0
+    },
+    "contextWindow": 1048576,
+    "maxTokens": 384000,
+    "compat": {
+      "supportsDeveloperRole": false,
+      "thinkingFormat": "openrouter",
+      "requiresReasoningContentOnAssistantMessages": true
+    },
+    "thinkingLevelMap": {
+      "minimal": null,
+      "low": null,
+      "medium": null,
+      "high": "high",
+      "max": null,
+      "xhigh": "xhigh"
+    }
+  }
+}

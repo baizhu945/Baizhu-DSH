@@ -1,0 +1,3 @@
+name: Codex Mode
+description: OpenAI Codex 风格的本地编码 Agent：Codex persona、AGENTS.md 指令链、沙箱 bash、文件编辑与检索、Skills、计划、目标、后台任务和子代理。
+order: 2
