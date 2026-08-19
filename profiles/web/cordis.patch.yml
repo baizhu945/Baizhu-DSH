@@ -1,5 +1,4 @@
-# 由 home-manager 管理(agent/dsh/dsh.nix;dsh-web-ui 家族包由 web-ui.nix
-# 部署,其 insert 行并入本 patch 层)。
+# 由 home-manager 管理(agent/dsh/dsh.nix)。
 # 追加自定义 patch 行请编辑 dsh.nix。
 - insert:
     - id: confirm-writes
@@ -35,63 +34,9 @@
     - id: openai-account-ui
       name: 'dsh-openai-account-ui'
 
-# ── dsh-web-ui v0.2.0 全家桶 ────────────────────────────────────────────
-# https://github.com/zhu1090093659/dsh-web-ui/releases/tag/v0.2.0
-# 聚合包自身的 cordis.patch.yml 负责插入全部保留 UI 家族；本地 staging
-# 在构建阶段过滤上游的 dsh-liangshen 行和依赖，因此这里不再重复插入
-# 旧版家族行，也不会把梁神模式带回 Web profile。
-# 皮肤中心运行时仍自行管理 ~/.dsh/cordis.patch.yml 的 dsh-skin 区段。
-- insert:
-    - id: ui-web-ui-compat
-      name: '@linxin666/dsh-web-ui-all'
-
-- insert:
-    - id: ui-web-ui-settings
-      name: '@linxin666/dsh-client-ui-web-ui-settings'
-
-- insert:
-    - id: ui-community-plugins
-      name: '@linxin666/dsh-client-ui-community-plugins'
-
-- insert:
-    - id: ui-dsh-aionui-panel
-      name: '@linxin666/dsh-client-ui-aionui-panel'
-
-- insert:
-    - id: ui-task-board
-      name: '@linxin666/dsh-client-ui-task-board'
-
-- insert:
-    - id: ui-git-graph
-      name: '@linxin666/dsh-client-ui-git-graph'
-
-- insert:
-    - id: pet
-      name: '@linxin666/dsh-pet'
-
-- insert:
-    - id: remote-web-ui
-      name: '@linxin666/dsh-remote-web-ui'
-
-- insert:
-    - id: ssh
-      name: '@linxin666/dsh-ssh'
-
-- insert:
-    - id: describe-image
-      name: '@linxin666/dsh-tool-describe-image'
-
-- insert:
-    - id: ui-skill-explorer
-      name: '@linxin666/dsh-client-ui-skill-explorer'
-
-- insert:
-    - id: web-ui-skin-center
+    # 上游 skin-center 自带全部内置皮肤，单独安装不引入其它 Web UI 组件。
+    - id: ui-skin-center
       name: '@linxin666/dsh-client-ui-skin-center'
-
-- insert:
-    - id: web-ui-better-sidebar
-      name: 'dsh-better-sidebar'
 
 # ── 权限预设表 ──────────────────────────────────────────────────────────
 # dsh 三个内置模式保持原样(Read Only / Workspace Write / Full Access);

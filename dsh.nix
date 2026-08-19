@@ -113,12 +113,14 @@ let
 
 in
 {
+  _module.args.dsh = dsh;
+
   imports = [
     ./skills.nix
-    ./web-ui.nix
+    ./skins/skin-center.nix
     ./presets/dsh-anchored-standard.nix
     ./presets/dsh-router-standard.nix
-    ./presets/dsh-codex.nix
+    ./presets/codex/dsh-codex.nix
   ];
 
   home.packages = [
@@ -130,11 +132,6 @@ in
                     # 探测方式:spawnSync('bwrap', ...);缺它则报 "no sandbox backend usable")
 
     # 便捷启动(生命周期与浏览器窗口绑定,脚本主体见 ./dsh-web.sh):
-    # 1. 端口空闲时启动 dsh web(端口已有实例则直接复用);
-    # 2. 打开一个独立 chromium 应用窗口(临时 profile,可被脚本监控);
-    # 3. 脚本挂起,直到关闭该窗口或按 Ctrl+C;
-    # 4. 退出时杀掉本次运行启动的 webui 进程并清理临时 profile
-    #    (复用的已有实例不会被杀)。
     # 用法:dsh-web [port]  (默认 3080;浏览器可用 DSH_BROWSER 覆盖)
     (pkgs.writeShellScriptBin "dsh-web" (builtins.readFile ./dsh-web.sh))
   ];
@@ -147,15 +144,13 @@ in
     ".dsh/profiles/headless/cordis.patch.yml".source = ./profiles/headless/cordis.patch.yml;
   };
 
-  # Web/profile cordis patches are runtime-owned files. dsh and the Web UI
-  # rewrite them atomically (the skin center maintains its managed section),
+  # Web/profile cordis patches are runtime-owned files. dsh rewrites them
+  # atomically,
   # so they must not be home.file symlinks into /nix/store. Seed a missing
   # target or replace an old Nix link; when an existing real file drifts from
   # the declarative template (e.g. a plugin row was added/removed in dsh.nix),
-  # reconcile it back to the template while preserving the skin center's
-  # runtime-owned "dsh-skin managed" section (the user's skin choices).
-  # 否则每次模板更新后运行时文件永远停留在旧播种,新加的行(如
-  # web-ui-better-sidebar / web-ui-skin-center)不会生效,导致功能缺失。
+  # reconcile it back to the template. Otherwise each template update would
+  # leave the runtime file permanently stale.
   home.activation.dshRuntimePatches = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
     seedRuntimePatch() {
       target="$1"
@@ -169,12 +164,7 @@ in
       else
         run chmod u+rw "$target"
         if ! cmp -s "$target" "$template"; then
-          # 仅保留皮肤中心运行时维护的 auto-generated 区段,其余以模板为准。
-          managed="$(sed -n '/^# --- dsh-skin managed/,$p' "$target" 2>/dev/null || true)"
           run install -m 644 "$template" "$target.tmp"
-          if [ -n "$managed" ]; then
-            printf '\n%s\n' "$managed" >> "$target.tmp"
-          fi
           run mv "$target.tmp" "$target"
         fi
       fi
@@ -192,8 +182,7 @@ in
   # 指向 apps/cli 自己的依赖树 —— 必须从这条路径导入,才能与内置插件共享
   # 同一份 cordis 模块实例)。因此这些插件目录用激活脚本把 store 里的
   # 文件真实拷贝到 ~/.dsh(linkGeneration 之后运行,install 会原子替换
-  # 旧的符号链接)。dsh-web-ui 家族包(含皮肤中心)的真实文件部署位于
-  # ./web-ui.nix(home.activation.dshWebUi),理由相同。
+  # 旧的符号链接)。
   home.activation.dshPlugins = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
     run mkdir -p \
       "$HOME/.dsh/profiles/headless/plugins" \

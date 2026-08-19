@@ -710,9 +710,9 @@ function agentStatusSchema() {
   }
 }
 
-function statusOf(ctx, id) {
+function statusOf(ctx, id, known = false) {
   const child = ctx.agents.get(id)
-  if (child === undefined) return 'not_found'
+  if (child === undefined) return known ? { completed: null } : 'not_found'
   return child.status === 'running' ? 'running' : { completed: null }
 }
 
@@ -751,8 +751,103 @@ function timeoutPromise(timeoutMs, signal) {
   })
 }
 
+/**
+ * Match Codex V1 completion injection: a child report joins the parent's next
+ * safe step instead of queueing a separate later parent turn.
+ */
+function registerReportDelivery(ctx) {
+  const reportedChildren = new Set()
+
+  // A resumed activation is a new unit of work: an earlier report must not
+  // suppress this activation's fallback settlement notice.
+  ctx.on('subagent/start', info => { reportedChildren.delete(info.id) })
+
+  ctx.on('tools/execute', async (exec, next) => {
+    if (exec.name !== 'report' || exec.agent?.session.header.parentSession === undefined) return next()
+    const output = exec.arguments.output
+    if (typeof output !== 'string' || output.trim().length === 0) {
+      throw new Error('report output must be a non-empty string')
+    }
+    const messageId = await ctx.subagents.reportFrom(
+      exec.agent,
+      [{ type: 'text', text: output }],
+      { delivery: 'quiet', signal: exec.signal },
+    )
+    reportedChildren.add(exec.agent.id)
+    return { isError: false, value: { messageId }, content: [] }
+  })
+
+  // dsh also emits an unconditional settlement notice. Once a child delivered
+  // its explicit final report, remove that redundant pending notice. A child
+  // that crashed or never reported keeps the automatic fallback.
+  ctx.on('agent/inbox/inserted', ({ agent, message }) => {
+    const source = message.source
+    if (source.kind !== 'subagent-settled') return
+    if (!reportedChildren.delete(source.senderSessionId)) return
+    agent.inbox.remove(message.id)
+  })
+}
+
 /** Luna's upstream catalog selects the V1 collaboration surface. */
 function registerAgents(ctx) {
+  // Codex V1 close/resume semantics over dsh's durable continuable sessions.
+  const closedAgents = new Set()
+  const settlements = new Map()
+
+  const newSettlement = () => {
+    let resolve
+    const promise = new Promise(done => { resolve = done })
+    return { promise, resolve, end: undefined }
+  }
+  const settlementFor = id => {
+    let settlement = settlements.get(id)
+    if (settlement === undefined) {
+      settlement = newSettlement()
+      settlements.set(id, settlement)
+    }
+    return settlement
+  }
+  ctx.on('subagent/start', info => {
+    const existing = settlements.get(info.id)
+    if (existing === undefined || existing.end !== undefined) settlements.set(info.id, newSettlement())
+  })
+  ctx.on('subagent/end', info => {
+    const settlement = settlementFor(info.id)
+    settlement.end = info
+    settlement.resolve(info)
+  })
+
+  const finalStatus = info => {
+    const text = info?.lastAssistantMessage
+      ?.filter(block => block.type === 'text')
+      .map(block => block.text)
+      .join('\n')
+      .trim() || null
+    switch (info?.stopReason) {
+      case 'completed': return { completed: text }
+      case 'aborted': return 'interrupted'
+      case 'error': return { errored: text ?? 'subagent failed' }
+      case 'max-tokens': return { errored: text ?? 'subagent reached its token limit' }
+      case 'refusal': return { errored: text ?? 'subagent declined the task' }
+      default: return undefined
+    }
+  }
+  const visibleStatus = (id, known = false) => {
+    if (closedAgents.has(id)) return 'shutdown'
+    const settled = finalStatus(settlements.get(id)?.end)
+    return settled ?? statusOf(ctx, id, known)
+  }
+  const waitForFinal = async (id, signal) => {
+    const settlement = settlements.get(id)
+    if (settlement?.end !== undefined) return id
+    if (settlement !== undefined) {
+      await settlement.promise
+      signal.throwIfAborted()
+      return id
+    }
+    return waitForIdle(ctx, id, signal)
+  }
+
   ctx.tools.register(defineTool({
     name: 'spawn_agent',
     description: 'Spawn a background agent for a concrete bounded task. Spawned agents inherit the current model by default.',
@@ -788,6 +883,7 @@ function registerAgents(ctx) {
         },
         signal: exec.signal,
       })
+      closedAgents.delete(child.childId)
       return { agent_id: child.childId, nickname: null }
     },
   }))
@@ -796,7 +892,7 @@ function registerAgents(ctx) {
     name: 'send_input',
     description: 'Send a message to an existing agent. Use interrupt=true to redirect its current work immediately.',
     parameters: {
-      target: { type: 'string', required: true, description: 'Agent id to message (from spawn_agent).' },
+      target: { type: 'string', required: true, description: 'Exact agent_id returned by spawn_agent. Never invent a placeholder id.' },
       message: { type: 'string', required: true, description: 'Plain-text message to send to the agent.' },
       interrupt: { type: 'boolean', description: 'True interrupts the current turn before queueing this message.' },
     },
@@ -810,6 +906,13 @@ function registerAgents(ctx) {
     },
     async execute(args, exec) {
       const parent = agentOf(exec)
+      const rows = await directChildren(ctx, parent, exec.signal)
+      if (!rows.some(row => row.id === args.target)) {
+        throw new Error(`unknown subagent "${args.target}"; use the exact agent_id returned by spawn_agent`)
+      }
+      if (closedAgents.has(args.target)) {
+        throw new Error(`subagent "${args.target}" is closed; call resume_agent before send_input`)
+      }
       if (args.interrupt === true) {
         ctx.subagents.interrupt(args.target, { kind: 'ancestor', agent: parent })
       }
@@ -826,7 +929,7 @@ function registerAgents(ctx) {
   ctx.tools.register(defineTool({
     name: 'resume_agent',
     description: 'Make a previously created agent available for later send_input calls. dsh cold-resumes it automatically when input is sent.',
-    parameters: { id: { type: 'string', required: true, description: 'Agent id to resume.' } },
+    parameters: { id: { type: 'string', required: true, description: 'Exact agent_id returned by spawn_agent.' } },
     output: {
       schema: {
         type: 'object',
@@ -839,6 +942,7 @@ function registerAgents(ctx) {
       const parent = agentOf(exec)
       const rows = await directChildren(ctx, parent, exec.signal)
       if (!rows.some(row => row.id === args.id)) return { status: 'not_found' }
+      closedAgents.delete(args.id)
       const live = ctx.agents.get(args.id)
       return { status: live?.status === 'running' ? 'running' : { completed: null } }
     },
@@ -848,7 +952,7 @@ function registerAgents(ctx) {
     name: 'wait_agent',
     description: 'Wait for agents to become idle. Returns empty status on timeout; completion content also arrives through the runtime settlement notice.',
     parameters: {
-      targets: { type: 'array', required: true, items: { type: 'string' }, description: 'Agent ids to wait on. Multiple ids wait for whichever becomes idle first.' },
+      targets: { type: 'array', required: true, items: { type: 'string' }, description: 'Exact agent_id values returned by spawn_agent. Multiple ids wait for whichever finishes first.' },
       timeout_ms: { type: 'number', description: 'Timeout in milliseconds. Defaults to 30000; maximum 3600000.' },
     },
     output: {
@@ -876,19 +980,23 @@ function registerAgents(ctx) {
       if (unknown.length > 0) {
         return { status: Object.fromEntries(unknown.map(target => [target, 'not_found'])), timed_out: false }
       }
+      const alreadyClosed = args.targets.find(target => closedAgents.has(target))
+      if (alreadyClosed !== undefined) {
+        return { status: { [alreadyClosed]: 'shutdown' }, timed_out: false }
+      }
       const winner = await Promise.race([
-        ...args.targets.map(target => waitForIdle(ctx, target, exec.signal)),
+        ...args.targets.map(target => waitForFinal(target, exec.signal)),
         timeoutPromise(timeoutMs, exec.signal),
       ])
       if (winner === undefined) return { status: {}, timed_out: true }
-      return { status: { [winner]: statusOf(ctx, winner) }, timed_out: false }
+      return { status: { [winner]: visibleStatus(winner, true) }, timed_out: false }
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'close_agent',
     description: 'Stop an agent current turn when it is no longer needed. Its durable session remains available for an explicit later follow-up.',
-    parameters: { target: { type: 'string', required: true, description: 'Agent id to stop.' } },
+    parameters: { target: { type: 'string', required: true, description: 'Exact agent_id returned by spawn_agent.' } },
     output: {
       schema: {
         type: 'object',
@@ -899,8 +1007,13 @@ function registerAgents(ctx) {
     },
     async execute(args, exec) {
       const parent = agentOf(exec)
-      const previousStatus = statusOf(ctx, args.target)
+      const rows = await directChildren(ctx, parent, exec.signal)
+      if (!rows.some(row => row.id === args.target)) {
+        throw new Error(`unknown subagent "${args.target}"; use the exact agent_id returned by spawn_agent`)
+      }
+      const previousStatus = visibleStatus(args.target, true)
       ctx.subagents.interrupt(args.target, { kind: 'ancestor', agent: parent })
+      closedAgents.add(args.target)
       return { previous_status: previousStatus }
     },
   }))
@@ -926,5 +1039,6 @@ export function apply(ctx) {
   registerPlan(ctx)
   registerQuestions(ctx)
   registerCurrentTime(ctx)
+  registerReportDelivery(ctx)
   registerAgents(ctx)
 }

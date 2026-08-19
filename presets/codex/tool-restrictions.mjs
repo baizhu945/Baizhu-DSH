@@ -1,10 +1,9 @@
 /**
  * Keep host-added tools outside the Codex-compatible model surface.
  *
- * dsh-web-ui contributes optional SSH and image-description tools globally.
- * They are useful in the general Web profile but are not part of the OpenAI
- * Codex CLI tool contract. Restrict only names that exist in this deployment:
- * headless profiles without those plugins remain valid.
+ * Optional host tools such as SSH and image description are not part of the
+ * OpenAI Codex CLI tool contract. Restrict only names that exist in this
+ * deployment; headless profiles without those plugins remain valid.
  */
 export const name = 'codex-tool-boundary'
 export const inject = ['tools']
