@@ -3,7 +3,7 @@
 
 # ── headless-cc-connect.patch → 插件迁移 ────────────────────────────────
 # 禁用内置 headless-startup / headless-runner,改挂两个本地插件:
-#   cc-connect-startup  解析 --session-id/--model/--mode/--jsonl 并提供服务
+#   cc-connect-startup  解析 --session-id/--provider/--model/--reasoning-effort/--mode/--preset/--list-models/--jsonl 并提供服务
 #   cc-connect-runner   创建/恢复会话、固定权限旋钮、JSONL 流式输出、
 #                      stdin 审批应答、confirm 模式写/执行询问
 # 行为与原补丁完全一致,且 dsh 源码不再需要 headless-cc-connect.patch。
@@ -12,6 +12,66 @@
 
 - id: headless-runner
   disabled: true
+
+# Compose the model-facing surface from dsh agent presets rather than leaving
+# the base bundle's broad tool catalog in the host layer. Host services (LLM,
+# persistence, sandbox, approvals, jobs, and session registries) remain shared;
+# each selected preset contributes its own tools, persona, skills, planning,
+# compaction, and delegation surface.
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: tool-str-replace-editor
+  disabled: true
+- id: skill-filesystem
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: plan-mode
+  disabled: true
+- id: compaction-basic
+  disabled: true
+- id: command-compact
+  disabled: true
+- id: tool-result-pruner
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: workflow-worker-thread
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: agent-instructions
+  disabled: true
+- id: tool-todo
+  disabled: true
+- id: tool-web
+  disabled: true
+
+# dsh's launcher adds the installed system preset root when this row exists;
+# the agent-presets package appends ~/.dsh/.agent-presets for user presets.
+- insert:
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard
 
 - insert:
     - id: cc-connect-startup

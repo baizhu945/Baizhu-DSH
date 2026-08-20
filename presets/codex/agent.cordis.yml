@@ -34,6 +34,10 @@
 - id: codex-surface
   name: './codex-surface.mjs'
 
+# Replace dsh's model-facing web tool with the preset-local Codex backend.
+- id: codex-web-search
+  name: './codex-web-search.mjs'
+
 # ── identity and instruction chain ──────────────────────────────────────────
 
 - id: persona
@@ -147,14 +151,7 @@
         headChars: 35000
         tailChars: 10000
 
-# ── web search ──────────────────────────────────────────────────────────────
-
-- id: codex-web
-  name: '@deepseek-ai/dsh-tool-web'
-  config:
-    fetch: false
-    searchTimeoutMs: 60000
-
 # The surface owns the Codex-shaped shell, patch, image, plan, question, clock,
-# and Luna V1 collaboration bindings. Native dsh file/search/goal/job tools and
+# and Luna V1 collaboration bindings. `codex-web-search.mjs` owns the live
+# OpenAI Codex web_search backend. Native dsh file/search/goal/job tools and
 # host extras remain absent from this preset's model catalog.

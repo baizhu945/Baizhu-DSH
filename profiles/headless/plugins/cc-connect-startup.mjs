@@ -3,7 +3,7 @@
  *
  * 替代内置的 `@deepseek-ai/dsh-headless/startup`(在 headless profile 的
  * cordis.patch.yml 中禁用)。与内置版唯一区别:除 task 位置参数外,额外解析
- * `--session-id` / `--model` / `--mode` / `--jsonl` 四个选项,并通过
+ * `--session-id` / `--model` / `--mode` / `--preset` / `--jsonl` 五个选项,并通过
  * `ccConnectStartup` 服务提供给 cc-connect-runner 插件。
  *
  * 这是 dsh 官方文档给出的"surface bundle 自定义命令行"标准做法
@@ -36,8 +36,12 @@ function headlessCommand() {
     .helpOption('-h, --help', 'show this help')
     .argument('[task...]', 'the task text; multiple words are joined by spaces')
     .option('--session-id <id>', 'explicit session id: resume the persisted session if it exists, otherwise create it')
+    .option('--provider <provider>', 'override the provider route for this run')
     .option('--model <model>', 'override the default model for this run')
+    .option('--reasoning-effort <effort>', 'override the reasoning effort for this run')
     .option('--mode <mode>', 'permission mode: read-only | workspace-write | danger-full-access | confirm')
+    .option('--preset <name>', 'agent preset: apply or switch the blank session composition')
+    .option('--list-models', 'print the live dsh provider/model catalog as JSON and exit')
     .option('--jsonl', 'stream JSONL events on stdout and read approval responses from stdin')
     .addHelpText('after', `
 Examples:
@@ -55,13 +59,17 @@ Examples:
 export function apply(ctx) {
   const program = headlessCommand()
   program.action(() => {
-    const task = program.args.join(' ')
-    if (task.trim() === '') program.error('error: a task is required, for example: dsh --profile headless "run the tests"')
     const opts = program.opts()
+    const task = program.args.join(' ')
+    if (task.trim() === '' && opts.listModels !== true) program.error('error: a task is required, for example: dsh --profile headless "run the tests"')
     const values = { task }
     if (typeof opts.sessionId === 'string' && opts.sessionId !== '') values.sessionId = opts.sessionId
+    if (typeof opts.provider === 'string' && opts.provider !== '') values.provider = opts.provider
     if (typeof opts.model === 'string' && opts.model !== '') values.model = opts.model
+    if (typeof opts.reasoningEffort === 'string' && opts.reasoningEffort !== '') values.reasoningEffort = opts.reasoningEffort
     if (typeof opts.mode === 'string' && opts.mode !== '') values.mode = opts.mode
+    if (typeof opts.preset === 'string' && opts.preset !== '') values.preset = opts.preset
+    if (opts.listModels === true) values.listModels = true
     if (opts.jsonl === true) values.jsonl = true
     ctx.provide(CC_CONNECT_STARTUP_SERVICE, values)
   })

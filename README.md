@@ -57,8 +57,12 @@ dsh --profile headless --session-id abc --model deepseek-v4-pro \
 | 参数 | 行为 |
 | --- | --- |
 | `--session-id` | 指定 id 时优先恢复已有持久化 session，恢复失败才以同 id 新建 |
+| `--provider` | 覆盖本次运行的 provider route；与 `--model` 一起保证跨 provider 同名模型不歧义 |
 | `--model` | 仅覆盖本次运行的模型 |
+| `--reasoning-effort` | 覆盖本次运行的思考强度；`/reasoning` 会在下一轮传入 |
 | `--mode` | `read-only`、`workspace-write`、`danger-full-access` 或 `confirm` |
+| `--preset` | 选择 preset；已有历史的 session 不允许改 composition，空白 session 会记录 `agent-preset/selected` |
+| `--list-models` | 输出 dsh 当前运行时 provider/model catalog 的 JSON，不创建 agent |
 | `--jsonl` | stdout 流式输出 text/thinking/tool/approval/result/done 事件，并从 stdin 接收审批 |
 
 `--jsonl` 的审批回应用一行 JSON，例如：

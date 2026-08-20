@@ -12,6 +12,7 @@ in
     ".dsh/.agent-presets/codex/agent.cordis.yml".source = codexComposition;
     ".dsh/.agent-presets/codex/preset.yml".source = ./preset.yml;
     ".dsh/.agent-presets/codex/codex-surface.mjs".source = ./codex-surface.mjs;
+    ".dsh/.agent-presets/codex/codex-web-search.mjs".source = ./codex-web-search.mjs;
     ".dsh/.agent-presets/codex/codex-approval.mjs".source = ./codex-approval.mjs;
     ".dsh/.agent-presets/codex/tool-restrictions.mjs".source = ./tool-restrictions.mjs;
   };

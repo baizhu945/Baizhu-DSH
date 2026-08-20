@@ -6,11 +6,16 @@
  * 迁移为插件后的完整实现,行为与补丁版逐行等价:
  *
  * - `--session-id`:create-once / resume-always(先 agents.resume,失败回退 create)
+ * - `--provider`:本次运行的 provider route 覆盖
  * - `--model`:本次运行的模型覆盖
+ * - `--reasoning-effort`:本次运行的思考强度覆盖
  * - `--mode`:任务运行前向会话日志追加 sandbox/mode + approval/policy 旋钮事件
+ * - `--preset`:按 dsh 原生 roster mount 默认/恢复 preset，或在空白会话中
+ *   recompose 并追加 agent-preset/selected 事件
  * - `--jsonl`:stdout 流式输出 text/thinking/tool/call/tool/result/approval/request/
  *   result/done JSONL 事件;stdin 读取 approval/response;confirm 模式下拦截
  *   写/执行工具并询问(web profile confirm-writes 插件的 headless 对应实现)
+ * - `--list-models`:读取 dsh 运行时 LLM catalog 并以一行 JSON 输出，不创建 agent
  *
  * 导入的包(@deepseek-ai/dsh-agent 等)经 dsh 启动时维护的
  * `~/.dsh/profiles/node_modules` 扁平链接解析,与 profile 本地插件
@@ -20,6 +25,7 @@
 import { randomUUID } from 'node:crypto'
 import { createInterface } from 'node:readline'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
+import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 
@@ -67,6 +73,41 @@ function applyMode(session, mode) {
   const appendable = session
   appendable.append('sandbox/mode', { mode: knobs.sandbox })
   appendable.append('approval/policy', { policy: knobs.approval })
+}
+
+/** A dsh session becomes preset-locked once its first turn starts. */
+function isBlankSession(session) {
+  return !session.events.some(event => event.type === 'turn/start')
+}
+
+/**
+ * Compose the agent from its recorded preset, or apply a requested switch
+ * while the session is still blank. The dsh roster owns validation and
+ * persistence; this runner only supplies the session-specific lifecycle.
+ */
+async function applyAgentPreset(ctx, agentCtx, requested, defaultPreset) {
+  const presets = ctx.get('agentPresets')
+  if (presets === undefined) {
+    if (requested !== undefined) throw new Error('agent presets are not enabled in the headless profile')
+    return
+  }
+
+  const session = agentCtx.agent?.session
+  if (session === undefined) throw new Error('headless agent setup has no session')
+  const recorded = resolveSessionPreset(session)
+  const target = requested ?? recorded ?? defaultPreset
+  if (target === undefined) return
+
+  if (requested !== undefined && requested !== recorded) {
+    if (!isBlankSession(session)) {
+      throw new Error(`session already has a turn; preset is locked at ${JSON.stringify(recorded)}`)
+    }
+    await presets.recompose(agentCtx, requested)
+    session.append('agent-preset/selected', { agentPreset: requested })
+    return
+  }
+
+  await presets.mount(agentCtx, target)
 }
 
 /** 把一个会话事件映射成一行 JSONL(只输出驱动器能展示的事件)。 */
@@ -180,20 +221,75 @@ function fail(io, error) {
 async function run(ctx, config, io) {
   // 等待 loader 全部就绪,避免 agent 创建时工具/适配器尚未组装完成。
   await ctx.get('loader')?.await()
+
+  if (config.listModels === true) {
+    const llm = ctx.get('llm')
+    const defaultModel = ctx.get('agentDefaultModel')
+    const selection = defaultModel?.currentSelection()
+    if (selection !== undefined) {
+      if (config.provider !== undefined && config.provider !== '') selection.provider = config.provider
+      if (config.model !== undefined && config.model !== '') selection.model = config.model
+    }
+    const models = []
+    let reasoningEfforts
+    if (llm !== undefined) {
+      for (const provider of llm.listProviders()) {
+        try {
+          models.push(...await llm.listModels(provider.id))
+        } catch {
+          // One provider's catalog must not hide the other configured routes.
+        }
+      }
+      if (selection !== undefined) {
+        try {
+          const resolved = await llm.resolveModelInfo(selection.provider, selection.model)
+          reasoningEfforts = resolved.reasoning?.efforts?.map(effort => effort.id)
+        } catch {
+          // The selected route may not be mounted in headless (for example,
+          // an OAuth-only Web provider); callers retain a safe union fallback.
+        }
+      }
+    }
+    io.stdout.write(`${JSON.stringify({
+      type: 'models',
+      models,
+      ...reasoningEfforts === undefined ? {} : { reasoningEfforts },
+    })}\n`)
+    io.exit(0)
+    return
+  }
+
   const agents = ctx.get('agents')
   const defaultModel = ctx.get('agentDefaultModel')
   const sessions = ctx.get('sessions')
   if (agents === undefined || defaultModel === undefined || sessions === undefined) return
 
+  const presets = ctx.get('agentPresets')
+  const requestedPreset = config.preset
+  // Resolve the default before creating a session so the immutable dsh header
+  // records the same composition that setup mounts. Resume setup instead reads
+  // the session's recorded selection and only uses this value for a blank
+  // session explicitly requested by cc-connect.
+  const defaultPreset = presets === undefined
+    ? undefined
+    : (await presets.resolve(requestedPreset)).id
+
   const selection = defaultModel.currentSelection()
+  if (config.provider !== undefined && config.provider !== '') {
+    selection.provider = config.provider
+  }
   if (config.model !== undefined && config.model !== '') {
     selection.model = config.model
   }
+  if (config.reasoningEffort !== undefined && config.reasoningEffort !== '') {
+    selection.reasoningEffort = config.reasoningEffort
+  }
   const sessionId = SessionId(config.sessionId !== undefined && config.sessionId !== '' ? config.sessionId : `session-${randomUUID()}`)
   const agentOptions = { provider: selection.provider, model: selection.model }
-  const setup = (agentCtx) => {
+  const setup = async (agentCtx) => {
     const selected = { current: selection, assembled: undefined }
     installModelSelection(agentCtx, selected)
+    await applyAgentPreset(ctx, agentCtx, requestedPreset, defaultPreset)
   }
 
   let agent
@@ -204,7 +300,10 @@ async function run(ctx, config, io) {
     } catch {
       ({ agent } = await agents.create({
         sessionId,
-        meta: { cwd: process.cwd() },
+        meta: {
+          cwd: process.cwd(),
+          ...defaultPreset === undefined ? {} : { agentPreset: defaultPreset },
+        },
         agentOptions,
         setup,
       }))
@@ -212,7 +311,10 @@ async function run(ctx, config, io) {
   } else {
     ({ agent } = await agents.create({
       sessionId,
-      meta: { cwd: process.cwd() },
+      meta: {
+        cwd: process.cwd(),
+        ...defaultPreset === undefined ? {} : { agentPreset: defaultPreset },
+      },
       agentOptions,
       setup,
     }))
