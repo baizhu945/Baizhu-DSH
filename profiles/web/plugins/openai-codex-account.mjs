@@ -33,6 +33,19 @@ import { builtinProviders, getBuiltinModels } from '@earendil-works/pi-ai/provid
 const PI_AI_ROOT = new URL('../', import.meta.resolve('@earendil-works/pi-ai'))
 const { openaiCodexOAuth } = await import(new URL('dist/auth/oauth/openai-codex.js', PI_AI_ROOT).href)
 
+const PI_AI_AUTH = {
+  credentials: {
+    read: async () => undefined,
+    list: async () => [],
+    modify: async (_providerId, mutate) => mutate(undefined),
+    delete: async () => {},
+  },
+  authContext: {
+    env: async () => undefined,
+    fileExists: async () => false,
+  },
+}
+
 export const name = 'openai-codex-account'
 export const inject = ['llm']
 
@@ -313,6 +326,7 @@ export function apply(ctx) {
     const adapter = new PiAiAdapter({
       profiles,
       resolveApiKey: async () => getAccessToken(),
+      auth: PI_AI_AUTH,
       resolveAttachments: () => ctx.get('attachments'),
     })
     try {

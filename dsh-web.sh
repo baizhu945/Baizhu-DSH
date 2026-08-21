@@ -39,7 +39,7 @@ trap cleanup EXIT INT TERM HUP
 
 # 端口无实例时由本次运行启动服务,并记录 PID 供退出时回收
 if ! curl -sf -o /dev/null "${URL}" 2>/dev/null; then
-  dsh web --port "${PORT}" > "${HOME}/.dsh-web.log" 2>&1 &
+  dsh web --no-open --port "${PORT}" > "${HOME}/.dsh-web.log" 2>&1 &
   WEB_PID=$!
   for _ in $(seq 1 30); do
     curl -sf -o /dev/null "${URL}" 2>/dev/null && break

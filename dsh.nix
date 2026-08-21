@@ -1,12 +1,12 @@
 { config, pkgs, lib, ... }:
 
 let
-  # 源码固定版本(deepseek-harness master @ 47f9438,对应 npm 0.1.0-rc.x)
+  # deepseek-harness v0.1.1-rc.1
   dshSrc = pkgs.fetchFromGitHub {
     owner = "deepseek-ai";
     repo = "deepseek-harness";
-    rev = "47f943859bef60e4160492346772ded9b24f765a";
-    hash = "sha256-ZPGCNoPXVjP76Tm/tFPDX2X95cd83M4iHLmVP5dR+Ps=";
+    rev = "528c682e061696f5a160f363f236ecbf53cbd006";
+    hash = "sha256-daCh+O/lbv5QrJvslyEHfy+p9HcYhgTzda6I1VNnJZk=";
   };
 
   # 声明式 pnpm 依赖(fetchPnpmDeps 为 fixed-output 派生,沙箱内可联网下载;
@@ -26,12 +26,12 @@ let
       pnpm config set network-concurrency 4
     '';
 
-    hash = "sha256-aySHq0ywTMM5q7YuGHZrV3yQE3bwppgGfWH3wRnHCXk=";
+    hash = "sha256-+PsdK9u3ZKv4XtSc8tBKKP48J/95/CGTMIUf8Q8dbok=";
   };
 
   dsh = pkgs.stdenv.mkDerivation {
     pname = "dsh";
-    version = "0.1.0-rc.5";
+    version = "0.1.1-rc.1";
     src = dshSrc;
 
     pnpmDeps = dshPnpmDeps;
@@ -68,6 +68,7 @@ let
       runHook preBuild
       # node-pty 的 pty.node 由 install script 用 node-gyp 编译(--ignore-scripts 跳过)
       cd node_modules/node-pty && node-gyp rebuild && cd ../..
+      export DSH_CLIENT_COMMIT_HASH=528c682e061696f5a160f363f236ecbf53cbd006
       npm run build
       runHook postBuild
       # 把 DeepSeek V4 正式版注入 pi-ai 的 OpenRouter 目录快照。
