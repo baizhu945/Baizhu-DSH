@@ -26,6 +26,9 @@ const HIDDEN_HOST_SECTIONS = new Set([
   'harness:identity',
   'harness:source',
   'app:web-surface',
+  // The host renders the same policy in dsh-flavored prose; the preset
+  // re-expresses it inside <environment_context> in the upstream Codex shape.
+  'sandbox:policy',
 ])
 
 const textOutput = {
@@ -35,6 +38,27 @@ const textOutput = {
     properties: { text: { type: 'string', required: true } },
   },
   render: (_args, value) => [{ type: 'text', text: value.text }],
+}
+
+/** Upstream Codex renders the sandbox boundary as a <filesystem> element. */
+function filesystemElement(policy) {
+  const root = xmlEscape(policy.workspaceRoot ?? '')
+  switch (policy.mode) {
+    case 'read-only':
+      return `<filesystem><workspace_roots><root>${root}</root></workspace_roots>`
+        + '<permission_profile type="managed"><file_system type="restricted" />'
+        + '</permission_profile></filesystem>'
+    case 'workspace-write':
+      return `<filesystem><workspace_roots><root>${root}</root></workspace_roots>`
+        + '<permission_profile type="managed"><file_system type="restricted">'
+        + `<entry access="write"><path>${root}</path></entry>`
+        + '</file_system></permission_profile></filesystem>'
+    case 'danger-full-access':
+      return '<filesystem><permission_profile type="disabled">'
+        + '<file_system type="unrestricted" /></permission_profile></filesystem>'
+    default:
+      return undefined
+  }
 }
 
 function agentOf(exec) {
@@ -69,12 +93,16 @@ function localDate() {
 function registerPromptBoundary(ctx) {
   ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
     const assembled = await next()
+    const excluded = section => (
+      !HIDDEN_HOST_SECTIONS.has(section.name)
+      && !section.name.startsWith('plugin:')
+    )
     return {
       ...assembled,
-      sections: assembled.sections.filter(section => (
-        !HIDDEN_HOST_SECTIONS.has(section.name)
-        && !section.name.startsWith('plugin:')
-      )),
+      sections: assembled.sections.filter(excluded),
+      // The host's dsh-flavored sandbox policy is a dynamic context, not a
+      // section; this preset re-expresses it in <environment_context> instead.
+      contexts: assembled.contexts?.filter(excluded) ?? assembled.contexts,
     }
   })
 
@@ -85,12 +113,15 @@ function registerPromptBoundary(ctx) {
       const agent = context.agent
       if (agent === undefined) return ''
       const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+      const policy = ctx.get('sandboxPolicy')?.resolve({ session: agent.session })
+      const filesystem = policy === undefined ? undefined : filesystemElement(policy)
       return [
         '<environment_context>',
         `  <cwd>${xmlEscape(cwdOf(agent))}</cwd>`,
         '  <shell>bash</shell>',
         `  <current_date>${localDate()}</current_date>`,
         `  <timezone>${xmlEscape(timezone)}</timezone>`,
+        ...(filesystem !== undefined ? [`  ${filesystem}`] : []),
         '</environment_context>',
       ].join('\n')
     },
@@ -167,11 +198,13 @@ function presentTerminalResult(result) {
 function registerShellCommand(ctx) {
   ctx.tools.register(defineTool({
     name: 'shell_command',
-    description: 'Runs a shell command and returns its output. Always set workdir when it matters; do not use cd unless necessary.',
+    // Upstream text: codex-rs/core/src/tools/handlers/shell_spec.rs
+    // create_shell_command_tool() (non-Windows branch).
+    description: 'Runs a shell command and returns its output.\n- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary.',
     parameters: {
-      command: { type: 'string', required: true, description: 'Shell script to run in the configured Bash execution environment.' },
+      command: { type: 'string', required: true, description: "Shell script to run in the user's default shell." },
       workdir: { type: 'string', description: 'Working directory for the command. Defaults to the turn cwd.' },
-      timeout_ms: { type: 'number', description: 'Maximum command runtime. Defaults to the host shell policy.' },
+      timeout_ms: { type: 'number', description: 'Maximum command runtime. Defaults to 10000 ms.' },
     },
     output: {
       schema: {
@@ -206,10 +239,14 @@ function registerShellCommand(ctx) {
         throw new Error(`invalid timeout_ms: expected a positive number, got ${String(args.timeout_ms)}`)
       }
       const sandboxPolicy = ctx.get('sandboxPolicy')?.resolve({ session: agent.session })
+      // Match upstream's shell_command default (10000 ms) so trained Codex
+      // behavior — omitting the timeout for quick commands, raising it for
+      // builds and installs — produces the same timing contract.
+      const timeoutMs = args.timeout_ms ?? 10_000
       const result = await ctx.shell.run(ctx.shell.resolve({
         command: args.command,
         workdir: shellWorkdir(agent, args.workdir),
-        ...(args.timeout_ms !== undefined ? { timeoutMs: args.timeout_ms } : {}),
+        timeoutMs,
         signal: exec.signal,
         ...(sandboxPolicy !== undefined ? { sandboxPolicy } : {}),
       }))
@@ -308,11 +345,23 @@ function computeHunkDiffs(path, before, after) {
 }
 
 /** Build a pure approval-time preview from the patch text itself. */
-function previewPatchDiffs(patch) {
-  const lines = patch
-    .replace(/^\*\*\* Begin Patch\s*\n?/, '')
-    .replace(/\n?\*\*\* End Patch\s*$/, '')
+/**
+ * Strip the Begin/End Patch wrapper. Upstream requires the exact
+ * "*** End Patch" terminator, but tolerates whitespace around markers; we add
+ * a little more tolerance for trailing-asterisk variants (e.g.
+ * "*** End Patch ***") from models that were not trained on the format.
+ * Legitimate patch content never starts a bare line with the marker.
+ */
+function patchBody(patch) {
+  return String(patch)
+    .replace(/^[^\S\n]*\*\*\* Begin Patch[^\n]*\n?/, '')
     .split('\n')
+    .filter(line => !/^\*\*\* End Patch/.test(line.trimStart()))
+    .join('\n')
+}
+
+function previewPatchDiffs(patch) {
+  const lines = patchBody(patch).split('\n')
   const diffs = []
   let cursor = 0
   while (cursor < lines.length) {
@@ -374,10 +423,7 @@ async function writePatchedFile(ctx, exec, path, content, expectedVersion) {
 }
 
 async function applyPatch(ctx, exec, patch) {
-  const lines = patch
-    .replace(/^\*\*\* Begin Patch\s*\n?/, '')
-    .replace(/\n?\*\*\* End Patch\s*$/, '')
-    .split('\n')
+  const lines = patchBody(patch).split('\n')
   const results = []
   const diffs = []
   let cursor = 0
@@ -424,7 +470,10 @@ async function applyPatch(ctx, exec, patch) {
 function registerApplyPatch(ctx) {
   ctx.tools.register(defineTool({
     name: 'apply_patch',
-    description: 'Apply a focused text patch. Pass standard *** Begin Patch / *** End Patch text in patch. Add and Update are supported; policy-preserving Delete and Move are unavailable on this host filesystem seam.',
+    description: [
+      'Apply a focused text patch. Pass standard *** Begin Patch / *** End Patch text in patch.',
+      'Add File and Update File are supported. Delete File and Move to are unavailable on this host; to delete or move files, run `rm` or `mv` with shell_command instead of bypassing apply_patch for ordinary content edits.',
+    ].join('\n'),
     parameters: { patch: { type: 'string', required: true, description: 'Free-form patch text.' } },
     output: {
       schema: {
@@ -559,7 +608,8 @@ function registerViewImage(ctx) {
 function registerPlan(ctx) {
   ctx.tools.register(defineTool({
     name: 'update_plan',
-    description: 'Updates the task plan. Provide an optional explanation and a list of plan items. At most one step can be in_progress at a time.',
+    // Upstream text: codex-rs/core/src/tools/handlers/plan_spec.rs.
+    description: 'Updates the task plan.\nProvide an optional explanation and a list of plan items, each with a step and status.\nAt most one step can be in_progress at a time.',
     parameters: {
       explanation: { type: 'string', description: 'Optional explanation for this plan update.' },
       plan: {
@@ -611,7 +661,8 @@ function registerQuestions(ctx) {
       questions: {
         type: 'array',
         required: true,
-        description: 'Questions to show the user. Prefer 1 and do not exceed 3.',
+        // Upstream text: codex-rs/core/src/tools/handlers/request_user_input_spec.rs.
+        description: 'Questions to show the user. Prefer 1 and do not exceed 3',
         items: {
           type: 'object',
           additionalProperties: false,
@@ -850,7 +901,8 @@ function registerAgents(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'spawn_agent',
-    description: 'Spawn a background agent for a concrete bounded task. Spawned agents inherit the current model by default.',
+    // Upstream text: codex-rs/core/src/tools/handlers/multi_agents_spec.rs (V1).
+    description: 'Spawn a sub-agent for a well-scoped task. Returns the spawned agent id plus the user-facing nickname when available. Sub-agents inherit your current model by default; do not set the `model` field unless the user explicitly asks for a different model or there is a clear task-specific reason.',
     parameters: {
       message: { type: 'string', required: true, description: 'Initial plain-text task for the new agent.' },
       fork_context: { type: 'boolean', description: 'True forks completed parent history; false or omitted starts from only the task.' },
@@ -890,7 +942,8 @@ function registerAgents(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'send_input',
-    description: 'Send a message to an existing agent. Use interrupt=true to redirect its current work immediately.',
+    // Upstream text: multi_agents_spec.rs send_input V1.
+    description: 'Send a message to an existing agent. Use interrupt=true to redirect work immediately. You should reuse the agent by send_input if you believe your assigned task is highly dependent on the context of a previous task.',
     parameters: {
       target: { type: 'string', required: true, description: 'Exact agent_id returned by spawn_agent. Never invent a placeholder id.' },
       message: { type: 'string', required: true, description: 'Plain-text message to send to the agent.' },
@@ -928,7 +981,9 @@ function registerAgents(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'resume_agent',
-    description: 'Make a previously created agent available for later send_input calls. dsh cold-resumes it automatically when input is sent.',
+    // Upstream text: multi_agents_spec.rs resume_agent V1, plus this host's
+    // automatic cold-resume behavior so the model is not surprised by it.
+    description: 'Resume a previously closed agent by id so it can receive send_input and wait_agent calls. This host also cold-resumes an agent automatically when input is sent to it.',
     parameters: { id: { type: 'string', required: true, description: 'Exact agent_id returned by spawn_agent.' } },
     output: {
       schema: {
@@ -950,7 +1005,8 @@ function registerAgents(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'wait_agent',
-    description: 'Wait for agents to become idle. Returns empty status on timeout; completion content also arrives through the runtime settlement notice.',
+    // Upstream text: multi_agents_spec.rs wait_agent V1.
+    description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status.",
     parameters: {
       targets: { type: 'array', required: true, items: { type: 'string' }, description: 'Exact agent_id values returned by spawn_agent. Multiple ids wait for whichever finishes first.' },
       timeout_ms: { type: 'number', description: 'Timeout in milliseconds. Defaults to 30000; maximum 3600000.' },
@@ -995,7 +1051,9 @@ function registerAgents(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'close_agent',
-    description: 'Stop an agent current turn when it is no longer needed. Its durable session remains available for an explicit later follow-up.',
+    // Upstream phrasing (multi_agents_spec.rs close_agent V1) with this
+    // host's durable-session fact kept explicit.
+    description: "Close an agent and its current turn when it is no longer needed, and return its previous status before shutdown was requested. Don't keep agents open for too long if they are not needed anymore; a later send_input to the same id resumes its durable session.",
     parameters: { target: { type: 'string', required: true, description: 'Exact agent_id returned by spawn_agent.' } },
     output: {
       schema: {
