@@ -26,6 +26,7 @@ const HIDDEN_HOST_SECTIONS = new Set([
   'harness:identity',
   'harness:source',
   'app:web-surface',
+  'tool:pty',
   // The host renders the same policy in dsh-flavored prose; the preset
   // re-expresses it inside <environment_context> in the upstream Codex shape.
   'sandbox:policy',
@@ -194,80 +195,264 @@ function presentTerminalResult(result) {
   }
 }
 
-/** Upstream Luna uses a fresh shell_command process rather than a persistent PTY. */
-function registerShellCommand(ctx) {
+const PTY_BACKEND = 'shell'
+const execSessions = new Map()
+let nextExecSessionId = 0
+
+function outputFromOperation(operation, echoedInput, marker) {
+  try {
+    const cleaned = cleanTerminalOutput(operation.readOutput().delta, echoedInput)
+    if (typeof marker !== 'string') return { output: cleaned }
+    const markerPattern = new RegExp(`(?:^|\\n)${marker}(-?\\d+)(?:\\n|$)`)
+    const match = markerPattern.exec(cleaned)
+    if (match === null) return { output: cleaned }
+    return {
+      output: cleaned.replace(match[0], ''),
+      exitCode: Number(match[1]),
+    }
+  } catch {
+    return { output: '' }
+  }
+}
+
+function cleanTerminalOutput(text, echoedInput) {
+  let cleaned = String(text)
+    .replaceAll('\r', '')
+    .replace(/\x1b\][^\x07]*\x07/g, '')
+  if (typeof echoedInput === 'string') {
+    const echoPrefix = echoedInput.endsWith('\n') ? echoedInput : `${echoedInput}\n`
+    if (cleaned.startsWith(echoPrefix)) cleaned = cleaned.slice(echoPrefix.length)
+  }
+  return cleaned.replace(/dsh> ?$/, '')
+}
+
+function boundedOutput(output, maxOutputTokens) {
+  if (maxOutputTokens === undefined) return output
+  const maxChars = Math.max(1, Math.floor(maxOutputTokens * 4))
+  if (output.length <= maxChars) return output
+  return `${output.slice(0, maxChars)}\n[output truncated]`
+}
+
+async function waitForTerminalOperation(operation, yieldTimeMs, signal) {
+  let timer
+  const timeout = new Promise(resolve => {
+    timer = setTimeout(() => resolve({ kind: 'yield' }), yieldTimeMs)
+  })
+  try {
+    return await Promise.race([
+      operation.done.then(result => ({ kind: 'done', result })),
+      timeout,
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    signal.throwIfAborted()
+  }
+}
+
+function terminalOutputValue(record, output, elapsedMs, settled, maxOutputTokens, exitCode) {
+  const value = {
+    wall_time_seconds: elapsedMs / 1000,
+    output: boundedOutput(output, maxOutputTokens),
+  }
+  if (typeof exitCode === 'number') return { ...value, exit_code: exitCode }
+  if (settled.kind === 'yield') return { ...value, session_id: record.id }
+  if (settled.result.sessionStatus.kind === 'running') {
+    return { ...value, session_id: record.id }
+  }
+  if (typeof settled.result.sessionStatus.exitCode === 'number') {
+    return { ...value, exit_code: settled.result.sessionStatus.exitCode }
+  }
+  return value
+}
+
+async function closeExecSession(ctx, record) {
+  execSessions.delete(record.id)
+  try {
+    await ctx.terminals.kill(record.owner, record.ptyId, 'Codex exec session settled')
+  } catch {
+    // The owner-scoped terminal service also cleans up on agent disposal.
+  }
+}
+
+async function finishTerminalOperation(ctx, record, operation, startedAt, settled, maxOutputTokens) {
+  const extracted = outputFromOperation(operation, record.echoedInput, record.marker)
+  const output = extracted.output
+  const exitCode = extracted.exitCode
+  if (typeof exitCode === 'number') {
+    record.echoedInput = undefined
+    record.marker = undefined
+    const value = terminalOutputValue(record, output, Date.now() - startedAt, settled, maxOutputTokens, exitCode)
+    await closeExecSession(ctx, record)
+    return value
+  }
+  if (settled.kind === 'yield' || settled.result.sessionStatus.kind === 'running') {
+    record.operation = settled.kind === 'yield' ? operation : undefined
+    return terminalOutputValue(record, output, Date.now() - startedAt, settled, maxOutputTokens)
+  }
+  const value = terminalOutputValue(record, output, Date.now() - startedAt, settled, maxOutputTokens)
+  await closeExecSession(ctx, record)
+  return value
+}
+
+function execYieldTime(args) {
+  const value = args.yield_time_ms ?? 10_000
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`invalid yield_time_ms: expected a positive number, got ${String(value)}`)
+  }
+  return Math.min(30_000, Math.max(250, value))
+}
+
+function wrappedCommand(command, marker) {
+  const encoded = Buffer.from(String(command)).toString('base64')
+  return `__codex_cmd=$(printf %s ${encoded} | base64 -d); eval "$__codex_cmd"; __codex_status=$?; printf '\\n${marker}%s\\n' "$__codex_status"`
+}
+
+function registerExecCommand(ctx) {
+  ctx.systemPrompt.section({
+    name: 'tool:exec',
+    order: 105,
+    text: 'Use exec_command for bounded or interactive shell work. It always runs through the host PTY and shared sandbox policy; use write_stdin with the returned session_id when a command needs more input or output.',
+  })
+
   ctx.tools.register(defineTool({
-    name: 'shell_command',
-    // Upstream text: codex-rs/core/src/tools/handlers/shell_spec.rs
-    // create_shell_command_tool() (non-Windows branch).
-    description: 'Runs a shell command and returns its output.\n- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary.',
+    name: 'exec_command',
+    description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction. The host always applies the selected sandbox and approval policy.',
     parameters: {
-      command: { type: 'string', required: true, description: "Shell script to run in the user's default shell." },
+      cmd: { type: 'string', required: true, description: 'Shell command to execute.' },
       workdir: { type: 'string', description: 'Working directory for the command. Defaults to the turn cwd.' },
-      timeout_ms: { type: 'number', description: 'Maximum command runtime. Defaults to 10000 ms.' },
+      tty: { type: 'boolean', description: 'Accepted for Codex schema compatibility; this host always uses its sandboxed PTY backend.' },
+      yield_time_ms: { type: 'number', description: 'Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.' },
+      max_output_tokens: { type: 'number', description: 'Output token budget. Defaults to the host terminal bound.' },
+      shell: { type: 'string', description: 'Accepted for schema compatibility; the preset uses its configured NixOS bash.' },
+      login: { type: 'boolean', description: 'Accepted for schema compatibility; the preset controls shell startup flags.' },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
+          wall_time_seconds: { type: 'number', required: true },
           output: { type: 'string', required: true },
-          exit_code: {
-            required: true,
-            oneOf: [{ type: 'integer' }, { type: 'null' }],
-          },
-          signal: {
-            required: true,
-            oneOf: [{ type: 'string' }, { type: 'null' }],
-          },
-          timed_out: { type: 'boolean', required: true },
-          timeout_ms: { type: 'number', required: true },
+          exit_code: { type: 'number' },
+          session_id: { type: 'number' },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: renderShellResult(value) }],
+      render: (_args, value) => [{ type: 'text', text: value.output }],
       presentationMeta: (_args, value) => ({
-        ...(value.exit_code !== null ? { exitCode: value.exit_code } : {}),
-        ...(value.signal !== null ? { signal: value.signal } : {}),
+        ...(typeof value.exit_code === 'number' ? { exitCode: value.exit_code } : {}),
+        ...(value.session_id !== undefined ? { sessionId: value.session_id } : {}),
       }),
     },
     async execute(args, exec) {
       const agent = agentOf(exec)
-      if (typeof args.command !== 'string' || args.command.trim().length === 0) {
-        throw new Error('invalid command: expected a non-empty string')
+      if (typeof args.cmd !== 'string' || args.cmd.trim().length === 0) throw new Error('cmd must be a non-empty string')
+      if (args.max_output_tokens !== undefined && (!Number.isFinite(args.max_output_tokens) || args.max_output_tokens <= 0)) {
+        throw new Error(`invalid max_output_tokens: expected a positive number, got ${String(args.max_output_tokens)}`)
       }
-      if (args.timeout_ms !== undefined && (!Number.isFinite(args.timeout_ms) || args.timeout_ms <= 0)) {
-        throw new Error(`invalid timeout_ms: expected a positive number, got ${String(args.timeout_ms)}`)
+      const id = ++nextExecSessionId
+      const marker = `__DSH_CODEX_EXIT_${id}_${Date.now()}__`
+      const command = wrappedCommand(args.cmd, marker)
+      const spawned = await ctx.terminals.spawn(agent, {
+        type: PTY_BACKEND,
+        name: `codex-exec-${id}`,
+        cwd: shellWorkdir(agent, args.workdir),
+      }, exec.signal)
+      let operation
+      try {
+        const setup = ctx.terminals.startSend(agent, spawned.sessionId, {
+          text: 'stty -echo',
+          submit: true,
+          signal: exec.signal,
+        })
+        const setupResult = await setup.done
+        setup.readOutput()
+        if (setupResult.sessionStatus.kind === 'exited') throw new Error('PTY shell exited while disabling terminal echo')
+        operation = ctx.terminals.startSend(agent, spawned.sessionId, {
+          text: command,
+          submit: true,
+          signal: exec.signal,
+        })
+      } catch (error) {
+        await ctx.terminals.kill(agent, spawned.sessionId, 'Codex exec setup failed')
+        throw error
       }
-      const sandboxPolicy = ctx.get('sandboxPolicy')?.resolve({ session: agent.session })
-      // Match upstream's shell_command default (10000 ms) so trained Codex
-      // behavior — omitting the timeout for quick commands, raising it for
-      // builds and installs — produces the same timing contract.
-      const timeoutMs = args.timeout_ms ?? 10_000
-      const result = await ctx.shell.run(ctx.shell.resolve({
-        command: args.command,
-        workdir: shellWorkdir(agent, args.workdir),
-        timeoutMs,
-        signal: exec.signal,
-        ...(sandboxPolicy !== undefined ? { sandboxPolicy } : {}),
-      }))
-      if (result.aborted) throw new Error('tool call aborted')
-      return {
-        output: shellOutput(result),
-        exit_code: result.exitCode,
-        signal: result.signal,
-        timed_out: result.timedOut,
-        timeout_ms: result.timeoutMs,
+      const record = { id, owner: agent, ptyId: spawned.sessionId, operation, echoedInput: command, marker }
+      execSessions.set(id, record)
+      const startedAt = Date.now()
+      try {
+        const settled = await waitForTerminalOperation(operation, execYieldTime(args), exec.signal)
+        return finishTerminalOperation(ctx, record, operation, startedAt, settled, args.max_output_tokens)
+      } catch (error) {
+        await closeExecSession(ctx, record)
+        throw error
       }
     },
     presentCall(args) {
       return {
         card: 'terminal',
-        title: args.command,
+        title: args.cmd,
         ...(args.workdir !== undefined ? { cwd: args.workdir } : {}),
       }
     },
     presentResult(_args, result) {
-      return presentTerminalResult(result)
+      if (result.isError) return undefined
+      return { card: 'terminal', output: result.content.filter(block => block.type === 'text').map(block => block.text).join('') }
+    },
+  }))
+}
+
+function registerWriteStdin(ctx) {
+  ctx.tools.register(defineTool({
+    name: 'write_stdin',
+    description: 'Writes characters to an existing unified exec session and returns recent output.',
+    parameters: {
+      session_id: { type: 'number', required: true, description: 'Identifier of the running unified exec session.' },
+      chars: { type: 'string', description: 'Bytes to write to stdin. Defaults to empty, which polls without writing.' },
+      yield_time_ms: { type: 'number', description: 'Wait before yielding output. Non-empty writes default to 250 ms; empty polls default to 5000 ms.' },
+      max_output_tokens: { type: 'number', description: 'Output token budget. Defaults to the host terminal bound.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          wall_time_seconds: { type: 'number', required: true },
+          output: { type: 'string', required: true },
+          exit_code: { type: 'number' },
+          session_id: { type: 'number' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.output }],
+    },
+    async execute(args, exec) {
+      const agent = agentOf(exec)
+      if (!Number.isSafeInteger(args.session_id) || args.session_id <= 0) throw new Error('session_id must be a positive integer')
+      if (args.max_output_tokens !== undefined && (!Number.isFinite(args.max_output_tokens) || args.max_output_tokens <= 0)) {
+        throw new Error(`invalid max_output_tokens: expected a positive number, got ${String(args.max_output_tokens)}`)
+      }
+      const record = execSessions.get(args.session_id)
+      if (record === undefined || record.owner !== agent) throw new Error(`unknown exec session ${String(args.session_id)}`)
+      const chars = args.chars ?? ''
+      if (typeof chars !== 'string') throw new Error('chars must be a string')
+      const startedAt = Date.now()
+      if (record.operation !== undefined) {
+        const operation = record.operation
+        const settled = await waitForTerminalOperation(operation, args.yield_time_ms ?? (chars === '' ? 5_000 : 250), exec.signal)
+        const value = await finishTerminalOperation(ctx, record, operation, startedAt, settled, args.max_output_tokens)
+        if (!execSessions.has(args.session_id) || settled.kind === 'yield' || chars === '' || record.operation !== undefined) return value
+      }
+      const operation = ctx.terminals.startSend(agent, record.ptyId, {
+        text: chars,
+        submit: false,
+        signal: exec.signal,
+      })
+      record.operation = operation
+      record.echoedInput = chars
+      const settled = await waitForTerminalOperation(operation, args.yield_time_ms ?? (chars === '' ? 5_000 : 250), exec.signal)
+      return finishTerminalOperation(ctx, record, operation, startedAt, settled, args.max_output_tokens)
+    },
+    presentCall(args) {
+      return { card: 'terminal', title: args.chars || '(poll session)', description: `Session ${args.session_id}` }
     },
   }))
 }
@@ -472,7 +657,7 @@ function registerApplyPatch(ctx) {
     name: 'apply_patch',
     description: [
       'Apply a focused text patch. Pass standard *** Begin Patch / *** End Patch text in patch.',
-      'Add File and Update File are supported. Delete File and Move to are unavailable on this host; to delete or move files, run `rm` or `mv` with shell_command instead of bypassing apply_patch for ordinary content edits.',
+      'Add File and Update File are supported. Delete File and Move to are unavailable on this host; to delete or move files, use the separately approved `exec_command` instead of bypassing apply_patch for ordinary content edits.',
     ].join('\n'),
     parameters: { patch: { type: 'string', required: true, description: 'Free-form patch text.' } },
     output: {
@@ -720,29 +905,6 @@ function registerQuestions(ctx) {
   }))
 }
 
-function registerCurrentTime(ctx) {
-  ctx.tools.register(defineTool({
-    name: 'clock__curr_time',
-    description: 'Return the current time in UTC.',
-    parameters: {},
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: { current_time: { type: 'string', required: true } },
-      },
-      render: (_args, value) => [{ type: 'text', text: value.current_time }],
-    },
-    async execute() {
-      const now = new Date()
-      const pad = number => String(number).padStart(2, '0')
-      return {
-        current_time: `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())} UTC`,
-      }
-    },
-  }))
-}
-
 function agentStatusSchema() {
   return {
     oneOf: [
@@ -900,7 +1062,7 @@ function registerAgents(ctx) {
   }
 
   ctx.tools.register(defineTool({
-    name: 'spawn_agent',
+    name: 'multi_agent_v1__spawn_agent',
     // Upstream text: codex-rs/core/src/tools/handlers/multi_agents_spec.rs (V1).
     description: 'Spawn a sub-agent for a well-scoped task. Returns the spawned agent id plus the user-facing nickname when available. Sub-agents inherit your current model by default; do not set the `model` field unless the user explicitly asks for a different model or there is a clear task-specific reason.',
     parameters: {
@@ -941,7 +1103,7 @@ function registerAgents(ctx) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'send_input',
+    name: 'multi_agent_v1__send_input',
     // Upstream text: multi_agents_spec.rs send_input V1.
     description: 'Send a message to an existing agent. Use interrupt=true to redirect work immediately. You should reuse the agent by send_input if you believe your assigned task is highly dependent on the context of a previous task.',
     parameters: {
@@ -980,7 +1142,7 @@ function registerAgents(ctx) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'resume_agent',
+    name: 'multi_agent_v1__resume_agent',
     // Upstream text: multi_agents_spec.rs resume_agent V1, plus this host's
     // automatic cold-resume behavior so the model is not surprised by it.
     description: 'Resume a previously closed agent by id so it can receive send_input and wait_agent calls. This host also cold-resumes an agent automatically when input is sent to it.',
@@ -1004,7 +1166,7 @@ function registerAgents(ctx) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'wait_agent',
+    name: 'multi_agent_v1__wait_agent',
     // Upstream text: multi_agents_spec.rs wait_agent V1.
     description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status.",
     parameters: {
@@ -1050,7 +1212,7 @@ function registerAgents(ctx) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'close_agent',
+    name: 'multi_agent_v1__close_agent',
     // Upstream phrasing (multi_agents_spec.rs close_agent V1) with this
     // host's durable-session fact kept explicit.
     description: "Close an agent and its current turn when it is no longer needed, and return its previous status before shutdown was requested. Don't keep agents open for too long if they are not needed anymore; a later send_input to the same id resumes its durable session.",
@@ -1080,7 +1242,7 @@ function registerAgents(ctx) {
 export const name = 'codex-surface'
 export const inject = [
   'tools',
-  'shell',
+  'terminals',
   'userQuestions',
   'subagents',
   'agents',
@@ -1091,12 +1253,12 @@ export const inject = [
 
 export function apply(ctx) {
   registerPromptBoundary(ctx)
-  registerShellCommand(ctx)
+  registerExecCommand(ctx)
+  registerWriteStdin(ctx)
   registerApplyPatch(ctx)
   registerViewImage(ctx)
   registerPlan(ctx)
   registerQuestions(ctx)
-  registerCurrentTime(ctx)
   registerReportDelivery(ctx)
   registerAgents(ctx)
 }

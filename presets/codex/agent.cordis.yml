@@ -1,6 +1,6 @@
 # Codex-compatible agent-plane composition for DeepSeek Harness.
 #
-# OpenAI/codex reference: main @ 5ee6baee2fcc0b6ffd413d9611f5538dad40d0f2
+# OpenAI/codex reference: official HEAD @ 343074d4207d572809bd8cea15f4be1d09d98e0b
 # (model instructions, pragmatic personality, and Plan Mode template are taken
 # verbatim from that tree; only host-mechanism adaptations differ).
 # The host remains authoritative for sandboxing, approval, persistence, model
@@ -21,35 +21,63 @@
 - id: codex-approval-boundary
   name: './codex-approval.mjs'
 
-# Current GPT-5.6 Codex models use Code Mode upstream. dsh also exposes the
-# native forms in this preset so ordinary command/edit calls can use their
-# terminal and diff presenters in WebUI; `run_code` remains available for real
-# multi-tool orchestration. This affects only sessions selecting this preset.
+# Current GPT-5.6 Luna uses Code Mode upstream. dsh's reserved Code Mode
+# transport is named `run_code`; the scoped SDK below uses the official nested
+# names and schemas wherever the host can implement them. Native tools remain
+# hidden from the model, matching CodeModeOnly rather than `both`.
 - id: codex-tool-presentation
   name: '@deepseek-ai/dsh-agent-tool-presentation'
   config:
-    mode: both
+    mode: code
 
-# Codex-shaped end tools. They inherit the host-owned sandboxed shell, fs,
-# attachment, interaction, and subagent services; no authority is recreated or
-# widened in this preset.
-- id: codex-surface
-  name: './codex-surface.mjs'
+# Supply the host PTY capability used by the Codex-shaped exec_command adapter.
+# The service and its consumer share an entry-local realm so mounting this
+# preset in multiple sessions cannot collide on one process-global PTY registry.
+# Sandbox policy resolution still happens in terminal-bash through the shared
+# ctx.sandboxPolicy; this row does not grant escalation or change approvals.
+- id: codex-pty-surface
+  name: cordis:group
+  group: true
+  isolate:
+    terminals: true
+  config:
+    - id: codex-terminals
+      name: '@deepseek-ai/dsh-terminal'
 
-# Replace dsh's model-facing web tool with the preset-local Codex backend.
+    - id: codex-terminal-bash
+      name: '@deepseek-ai/dsh-terminal-bash'
+      config:
+        backendType: shell
+        shellDialect: bash
+        shellPath: '@bashPath@'
+        pollIntervalMs: 25
+        exactProbeAfterMs: 100
+        idleSilenceMs: 250
+        handoffGraceMs: 250
+        timeoutMs: 300000
+
+    - id: codex-surface
+      name: './codex-surface.mjs'
+
+# Codex-shaped end tools are mounted with the PTY consumer above. They inherit
+# the host-owned sandbox, fs, attachment, interaction, and subagent services;
+# no authority is recreated or widened in this preset.
+
+# Provide the Luna standalone `web.run` extension shape. Responses Lite does
+# not use the hosted `web_search` tool path.
 - id: codex-web-search
   name: './codex-web-search.mjs'
 
 # ── identity and instruction chain ──────────────────────────────────────────
 
-# Verbatim OpenAI Codex model instructions (gpt-5.2-codex instructions
+# OpenAI Codex model instructions (current GPT-5.6 Luna pragmatic surface,
 # template with the default Pragmatic personality), plus minimal preset-level
 # adaptations for the host's skill loader, subagents, and approval boundary.
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
     text: |
-      You are Codex, a coding agent based on GPT-5. You and the user share the same workspace and collaborate to achieve the user's goals.
+      You are Codex, a coding agent based on GPT-5.6 Luna. You and the user share the same workspace and collaborate to achieve the user's goals.
 
       # Personality
 
@@ -170,9 +198,6 @@
 
 - id: skill-filesystem
   name: '@deepseek-ai/dsh-skill-filesystem'
-
-- id: tool-skill
-  name: '@deepseek-ai/dsh-tool-skill'
 
 # ── Plan mode ───────────────────────────────────────────────────────────────
 
@@ -328,7 +353,7 @@
         headChars: 35000
         tailChars: 10000
 
-# The surface owns the Codex-shaped shell, patch, image, plan, question, clock,
+# The surface owns the Codex-shaped PTY shell, patch, image, plan, question,
 # and Luna V1 collaboration bindings. `codex-web-search.mjs` owns the live
-# OpenAI Codex web_search backend. Native dsh file/search/goal/job tools and
-# host extras remain absent from this preset's model catalog.
+# OpenAI Codex web.run backend. Native dsh file/search/goal/job tools and host
+# extras remain absent from this preset's model catalog.

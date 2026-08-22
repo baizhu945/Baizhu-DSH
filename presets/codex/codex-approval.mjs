@@ -3,7 +3,7 @@
  *
  * The host's own confirm interception keys on dsh-native tool names
  * (`bash`, `write`, …), so this scoped companion applies the same behavior to
- * the Codex names (`shell_command`, `apply_patch`). The decision folds the
+ * the Codex names (`exec_command`, `apply_patch`). The decision folds the
  * session's `sandbox/mode` + `approval/policy` knob events directly — the same
  * mathematics the host permission-presets table uses — so it works under any
  * profile naming: whenever the effective approval policy is `ask` (confirm,
@@ -16,7 +16,7 @@ export const inject = ['tools', 'permissionPresets']
 const ASK_TOOLS = new Set([
   // Code Mode itself is only an orchestration boundary. Approval remains on
   // the authority-bearing nested command/edit calls, exactly as in native mode.
-  'shell_command',
+  'exec_command',
   'apply_patch',
 ])
 

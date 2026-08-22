@@ -1,13 +1,15 @@
 /**
- * Standalone Codex-compatible web_search for the Codex preset.
+ * Standalone Codex-compatible web.run extension for the Codex preset.
  *
  * This deliberately does not use dsh's ctx.web or @deepseek-ai/dsh-tool-web.
- * It calls the same hosted Responses web_search backend used by Codex-style
- * clients, using the preset's existing OpenAI Codex OAuth credential.
+ * It calls the same `/v1/alpha/search` backend used by current Luna Code Mode,
+ * using the preset's existing OpenAI Codex OAuth credential. Responses Lite
+ * does not accept the hosted `web_search` tool declaration.
  */
 const createRequire = process.getBuiltinModule('node:module').createRequire
 const fs = process.getBuiltinModule('node:fs/promises')
 const nodePath = process.getBuiltinModule('node:path')
+const { randomUUID } = process.getBuiltinModule('node:crypto')
 const { pathToFileURL } = process.getBuiltinModule('node:url')
 const dshHome = process.env.DSH_HOME ?? `${process.env.HOME ?? '/home/baizhu945'}/.dsh`
 const requireFromDsh = createRequire(`${dshHome}/profiles/codex-web-search.cjs`)
@@ -19,7 +21,7 @@ const { defineTool } = await import(toolsEntry)
 const piAiRoot = pathToFileURL(nodePath.join(dshHome, 'profiles/node_modules/@earendil-works/pi-ai') + '/')
 const { openaiCodexOAuth } = await import(new URL('dist/auth/oauth/openai-codex.js', piAiRoot).href)
 
-const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses'
+const CODEX_SEARCH_URL = 'https://chatgpt.com/backend-api/codex/alpha/search'
 const CODEX_MODEL = 'gpt-5.6-luna'
 const SEARCH_TIMEOUT_MS = 60_000
 const MAX_RESULTS = 8
@@ -73,7 +75,7 @@ function redact(text, secret) {
 }
 
 async function accessToken(signal) {
-  if (signal.aborted) throw new Error('web_search was aborted')
+  if (signal.aborted) throw new Error('web.run was aborted')
   const credential = await readCredential()
   if (credential === undefined) {
     throw new Error('OpenAI Codex web search requires an OpenAI account login; run /openai-login first')
@@ -224,39 +226,82 @@ function extractSources(output) {
   return sources
 }
 
-async function searchCodex(query, signal) {
+function extractStructuredSources(results) {
+  const sources = []
+  const byUrl = new Map()
+  const visit = value => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item)
+      return
+    }
+    if (value === null || typeof value !== 'object') return
+    const url = value.url ?? value.source_website_url ?? value.link
+    if (typeof url === 'string') addSource(sources, byUrl, url, value.title ?? value.caption, value.snippet ?? value.description ?? '')
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'url' || key === 'source_website_url' || key === 'link' || key === 'title' || key === 'caption' || key === 'snippet' || key === 'description') continue
+      visit(child)
+    }
+  }
+  visit(results)
+  return sources
+}
+
+function searchCommands(args) {
+  const commands = {}
+  for (const key of [
+    'search_query',
+    'image_query',
+    'open',
+    'click',
+    'find',
+    'screenshot',
+    'finance',
+    'weather',
+    'sports',
+    'time',
+    'response_length',
+  ]) {
+    if (args[key] !== undefined) commands[key] = args[key]
+  }
+  return commands
+}
+
+async function searchCodex(commands, signal) {
   const auth = await accessToken(signal)
   const headers = {
     Authorization: `Bearer ${auth.token}`,
     'Content-Type': 'application/json',
-    'OpenAI-Beta': 'responses=experimental',
     originator: 'codex_cli_rs',
     ...(auth.accountId !== undefined ? { 'chatgpt-account-id': auth.accountId } : {}),
   }
-  const response = await fetch(CODEX_RESPONSES_URL, {
+  const response = await fetch(CODEX_SEARCH_URL, {
     method: 'POST',
     headers,
     body: JSON.stringify({
+      id: randomUUID(),
       model: CODEX_MODEL,
-      instructions: 'Search the web and return a concise answer grounded only in the web results. Include clickable source citations when possible.',
-      input: [{ role: 'user', content: [{ type: 'input_text', text: query }] }],
-      tools: [{ type: 'web_search' }],
-      include: ['web_search_call.action.sources'],
-      store: false,
-      stream: true,
-      tool_choice: 'required',
-      parallel_tool_calls: true,
+      commands,
+      settings: {
+        allowed_callers: ['direct'],
+        external_web_access: true,
+      },
+      max_output_tokens: 2500,
     }),
     signal: AbortSignal.any([signal, AbortSignal.timeout(SEARCH_TIMEOUT_MS)]),
   })
   const body = await response.text()
   if (body.length > MAX_RESPONSE_BYTES) throw new Error('OpenAI Codex web search response exceeded the size limit')
   if (!response.ok) {
-    throw new Error(`OpenAI Codex web search failed (HTTP ${response.status}): ${redact(body.slice(0, 400), auth.token)}`)
+    throw new Error(`OpenAI Codex web.run failed (HTTP ${response.status}): ${redact(body.slice(0, 400), auth.token)}`)
   }
-  const output = parseResponseBody(body)
-  const answer = extractAnswer(output)
-  const allSources = extractSources(output)
+  let parsed
+  try {
+    parsed = JSON.parse(body)
+  } catch (error) {
+    throw new Error(`OpenAI Codex web.run returned invalid JSON: ${String(error)}`)
+  }
+  const answer = typeof parsed?.output === 'string' ? parsed.output.trim() : ''
+  const allSources = extractStructuredSources(parsed?.results)
   if (answer === '' && allSources.length === 0) throw new Error('OpenAI Codex web search returned no answer or sources')
   return {
     ...(answer !== '' ? { content: answer } : {}),
@@ -322,20 +367,86 @@ function validMeta(meta) {
   return { sources, truncated: value.truncated, ...(value.answer !== undefined ? { answer: value.answer } : {}) }
 }
 
+const SEARCH_QUERY = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    q: { type: 'string', required: true, description: 'Search query.' },
+    recency: { type: 'number', description: 'Optional recency filter in days.' },
+    domains: { type: 'array', items: { type: 'string' }, description: 'Optional domain allowlist.' },
+  },
+}
+
+const OPEN_OPERATION = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ref_id: { type: 'string', required: true, description: 'Reference id or URL to open.' },
+    lineno: { type: 'number', description: 'Optional line number.' },
+  },
+}
+
+function webCallLabel(args) {
+  return args.search_query?.[0]?.q
+    ?? args.image_query?.[0]?.q
+    ?? args.open?.[0]?.ref_id
+    ?? 'web.run'
+}
+
 function registerWebSearch(ctx) {
-  // Shadow dsh's disabled/global guidance in this preset with the same concise
-  // citation instruction used by Codex-style hosted web search.
+  // Responses Lite exposes standalone web search as the `web.run` extension,
+  // not as a hosted Responses `web_search` declaration.
   ctx.systemPrompt.section({
-    name: 'tool:web_search',
+    name: 'tool:web.run',
     order: 110,
-    text: 'Use the web_search tool to discover current information on the web. It returns a concise answer and source URLs from the live web. Cite relevant URLs as markdown links in your answer.',
+    text: 'Use the standalone web.run extension (called tools.web__run from dsh Code Mode) to discover current information. Cite relevant source URLs as markdown links in the final answer. Use search_query for web search, image_query for image search, open/click/find for page inspection, and response_length to control detail.',
   })
 
   ctx.tools.register(defineTool({
-    name: 'web_search',
-    description: 'Search the web for current information. Returns a concise answer and a list of source URLs.',
+    name: 'web__run',
+    description: 'Access the internet through the standalone Codex web.run extension. Use search_query, image_query, open, click, find, screenshot, finance, weather, sports, or time commands. Search results include source URLs; cite them in the final answer.',
     parameters: {
-      query: { type: 'string', required: true, description: 'The search query.' },
+      search_query: { type: 'array', items: SEARCH_QUERY, description: 'Search the internet for one to four queries.' },
+      image_query: { type: 'array', items: SEARCH_QUERY, description: 'Search the internet for images.' },
+      open: { type: 'array', items: OPEN_OPERATION, description: 'Open a URL or search reference.' },
+      click: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ref_id: { type: 'string', required: true },
+            id: { type: 'number', required: true },
+          },
+        },
+      },
+      find: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ref_id: { type: 'string', required: true },
+            pattern: { type: 'string', required: true },
+          },
+        },
+      },
+      screenshot: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ref_id: { type: 'string', required: true },
+            pageno: { type: 'number', required: true },
+          },
+        },
+      },
+      finance: { type: 'array', items: { type: 'json' } },
+      weather: { type: 'array', items: { type: 'json' } },
+      sports: { type: 'array', items: { type: 'json' } },
+      time: { type: 'array', items: { type: 'json' } },
+      response_length: { type: 'string', enum: ['short', 'medium', 'long'] },
     },
     output: {
       schema: {
@@ -365,11 +476,11 @@ function registerWebSearch(ctx) {
     timeoutMs: SEARCH_TIMEOUT_MS,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
-      if (typeof args.query !== 'string' || args.query.trim() === '') throw new Error('query must be a non-empty string')
-      return searchCodex(args.query.trim(), exec.signal)
+      return searchCodex(searchCommands(args), exec.signal)
     },
     presentCall(args) {
-      return { card: 'generic', title: args.query, kind: 'search', rawInput: args.query }
+      const label = webCallLabel(args)
+      return { card: 'generic', title: label, kind: 'search', rawInput: JSON.stringify(args) }
     },
     presentResult(args, result) {
       if (result.isError) return undefined
@@ -378,7 +489,7 @@ function registerWebSearch(ctx) {
       return {
         card: 'web',
         kind: 'search',
-        title: args.query,
+        title: webCallLabel(args),
         sources: meta.sources,
         truncated: meta.truncated,
         ...(meta.answer !== undefined ? { answer: meta.answer } : {}),
