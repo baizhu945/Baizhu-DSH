@@ -119,8 +119,6 @@ in
   imports = [
     ./skills.nix
     ./skins/skin-center.nix
-    ./presets/dsh-anchored-standard.nix
-    ./presets/dsh-router-standard.nix
     ./presets/codex/dsh-codex.nix
   ];
 
