@@ -39,9 +39,92 @@ const HIDDEN_HOST_SECTIONS = new Set([
   'sandbox:policy',
 ])
 
+function humanLabel(key) {
+  return String(key)
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replaceAll('_', ' ')
+    .replace(/\b\w/g, character => character.toUpperCase())
+    .replace(/\bId\b/g, 'ID')
+    .replace(/\bUrl\b/g, 'URL')
+}
+
+function humanScalar(value) {
+  if (value === null || value === undefined) return 'none'
+  if (typeof value === 'boolean') return value ? 'yes' : 'no'
+  if (typeof value === 'string') return value === '' ? '(empty)' : value
+  return String(value)
+}
+
+function humanLines(value, indent = '') {
+  if (value === null || typeof value !== 'object') return [`${indent}${humanScalar(value)}`]
+  if (Array.isArray(value)) {
+    if (value.length === 0) return [`${indent}(none)`]
+    return value.flatMap(item => {
+      const lines = humanLines(item, `${indent}  `)
+      const first = lines[0]?.trimStart() ?? humanScalar(item)
+      return [`${indent}- ${first}`, ...lines.slice(1)]
+    })
+  }
+  const entries = Object.entries(value)
+  if (entries.length === 0) return [`${indent}(none)`]
+  return entries.flatMap(([key, child]) => {
+    const label = humanLabel(key)
+    if (child === null || typeof child !== 'object') return [`${indent}${label}: ${humanScalar(child)}`]
+    return [`${indent}${label}:`, ...humanLines(child, `${indent}  `)]
+  })
+}
+
+function humanizeValue(value, title) {
+  const body = humanLines(value).join('\n')
+  return title === undefined ? body : `${title}\n${body}`
+}
+
+function humanizeText(text) {
+  const value = String(text)
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return value
+  try {
+    return humanizeValue(JSON.parse(trimmed))
+  } catch {
+    return value
+  }
+}
+
+function humanizeBlocks(blocks) {
+  return blocks.map(block => block.type === 'text' ? { ...block, text: humanizeText(block.text) } : block)
+}
+
+function genericToolCall(title, summary, kind = 'other') {
+  return {
+    card: 'generic',
+    title,
+    kind,
+    ...(summary === undefined ? {} : { content: [{ type: 'text', text: summary }] }),
+  }
+}
+
+function genericToolResult(title, result) {
+  return { card: 'generic', title, content: humanizeBlocks(result.content) }
+}
+
+/** Keep nested Code Mode results readable without changing canonical values. */
+function registerReadableDispatchLog(ctx) {
+  const rawOutputTools = new Set(['exec_command', 'write_stdin', 'web__run'])
+  ctx.on('tools/post-execute', async (exec, result, next) => {
+    const decision = await next()
+    if (rawOutputTools.has(exec.name) || decision.kind !== 'accept' || decision.value !== undefined) return decision
+    const content = decision.content ?? result.content
+    return { ...decision, content: humanizeBlocks(content) }
+  })
+  ctx.on('tools/code-dispatch-log', async (dispatch, next) => {
+    const content = await next()
+    return rawOutputTools.has(dispatch.name) ? content : humanizeBlocks(content)
+  })
+}
+
 const textOutput = {
   schema: { type: 'string' },
-  render: (_args, value) => [{ type: 'text', text: value }],
+  render: (_args, value) => [{ type: 'text', text: humanizeText(value) }],
 }
 
 /** Upstream Codex renders the sandbox boundary as a <filesystem> element. */
@@ -1202,7 +1285,7 @@ async function directChildren(ctx, parent, signal) {
 
 function renderJsonOutput() {
   return {
-    render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    render: (_args, value) => [{ type: 'text', text: humanizeValue(value) }],
   }
 }
 
@@ -1343,6 +1426,12 @@ function registerAgents(ctx) {
       },
       ...renderJsonOutput('Agent spawned'),
     },
+    presentCall(args) {
+      return genericToolCall('Spawn sub-agent', args.message, 'execute')
+    },
+    presentResult(_args, result) {
+      return genericToolResult('Agent spawned', result)
+    },
     async execute(args, exec) {
       const parent = agentOf(exec)
       const provider = args.fork_context === true ? 'fork' : 'spawn'
@@ -1383,6 +1472,12 @@ function registerAgents(ctx) {
       },
       ...renderJsonOutput('Input queued'),
     },
+    presentCall(args) {
+      return genericToolCall(`Message sub-agent ${args.target}`, args.message, 'execute')
+    },
+    presentResult(_args, result) {
+      return genericToolResult('Input queued', result)
+    },
     async execute(args, exec) {
       const parent = agentOf(exec)
       const rows = await directChildren(ctx, parent, exec.signal)
@@ -1419,6 +1514,12 @@ function registerAgents(ctx) {
       },
       ...renderJsonOutput('Agent ready'),
     },
+    presentCall(args) {
+      return genericToolCall(`Resume sub-agent ${args.id}`, undefined, 'execute')
+    },
+    presentResult(_args, result) {
+      return genericToolResult('Agent ready', result)
+    },
     async execute(args, exec) {
       const parent = agentOf(exec)
       const rows = await directChildren(ctx, parent, exec.signal)
@@ -1451,6 +1552,12 @@ function registerAgents(ctx) {
         },
       },
       ...renderJsonOutput('Agent status'),
+    },
+    presentCall(args) {
+      return genericToolCall('Wait for sub-agents', args.targets.join(', '), 'other')
+    },
+    presentResult(_args, result) {
+      return genericToolResult('Agent status', result)
     },
     async execute(args, exec) {
       const parent = agentOf(exec)
@@ -1489,6 +1596,12 @@ function registerAgents(ctx) {
       },
       ...renderJsonOutput('Agent stopped'),
     },
+    presentCall(args) {
+      return genericToolCall(`Close sub-agent ${args.target}`, undefined, 'execute')
+    },
+    presentResult(_args, result) {
+      return genericToolResult('Agent stopped', result)
+    },
     async execute(args, exec) {
       const parent = agentOf(exec)
       const rows = await directChildren(ctx, parent, exec.signal)
@@ -1521,6 +1634,7 @@ export const inject = [
 
 export function apply(ctx) {
   registerPromptBoundary(ctx)
+  registerReadableDispatchLog(ctx)
   registerExecCommand(ctx)
   registerWriteStdin(ctx)
   registerApplyPatch(ctx)

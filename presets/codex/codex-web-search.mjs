@@ -390,6 +390,16 @@ function webCallLabel(args) {
     ?? 'web.run'
 }
 
+function webCallSummary(args) {
+  const parts = []
+  if (Array.isArray(args.search_query) && args.search_query.length > 0) parts.push(`Search: ${args.search_query.map(query => query.q).join(', ')}`)
+  if (Array.isArray(args.image_query) && args.image_query.length > 0) parts.push(`Images: ${args.image_query.map(query => query.q).join(', ')}`)
+  if (Array.isArray(args.open) && args.open.length > 0) parts.push(`Open: ${args.open.map(item => item.ref_id).join(', ')}`)
+  if (Array.isArray(args.find) && args.find.length > 0) parts.push(`Find: ${args.find.map(item => `${item.ref_id} for ${item.pattern}`).join(', ')}`)
+  if (args.response_length !== undefined) parts.push(`Response length: ${args.response_length}`)
+  return parts.join('\n') || 'Internet search'
+}
+
 function registerWebSearch(ctx) {
   ctx.tools.register(defineTool({
     name: 'web__run',
@@ -448,7 +458,7 @@ function registerWebSearch(ctx) {
     },
     presentCall(args) {
       const label = webCallLabel(args)
-      return { card: 'generic', title: label, kind: 'search', rawInput: JSON.stringify(args) }
+      return { card: 'generic', title: label, kind: 'search', content: [{ type: 'text', text: webCallSummary(args) }] }
     },
   }))
 }
