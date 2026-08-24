@@ -7,7 +7,7 @@
 - **源码级可复现构建**：`dsh.nix` 固定 `deepseek-harness` 的 Git revision 和 pnpm 依赖，使用 Node.js 22、pnpm 11 构建 host/client 两端，并生成带 `--expose-internals` 的 `dsh` 启动包装器。
 - **Web 与 headless 双 profile**：Web profile 面向交互式浏览器；headless profile 面向脚本和 `cc-connect`，两者共享模型、技能、会话和权限语义。
 - **第四种 Confirm 权限模式**：保留 DSH 原有的 Read Only、Workspace Write、Full Access，另加默认的 `confirm`：使用完整访问范围，但每次文件写入或命令执行都先询问。
-- **Codex-compatible preset**：`Codex Mode` 把 DSH 的底层能力映射为 `shell_command`、`apply_patch`、Plan、图片查看、用户提问和 Luna V1 子代理等 Codex 形状的工具，同时仍由主机统一掌管沙箱、审批、文件系统和会话持久化。
+- **Codex-compatible preset**：`Codex Mode` 把 DSH 的底层能力映射为 `exec_command`、`apply_patch`、Plan、图片查看、用户提问和 Luna V1 子代理等 Codex 形状的工具，同时仍由主机统一掌管沙箱、审批、文件系统和会话持久化。
 - **面向长任务的会话保护**：`durable-session-lease.patch` 为持久化日志增加跨进程租约和 revision guard，避免 headless 审批、恢复或多个进程同时写入同一个 session 时产生交错事件和序号回退。
 - **声明式的插件化扩展**：权限询问、审批面板、OpenAI 账号、headless JSONL runner、皮肤和 skills 都通过 profile/preset 注入，而不是长期维护一份分叉的 DSH 源码。
 
@@ -83,7 +83,7 @@ headless 的权限映射是：Read Only = `read-only + ask`，Workspace Write = 
 - `Esc` 拒绝，`Ctrl/Cmd+Enter` 允许一次，`Ctrl/Cmd+Shift+Enter` 总是允许；
 - “总是允许”只在当前页面、当前 session 的内存中生效，刷新或重启后恢复逐次询问。
 
-这与 Codex preset 中的 `codex-approval` 配合使用：Codex 形状的 `shell_command` 和 `apply_patch` 在 `confirm` 下也会进入同一审批边界，preset 本身不会扩大主机权限。
+这与 Codex preset 中的 `codex-approval` 配合使用：`exec_command` 和 `apply_patch` 在 `confirm` 下仍逐次询问；受限模式则先在沙箱内运行，仅通过一次性授权扩大单次调用，preset 不会改变持久权限。
 
 ## Preset：从渐进工具注入到 Codex Mode
 

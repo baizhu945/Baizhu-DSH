@@ -1,0 +1,238 @@
+--- a/packages/terminal/terminal/src/types.ts
++++ b/packages/terminal/terminal/src/types.ts
+@@ -40,6 +40,13 @@
+   | { kind: 'running' }
+   | { kind: 'exited'; exitCode: number | null; signal: NodeJS.Signals | null }
+ 
++/** Trusted per-spawn file sandbox policy. Omission preserves backend defaults. */
++export interface TerminalSandboxPolicy {
++  mode: 'read-only' | 'workspace-write' | 'danger-full-access'
++  workspaceRoot: string
++  sessionId?: Agent['id']
++}
++
+ /** Request to create one owner-scoped PTY session. */
+ export interface TerminalSpawnRequest {
+   /** Registered backend type. */
+@@ -48,6 +55,8 @@
+   name?: string
+   /** Optional initial working directory interpreted by the backend. */
+   cwd?: string
++  /** Optional trusted policy fixed for the complete PTY lifetime. */
++  sandboxPolicy?: TerminalSandboxPolicy
+ }
+ 
+ /** Fully identified request handed from the registry to a backend. */
+--- a/packages/terminal/terminal/src/index.ts
++++ b/packages/terminal/terminal/src/index.ts
+@@ -173,6 +173,7 @@
+         type: request.type,
+         ...request.name !== undefined ? { name: request.name } : {},
+         ...request.cwd !== undefined ? { cwd: request.cwd } : {},
++        ...request.sandboxPolicy !== undefined ? { sandboxPolicy: request.sandboxPolicy } : {},
+         signal: backendSignal,
+       })
+       signal?.throwIfAborted()
+--- a/packages/terminal/terminal-bash/src/index.ts
++++ b/packages/terminal/terminal-bash/src/index.ts
+@@ -176,7 +176,8 @@
+   async spawn(spec: TerminalBackendSpawnSpec): Promise<LocalPtySession> {
+     spec.signal?.throwIfAborted()
+     ensureSandboxModeFence(this.ctx, spec.owner)
+-    const policy = this.ctx.sandboxPolicy.resolve({ session: spec.owner.session })
++    const policy: SandboxExecutionPolicy = spec.sandboxPolicy
++      ?? this.ctx.sandboxPolicy.resolve({ session: spec.owner.session })
+     const argv = spawnArgv(this.ctx, this.config, policy)
+     if (argv[0] === undefined) throw new Error('terminal-bash: sandbox returned empty argv')
+     const terminal = await this.spawnTerminal({
+--- a/packages/fs/fs/src/index.ts
++++ b/packages/fs/fs/src/index.ts
+@@ -10,6 +10,7 @@
+ 
+ import { Context, Service } from '@deepseek-ai/cordis'
+ import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
++import { FsError } from './types.ts'
+ import type {
+   FsDirEntry,
+   FsEditOutcome,
+@@ -227,6 +228,27 @@
+     sandboxPolicy?: SandboxExecutionPolicy,
+   ): Promise<FsWriteOutcome>
+ 
++  /** Delete one regular file with an optional stale-version guard. */
++  async deleteFile(
++    target: FsTarget,
++    _expected?: { version: FsVersion },
++    _signal?: AbortSignal,
++    _sandboxPolicy?: SandboxExecutionPolicy,
++  ): Promise<void> {
++    throw new FsError(`delete is unavailable for \"${target.displayPath}\" on this filesystem backend`, 'FS_IO_ERROR')
++  }
++
++  /** Move one regular file with an optional source stale-version guard. */
++  async moveFile(
++    source: FsTarget,
++    _destination: FsTarget,
++    _expected?: { version: FsVersion },
++    _signal?: AbortSignal,
++    _sandboxPolicy?: SandboxExecutionPolicy,
++  ): Promise<FsInfo> {
++    throw new FsError(`move is unavailable for \"${source.displayPath}\" on this filesystem backend`, 'FS_IO_ERROR')
++  }
++
+   /**
+    * Atomically edit literal text. When supplied, the version guard is checked
+    * before matching so stale content reports `FS_STALE_VERSION`; omission edits
+--- a/packages/fs/fs-local/src/index.ts
++++ b/packages/fs/fs-local/src/index.ts
+@@ -6,7 +6,8 @@
+ 
+ import { Context } from '@deepseek-ai/cordis'
+ import { constants as bufferConstants } from 'node:buffer'
+-import { isAbsolute, relative, resolve, sep } from 'node:path'
++import { mkdir, rename, unlink } from 'node:fs/promises'
++import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+ import { pathToFileURL } from 'node:url'
+ import z from '@deepseek-ai/schemastery'
+ import { FileSystem, FsError, FsVersion } from '@deepseek-ai/dsh-fs'
+@@ -103,6 +104,16 @@
+     }
+   }
+ 
++  /** Acquire multiple target locks in stable order to avoid move deadlocks. */
++  private withLocks<T>(targetKeys: string[], op: () => Promise<T>): Promise<T> {
++    const keys = [...new Set(targetKeys)].sort()
++    const acquire = (index: number): Promise<T> => {
++      const key = keys[index]
++      return key === undefined ? op() : this.withLock(key, () => acquire(index + 1))
++    }
++    return acquire(0)
++  }
++
+   override async resolve(path: string, opts?: { cwd?: string; signal?: AbortSignal }): Promise<FsTarget> {
+     if (opts?.signal?.aborted) throw new FsError('resolve aborted', 'FS_ABORTED')
+     const local = await resolveLocalTarget(opts?.cwd ?? this.config.cwd, path)
+@@ -218,6 +229,64 @@
+     })
+   }
+ 
++  override async deleteFile(
++    target: FsTarget,
++    expected?: { version: FsVersion },
++    signal?: AbortSignal,
++  ): Promise<void> {
++    return this.withLock(target.targetKey, async () => {
++      if (signal?.aborted) throw new FsError('delete aborted', 'FS_ABORTED')
++      const existing = await probe(target.targetKey)
++      if (!existing) throw new FsError(`cannot delete \"${target.displayPath}\": file changed since it was read`, 'FS_STALE_VERSION')
++      if (existing.type !== 'file') throw new FsError(`cannot delete \"${target.displayPath}\": not a regular file`, 'FS_NOT_REGULAR_FILE')
++      if (expected !== undefined && existing.version !== expected.version) {
++        throw new FsError(`cannot delete \"${target.displayPath}\": file changed since it was read`, 'FS_STALE_VERSION')
++      }
++      try {
++        await unlink(target.targetKey)
++      } catch (error) {
++        throw this.mutationError('delete', target, error)
++      }
++    })
++  }
++
++  override async moveFile(
++    source: FsTarget,
++    destination: FsTarget,
++    expected?: { version: FsVersion },
++    signal?: AbortSignal,
++  ): Promise<FsInfo> {
++    if (source.targetKey === destination.targetKey) {
++      throw new FsError(`cannot move \"${source.displayPath}\" onto itself`, 'FS_IO_ERROR')
++    }
++    return this.withLocks([source.targetKey, destination.targetKey], async () => {
++      if (signal?.aborted) throw new FsError('move aborted', 'FS_ABORTED')
++      const existing = await probe(source.targetKey)
++      if (!existing) throw new FsError(`cannot move \"${source.displayPath}\": file changed since it was read`, 'FS_STALE_VERSION')
++      if (existing.type !== 'file') throw new FsError(`cannot move \"${source.displayPath}\": not a regular file`, 'FS_NOT_REGULAR_FILE')
++      if (expected !== undefined && existing.version !== expected.version) {
++        throw new FsError(`cannot move \"${source.displayPath}\": file changed since it was read`, 'FS_STALE_VERSION')
++      }
++      const destinationInfo = await probe(destination.targetKey)
++      if (destinationInfo !== null && destinationInfo.type !== 'file') {
++        throw new FsError(`cannot move to \"${destination.displayPath}\": not a regular file`, 'FS_NOT_REGULAR_FILE')
++      }
++      try {
++        await mkdir(dirname(destination.targetKey), { recursive: true })
++        await rename(source.targetKey, destination.targetKey)
++      } catch (error) {
++        throw this.mutationError('move', source, error)
++      }
++      const after = await probe(destination.targetKey)
++      if (!after) throw new FsError(`move to \"${destination.displayPath}\" did not publish a file`, 'FS_IO_ERROR')
++      return {
++        version: after.version,
++        type: after.type,
++        ...after.size !== undefined ? { size: after.size } : {},
++      }
++    })
++  }
++
+   override async editText(
+     target: FsTarget,
+     edit: FsEditRequest,
+@@ -260,6 +329,19 @@
+     if (after) return after.version
+     return FsVersion(`missing:${target.targetKey}`)
+   }
++
++  private mutationError(action: string, target: FsTarget, error: unknown): FsError {
++    const code = typeof error === 'object' && error !== null && 'code' in error
++      ? String(error.code)
++      : undefined
++    if (code === 'ENOENT') {
++      return new FsError(`cannot ${action} \"${target.displayPath}\": file changed since it was read`, 'FS_STALE_VERSION', { cause: error })
++    }
++    if (code === 'EACCES' || code === 'EPERM') {
++      return new FsError(`cannot ${action} \"${target.displayPath}\": permission denied`, 'FS_PERMISSION_DENIED', { cause: error })
++    }
++    return new FsError(`cannot ${action} \"${target.displayPath}\"`, 'FS_IO_ERROR', { cause: error })
++  }
+ }
+ 
+ export default LocalFileSystem
+--- a/packages/fs/fs-sandbox/src/index.ts
++++ b/packages/fs/fs-sandbox/src/index.ts
+@@ -112,6 +112,27 @@
+     return super.editText(await this.checkedTarget(target, sandboxPolicy), edit, expected, signal)
+   }
+ 
++  override async deleteFile(
++    target: FsTarget,
++    expected?: { version: FsVersion },
++    signal?: AbortSignal,
++    sandboxPolicy?: SandboxExecutionPolicy,
++  ): Promise<void> {
++    return super.deleteFile(await this.checkedTarget(target, sandboxPolicy), expected, signal)
++  }
++
++  override async moveFile(
++    source: FsTarget,
++    destination: FsTarget,
++    expected?: { version: FsVersion },
++    signal?: AbortSignal,
++    sandboxPolicy?: SandboxExecutionPolicy,
++  ) {
++    const checkedSource = await this.checkedTarget(source, sandboxPolicy)
++    const checkedDestination = await this.checkedTarget(destination, sandboxPolicy)
++    return super.moveFile(checkedSource, checkedDestination, expected, signal)
++  }
++
+   /**
+    * Enforce the per-call policy against `target` and return the EXACT target the
+    * mutation must use, so the checked identity is the mutated one (no
+@@ -123,7 +144,7 @@
+    * refusal — the tool layer maps it to the model-facing `[sandbox: …]` marker
+    * and the escalation hint.
+    */
+-  private async checkedTarget(target: FsTarget, sandboxPolicy?: SandboxExecutionPolicy): Promise<FsTarget> {
++  protected async checkedTarget(target: FsTarget, sandboxPolicy?: SandboxExecutionPolicy): Promise<FsTarget> {
+     const policy = sandboxPolicy ?? this.ctx.sandboxPolicy.resolve()
+     const { mode } = policy
+     if (mode === 'danger-full-access') return target

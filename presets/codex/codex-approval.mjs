@@ -1,17 +1,17 @@
 /**
- * Preserve the current dsh permission knobs for Codex-shaped tool names.
+ * Preserve dsh permission knobs while matching Codex on-request behavior.
  *
  * The host's own confirm interception keys on dsh-native tool names
  * (`bash`, `write`, …), so this scoped companion applies the same behavior to
  * the Codex names (`exec_command`, `apply_patch`). The decision folds the
  * session's `sandbox/mode` + `approval/policy` knob events directly — the same
- * mathematics the host permission-presets table uses — so it works under any
- * profile naming: whenever the effective approval policy is `ask` (confirm,
- * read-only+ask, workspace-write+ask), every mutation asks first;
- * `never` (full access) never asks.
+ * mathematics the host permission-presets table uses. Confined `ask` modes run
+ * normally inside their sandbox and request a one-shot escalation only when a
+ * tool needs it. The unrestricted `confirm` shape still asks before every
+ * mutation, preserving the existing fourth permission preset exactly.
  */
 export const name = 'codex-approval-boundary'
-export const inject = ['tools', 'permissionPresets']
+export const inject = ['tools', 'permissionPresets', 'sandboxPolicy']
 
 const ASK_TOOLS = new Set([
   // Code Mode itself is only an orchestration boundary. Approval remains on
@@ -44,7 +44,10 @@ export function apply(ctx) {
     }
     if (policy !== undefined) {
       if (policy === 'ask') {
-        return { kind: 'ask', reason: `Codex tool "${exec.name}" requires your approval` }
+        const sandbox = ctx.sandboxPolicy.resolve({ session: exec.agent.session })
+        if (sandbox.mode === 'danger-full-access') {
+          return { kind: 'ask', reason: `Codex tool "${exec.name}" requires your approval` }
+        }
       }
       return next()
     }

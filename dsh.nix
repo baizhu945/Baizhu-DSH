@@ -41,6 +41,9 @@ let
       ./patches/tool-bottom-collapse.patch
       ./patches/bash-command-hscroll.patch
       ./patches/durable-session-lease.patch
+      # Optional trusted terminal/FS seams used only by the Codex preset.
+      # Existing callers omit the new fields/methods and retain upstream behavior.
+      ./patches/codex-runtime-parity.patch
     ];
 
     nativeBuildInputs = [

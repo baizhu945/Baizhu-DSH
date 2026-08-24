@@ -8,11 +8,18 @@
  */
 const createRequire = process.getBuiltinModule('node:module').createRequire
 const nodePath = process.getBuiltinModule('node:path')
+const nodeFs = process.getBuiltinModule('node:fs/promises')
 const dshHome = process.env.DSH_HOME ?? `${process.env.HOME ?? '/home/baizhu945'}/.dsh`
 const requireFromDsh = createRequire(`${dshHome}/profiles/codex-surface.cjs`)
 const toolsEntry = requireFromDsh.resolve('@deepseek-ai/dsh-tools')
 const { defineTool } = await import(toolsEntry)
+const sandboxEntry = requireFromDsh.resolve('@deepseek-ai/dsh-sandbox')
+const { approveEscalation } = await import(sandboxEntry)
 const { structuredPatch } = requireFromDsh('diff')
+const SPAWN_AGENT_DESCRIPTION = (await nodeFs.readFile(
+  nodePath.join(dshHome, '.agent-presets/codex/codex-subagent-v1-description.md'),
+  'utf8',
+)).trimEnd()
 
 const IMAGE_EXTENSIONS = {
   '.png': 'image/png',
@@ -33,12 +40,8 @@ const HIDDEN_HOST_SECTIONS = new Set([
 ])
 
 const textOutput = {
-  schema: {
-    type: 'object',
-    additionalProperties: false,
-    properties: { text: { type: 'string', required: true } },
-  },
-  render: (_args, value) => [{ type: 'text', text: value.text }],
+  schema: { type: 'string' },
+  render: (_args, value) => [{ type: 'text', text: value }],
 }
 
 /** Upstream Codex renders the sandbox boundary as a <filesystem> element. */
@@ -90,6 +93,21 @@ function localDate() {
   return `${part('year')}-${part('month')}-${part('day')}`
 }
 
+function permissionInstructions(policy, approval) {
+  const network = 'enabled'
+  const sandbox = policy.mode === 'danger-full-access'
+    ? `Filesystem sandboxing defines which files can be read or written. sandbox_mode is danger-full-access: No filesystem sandboxing - all commands are permitted. Network access is ${network}.`
+    : policy.mode === 'workspace-write'
+      ? `Filesystem sandboxing defines which files can be read or written. sandbox_mode is workspace-write: The sandbox permits reading files, and editing files in cwd and writable_roots. Editing files in other directories requires approval. Network access is ${network}.`
+      : `Filesystem sandboxing defines which files can be read or written. sandbox_mode is read-only: The sandbox only permits reading files. Network access is ${network}.`
+  const approvals = approval === 'never'
+    ? 'Approval policy is currently never. Do not provide sandbox_permissions for any reason; escalation requests will be rejected.'
+    : policy.mode === 'danger-full-access'
+      ? 'approval_policy is unless-trusted: the harness requires user approval before every exec_command or apply_patch call.'
+      : 'Commands run inside the sandbox without prompting. After a real sandbox denial, retry the exact command with sandbox_permissions=require_escalated and a short justification; do not ask in chat first.'
+  return `<permissions instructions>\n${sandbox}\n\n${approvals}\n</permissions instructions>`
+}
+
 /** Remove deployment/UI announcements while preserving tool, skill, plan, and Code Mode sections. */
 function registerPromptBoundary(ctx) {
   ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
@@ -127,12 +145,84 @@ function registerPromptBoundary(ctx) {
       ].join('\n')
     },
   })
+
+  ctx.systemPrompt.context({
+    name: 'codex:permissions',
+    order: -90,
+    text: context => {
+      const agent = context.agent
+      if (agent === undefined) return ''
+      const policy = ctx.sandboxPolicy.resolve({ session: agent.session })
+      return permissionInstructions(policy, effectiveApprovalPolicy(agent.session.events))
+    },
+  })
 }
 
 function shellWorkdir(agent, requested) {
   const base = cwdOf(agent)
   if (requested === undefined || requested.length === 0) return base
   return nodePath.isAbsolute(requested) ? requested : nodePath.resolve(base, requested)
+}
+
+function effectiveApprovalPolicy(events) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event.type === 'approval/policy') return event.data?.policy
+  }
+  return undefined
+}
+
+function pathIsWithin(root, candidate) {
+  const relative = nodePath.relative(root, candidate)
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(relative))
+}
+
+async function approvePolicy(ctx, exec, standingPolicy, requestedMode, justification, subject) {
+  if (requestedMode === standingPolicy.mode) return standingPolicy
+  const approvedMode = await approveEscalation(
+    { requestedMode, justification, effectiveMode: standingPolicy.mode, subject },
+    {
+      approver: ctx.get('approval'),
+      agent: exec.agent,
+      callId: exec.callId,
+      toolName: exec.name,
+      signal: exec.signal,
+    },
+  )
+  return { ...standingPolicy, mode: approvedMode }
+}
+
+async function execSandboxPolicy(ctx, args, exec) {
+  const agent = agentOf(exec)
+  const standing = ctx.sandboxPolicy.resolve({ session: agent.session })
+  const requested = args.sandbox_permissions ?? 'use_default'
+  if (requested === 'use_default') return standing
+  if (requested !== 'require_escalated') throw new Error(`unsupported sandbox_permissions: ${String(requested)}`)
+  if (typeof args.justification !== 'string' || args.justification.trim() === '') {
+    throw new Error('justification is required with sandbox_permissions=require_escalated')
+  }
+  if (standing.mode === 'danger-full-access') {
+    if (effectiveApprovalPolicy(agent.session.events) === 'never') {
+      throw new Error('approval policy is never; escalated permissions cannot be requested')
+    }
+    // The confirm-only pre-execute gate already approved this unrestricted call.
+    return standing
+  }
+  return approvePolicy(ctx, exec, standing, 'danger-full-access', args.justification, 'command')
+}
+
+async function patchSandboxPolicy(ctx, exec, targets) {
+  const agent = agentOf(exec)
+  const standing = ctx.sandboxPolicy.resolve({ session: agent.session })
+  if (standing.mode === 'danger-full-access') return standing
+  const processPaths = targets.map(target => ctx.fs.processPath(target))
+  const insideWorkspace = processPaths.every(path => pathIsWithin(standing.workspaceRoot, path))
+  const requestedMode = standing.mode === 'read-only' && insideWorkspace
+    ? 'workspace-write'
+    : insideWorkspace ? standing.mode : 'danger-full-access'
+  if (requestedMode === standing.mode) return standing
+  const scope = processPaths.length === 1 ? processPaths[0] : `${processPaths.length} files`
+  return approvePolicy(ctx, exec, standing, requestedMode, `Apply patch to ${scope}`, 'patch')
 }
 
 function formatCollectedStream(stream) {
@@ -227,10 +317,13 @@ function cleanTerminalOutput(text, echoedInput) {
 }
 
 function boundedOutput(output, maxOutputTokens) {
-  if (maxOutputTokens === undefined) return output
-  const maxChars = Math.max(1, Math.floor(maxOutputTokens * 4))
+  const maxChars = Math.max(1, Math.floor((maxOutputTokens ?? 10_000) * 4))
   if (output.length <= maxChars) return output
   return `${output.slice(0, maxChars)}\n[output truncated]`
+}
+
+function approximateTokens(output) {
+  return Math.ceil(Buffer.byteLength(output, 'utf8') / 4)
 }
 
 async function waitForTerminalOperation(operation, yieldTimeMs, signal) {
@@ -251,7 +344,9 @@ async function waitForTerminalOperation(operation, yieldTimeMs, signal) {
 
 function terminalOutputValue(record, output, elapsedMs, settled, maxOutputTokens, exitCode) {
   const value = {
+    chunk_id: `${record.id}-${++record.chunk}`,
     wall_time_seconds: elapsedMs / 1000,
+    original_token_count: approximateTokens(output),
     output: boundedOutput(output, maxOutputTokens),
   }
   if (typeof exitCode === 'number') return { ...value, exit_code: exitCode }
@@ -267,6 +362,10 @@ function terminalOutputValue(record, output, elapsedMs, settled, maxOutputTokens
 
 async function closeExecSession(ctx, record) {
   execSessions.delete(record.id)
+  if (record.kind === 'pipe') {
+    if (record.process.status === 'running') record.process.kill()
+    return
+  }
   try {
     await ctx.terminals.kill(record.owner, record.ptyId, 'Codex exec session settled')
   } catch {
@@ -307,34 +406,118 @@ function wrappedCommand(command, marker) {
   return `__codex_cmd=$(printf %s ${encoded} | base64 -d); eval "$__codex_cmd"; __codex_status=$?; printf '\\n${marker}%s\\n' "$__codex_status"`
 }
 
+function shellQuote(value) {
+  const single = String.fromCharCode(39)
+  return single + String(value).replaceAll(single, single + '"' + single + '"' + single) + single
+}
+
+function commandForShell(args) {
+  if (args.shell !== undefined) {
+    return `exec ${shellQuote(args.shell)} ${args.login === true ? '-lc' : '-c'} ${shellQuote(args.cmd)}`
+  }
+  if (args.login === true) return `exec bash -lc ${shellQuote(args.cmd)}`
+  return args.cmd
+}
+
+async function waitForPipeProcess(process, yieldTimeMs, signal) {
+  let timer
+  let onAbort
+  try {
+    signal.throwIfAborted()
+    const timeout = new Promise(resolve => { timer = setTimeout(() => resolve('yield'), yieldTimeMs) })
+    const aborted = new Promise((_, reject) => {
+      onAbort = () => reject(signal.reason ?? new Error('tool call aborted'))
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    return await Promise.race([process.done.then(() => 'done'), timeout, aborted])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
+  }
+}
+
+function pipeOutput(record, elapsedMs, maxOutputTokens) {
+  const read = record.process.readOutput()
+  const markers = []
+  if (read.lossy) markers.push('[output truncated by host collection bound]')
+  if (record.process.sandbox?.denied === true) {
+    markers.push(`[sandbox: file access denied under ${record.process.sandbox.mode} mode]`)
+  }
+  const output = [read.delta, ...markers].filter(Boolean).join('\n')
+  const value = {
+    chunk_id: `${record.id}-${++record.chunk}`,
+    wall_time_seconds: elapsedMs / 1000,
+    original_token_count: approximateTokens(output),
+    output: boundedOutput(output, maxOutputTokens),
+  }
+  if (record.process.status === 'running') return { ...value, session_id: record.id }
+  return { ...value, ...(typeof record.process.exitCode === 'number' ? { exit_code: record.process.exitCode } : {}) }
+}
+
+async function startPipeExec(ctx, args, exec, policy) {
+  const agent = agentOf(exec)
+  const id = ++nextExecSessionId
+  const process = ctx.shell.start(ctx.shell.resolve({
+    command: commandForShell(args),
+    workdir: shellWorkdir(agent, args.workdir),
+    dshEnv: ctx.shellEnv.collect(exec),
+    sandboxPolicy: policy,
+  }))
+  const record = { kind: 'pipe', id, chunk: 0, owner: agent, process }
+  execSessions.set(id, record)
+  const startedAt = Date.now()
+  try {
+    await waitForPipeProcess(process, execYieldTime(args), exec.signal)
+    const value = pipeOutput(record, Date.now() - startedAt, args.max_output_tokens)
+    if (process.status !== 'running') execSessions.delete(id)
+    return value
+  } catch (error) {
+    await closeExecSession(ctx, record)
+    throw error
+  }
+}
+
 function registerExecCommand(ctx) {
   ctx.systemPrompt.section({
     name: 'tool:exec',
     order: 105,
-    text: 'Use exec_command for bounded or interactive shell work. It always runs through the host PTY and shared sandbox policy; use write_stdin with the returned session_id when a command needs more input or output.',
+    text: 'Use exec_command for bounded shell work. Set tty=true only for interactive programs; use write_stdin with a returned session_id to poll or interact.',
   })
 
   ctx.tools.register(defineTool({
     name: 'exec_command',
-    description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction. The host always applies the selected sandbox and approval policy.',
+    description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction.',
     parameters: {
       cmd: { type: 'string', required: true, description: 'Shell command to execute.' },
       workdir: { type: 'string', description: 'Working directory for the command. Defaults to the turn cwd.' },
-      tty: { type: 'boolean', description: 'Accepted for Codex schema compatibility; this host always uses its sandboxed PTY backend.' },
+      tty: { type: 'boolean', description: 'True allocates a PTY for the command; false or omitted uses plain pipes.' },
       yield_time_ms: { type: 'number', description: 'Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.' },
-      max_output_tokens: { type: 'number', description: 'Output token budget. Defaults to the host terminal bound.' },
-      shell: { type: 'string', description: 'Accepted for schema compatibility; the preset uses its configured NixOS bash.' },
-      login: { type: 'boolean', description: 'Accepted for schema compatibility; the preset controls shell startup flags.' },
+      max_output_tokens: { type: 'number', description: 'Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.' },
+      shell: { type: 'string', description: 'Shell binary to launch. Defaults to the preset environment shell.' },
+      login: { type: 'boolean', description: 'True runs the shell with login semantics; false or omitted disables them.' },
+      sandbox_permissions: {
+        type: 'string',
+        enum: ['use_default', 'require_escalated'],
+        description: 'Per-command sandbox override. Defaults to use_default; use require_escalated for unsandboxed execution.',
+      },
+      justification: { type: 'string', description: 'User-facing approval question for require_escalated; omit otherwise.' },
+      prefix_rule: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Reusable approval prefix suggestion for require_escalated. This host displays it but does not persist rules.',
+      },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
+          chunk_id: { type: 'string' },
           wall_time_seconds: { type: 'number', required: true },
           output: { type: 'string', required: true },
           exit_code: { type: 'number' },
           session_id: { type: 'number' },
+          original_token_count: { type: 'number' },
         },
       },
       render: (_args, value) => [{ type: 'text', text: value.output }],
@@ -349,13 +532,16 @@ function registerExecCommand(ctx) {
       if (args.max_output_tokens !== undefined && (!Number.isFinite(args.max_output_tokens) || args.max_output_tokens <= 0)) {
         throw new Error(`invalid max_output_tokens: expected a positive number, got ${String(args.max_output_tokens)}`)
       }
+      const policy = await execSandboxPolicy(ctx, args, exec)
+      if (args.tty !== true) return startPipeExec(ctx, args, exec, policy)
       const id = ++nextExecSessionId
       const marker = `__DSH_CODEX_EXIT_${id}_${Date.now()}__`
-      const command = wrappedCommand(args.cmd, marker)
+      const command = wrappedCommand(commandForShell(args), marker)
       const spawned = await ctx.terminals.spawn(agent, {
         type: PTY_BACKEND,
         name: `codex-exec-${id}`,
         cwd: shellWorkdir(agent, args.workdir),
+        sandboxPolicy: policy,
       }, exec.signal)
       let operation
       try {
@@ -376,7 +562,7 @@ function registerExecCommand(ctx) {
         await ctx.terminals.kill(agent, spawned.sessionId, 'Codex exec setup failed')
         throw error
       }
-      const record = { id, owner: agent, ptyId: spawned.sessionId, operation, echoedInput: command, marker }
+      const record = { kind: 'pty', id, chunk: 0, owner: agent, ptyId: spawned.sessionId, operation, echoedInput: command, marker }
       execSessions.set(id, record)
       const startedAt = Date.now()
       try {
@@ -409,17 +595,19 @@ function registerWriteStdin(ctx) {
       session_id: { type: 'number', required: true, description: 'Identifier of the running unified exec session.' },
       chars: { type: 'string', description: 'Bytes to write to stdin. Defaults to empty, which polls without writing.' },
       yield_time_ms: { type: 'number', description: 'Wait before yielding output. Non-empty writes default to 250 ms; empty polls default to 5000 ms.' },
-      max_output_tokens: { type: 'number', description: 'Output token budget. Defaults to the host terminal bound.' },
+      max_output_tokens: { type: 'number', description: 'Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.' },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
+          chunk_id: { type: 'string' },
           wall_time_seconds: { type: 'number', required: true },
           output: { type: 'string', required: true },
           exit_code: { type: 'number' },
           session_id: { type: 'number' },
+          original_token_count: { type: 'number' },
         },
       },
       render: (_args, value) => [{ type: 'text', text: value.output }],
@@ -435,6 +623,16 @@ function registerWriteStdin(ctx) {
       const chars = args.chars ?? ''
       if (typeof chars !== 'string') throw new Error('chars must be a string')
       const startedAt = Date.now()
+      if (record.kind === 'pipe') {
+        if (chars !== '') {
+          if (chars === '\u0003') record.process.kill()
+          else throw new Error('stdin is closed for a non-TTY exec session; use tty=true for interactive input')
+        }
+        await waitForPipeProcess(record.process, args.yield_time_ms ?? (chars === '' ? 5_000 : 250), exec.signal)
+        const value = pipeOutput(record, Date.now() - startedAt, args.max_output_tokens)
+        if (record.process.status !== 'running') execSessions.delete(record.id)
+        return value
+      }
       if (record.operation !== undefined) {
         const operation = record.operation
         const settled = await waitForTerminalOperation(operation, args.yield_time_ms ?? (chars === '' ? 5_000 : 250), exec.signal)
@@ -545,9 +743,9 @@ function patchBody(patch) {
     .join('\n')
 }
 
-function previewPatchDiffs(patch) {
+function parsePatchOperations(patch) {
   const lines = patchBody(patch).split('\n')
-  const diffs = []
+  const operations = []
   let cursor = 0
   while (cursor < lines.length) {
     const header = lines[cursor]
@@ -555,38 +753,72 @@ function previewPatchDiffs(patch) {
       cursor++
       continue
     }
-    if (header === '*** End of File' || header.startsWith('*** Move to:')) {
+    if (header === '*** End of File') {
       cursor++
       continue
     }
+    if (header.startsWith('*** Move to:')) throw new Error(`apply_patch move has no Update File source: ${header}`)
     const path = patchPath(header)
+    if (nodePath.isAbsolute(path)) throw new Error(`apply_patch paths must be relative to the turn cwd: ${path}`)
+    const kind = header.startsWith('*** Add File:')
+      ? 'add'
+      : header.startsWith('*** Delete File:') ? 'delete' : 'update'
     cursor++
+    let moveTo
+    if (kind === 'update' && lines[cursor]?.startsWith('*** Move to:')) {
+      moveTo = lines[cursor].slice('*** Move to:'.length).trim()
+      if (moveTo === '') throw new Error(`apply_patch move destination is empty for ${path}`)
+      if (nodePath.isAbsolute(moveTo)) throw new Error(`apply_patch move destination must be relative to the turn cwd: ${moveTo}`)
+      cursor++
+    }
     const body = []
-    while (cursor < lines.length && !lines[cursor].startsWith('*** ')) body.push(lines[cursor++])
-    if (header.startsWith('*** Add File:')) {
-      const newText = body.filter(line => line.startsWith('+')).map(line => line.slice(1)).join('\n') + '\n'
-      diffs.push({ path, oldText: null, newText })
+    while (cursor < lines.length) {
+      const line = lines[cursor]
+      if (line === '*** End of File') {
+        body.push(line)
+        cursor++
+        continue
+      }
+      if (line.startsWith('*** ')) break
+      body.push(line)
+      cursor++
+    }
+    operations.push({ kind, path, moveTo, body })
+  }
+  if (operations.length === 0) throw new Error('apply_patch contained no file operations')
+  return operations
+}
+
+function previewPatchDiffs(patch) {
+  const diffs = []
+  for (const operation of parsePatchOperations(patch)) {
+    if (operation.kind === 'add') {
+      const newText = operation.body.filter(line => line.startsWith('+')).map(line => line.slice(1)).join('\n') + '\n'
+      diffs.push({ path: operation.path, oldText: null, newText })
       continue
     }
-    if (header.startsWith('*** Delete File:')) continue
+    if (operation.kind === 'delete') {
+      diffs.push({ path: operation.path, oldText: null, newText: '' })
+      continue
+    }
     let hunkCursor = 0
-    while (hunkCursor < body.length) {
-      if (!body[hunkCursor].startsWith('@@')) {
+    while (hunkCursor < operation.body.length) {
+      if (!operation.body[hunkCursor].startsWith('@@')) {
         hunkCursor++
         continue
       }
       hunkCursor++
       const oldLines = []
       const newLines = []
-      while (hunkCursor < body.length && !body[hunkCursor].startsWith('@@')) {
-        const line = body[hunkCursor++]
+      while (hunkCursor < operation.body.length && !operation.body[hunkCursor].startsWith('@@')) {
+        const line = operation.body[hunkCursor++]
         if (![' ', '+', '-'].includes(line[0])) continue
         const text = line.slice(1)
         if (line[0] !== '+') oldLines.push(text)
         if (line[0] !== '-') newLines.push(text)
       }
       diffs.push({
-        path,
+        path: operation.moveTo ?? operation.path,
         oldText: oldLines.length > 0 ? oldLines.join('\n') : null,
         newText: newLines.join('\n'),
       })
@@ -595,10 +827,7 @@ function previewPatchDiffs(patch) {
   return diffs
 }
 
-async function writePatchedFile(ctx, exec, path, content, expectedVersion) {
-  const agent = agentOf(exec)
-  const target = await ctx.fs.resolve(path, { cwd: cwdOf(agent), signal: exec.signal })
-  const sandboxPolicy = ctx.get('sandboxPolicy')?.resolve({ session: agent.session })
+async function writePatchedFile(ctx, exec, target, content, expectedVersion, sandboxPolicy) {
   const intent = await ctx.waterfall('fs/write-intent', target, exec, () => (
     expectedVersion === undefined ? undefined : { version: expectedVersion }
   ))
@@ -607,58 +836,87 @@ async function writePatchedFile(ctx, exec, path, content, expectedVersion) {
   return { path: target.displayPath, operation: outcome.operation }
 }
 
-async function applyPatch(ctx, exec, patch) {
-  const lines = patchBody(patch).split('\n')
-  const results = []
-  const diffs = []
-  let cursor = 0
-  while (cursor < lines.length) {
-    if (!lines[cursor].startsWith('*** ')) {
-      cursor++
+async function preflightPatch(ctx, exec, patch) {
+  const agent = agentOf(exec)
+  const operations = parsePatchOperations(patch)
+  const prepared = []
+  for (const operation of operations) {
+    const target = await ctx.fs.resolve(operation.path, { cwd: cwdOf(agent), signal: exec.signal })
+    if (operation.kind === 'add') {
+      const content = operation.body.filter(line => line.startsWith('+')).map(line => line.slice(1)).join('\n') + '\n'
+      prepared.push({ ...operation, target, content })
       continue
     }
-    const header = lines[cursor]
-    if (header === '*** End of File') {
-      cursor++
-      continue
-    }
-    if (header.startsWith('*** Move to:')) {
-      throw new Error('apply_patch move is unavailable because the host filesystem seam has no policy-preserving rename operation')
-    }
-    const path = patchPath(header)
-    cursor++
-    const body = []
-    while (cursor < lines.length && !lines[cursor].startsWith('*** ')) body.push(lines[cursor++])
-    if (header.startsWith('*** Add File:')) {
-      const content = body.filter(line => line.startsWith('+')).map(line => line.slice(1)).join('\n') + '\n'
-      results.push(await writePatchedFile(ctx, exec, path, content))
-      diffs.push({ path, oldText: null, newText: content })
-      continue
-    }
-    if (header.startsWith('*** Delete File:')) {
-      throw new Error('apply_patch delete is unavailable because the host filesystem seam has no policy-preserving delete operation')
-    }
-    const agent = agentOf(exec)
-    const target = await ctx.fs.resolve(path, { cwd: cwdOf(agent), signal: exec.signal })
     const info = await ctx.fs.stat(target, exec.signal)
-    if (info === undefined || info.type !== 'file') throw new Error(`apply_patch target is not a regular file: ${path}`)
+    if (info === undefined || info.type !== 'file') {
+      throw new Error(`apply_patch target is not a regular file: ${operation.path}`)
+    }
     const original = await ctx.fs.readText(target, exec.signal)
     ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec)
-    const next = applyHunks(original, body, target.displayPath)
-    results.push(await writePatchedFile(ctx, exec, path, next, info.version))
-    diffs.push(...computeHunkDiffs(target.displayPath, original, next))
+    if (operation.kind === 'delete') {
+      prepared.push({ ...operation, target, info, original })
+      continue
+    }
+    const hasHunks = operation.body.some(line => line.startsWith('@@'))
+    const content = hasHunks ? applyHunks(original, operation.body, target.displayPath) : original
+    const destination = operation.moveTo === undefined
+      ? undefined
+      : await ctx.fs.resolve(operation.moveTo, { cwd: cwdOf(agent), signal: exec.signal })
+    prepared.push({ ...operation, target, destination, info, original, content })
   }
-  if (results.length === 0) throw new Error('apply_patch contained no file operations')
+  return prepared
+}
+
+async function applyPatch(ctx, exec, patch) {
+  const operations = await preflightPatch(ctx, exec, patch)
+  const policyTargets = operations.flatMap(operation => [
+    operation.target,
+    ...(operation.destination === undefined ? [] : [operation.destination]),
+  ])
+  const sandboxPolicy = await patchSandboxPolicy(ctx, exec, policyTargets)
+  const results = []
+  const diffs = []
+  for (const operation of operations) {
+    if (operation.kind === 'add') {
+      results.push(await writePatchedFile(ctx, exec, operation.target, operation.content, undefined, sandboxPolicy))
+      diffs.push({ path: operation.target.displayPath, oldText: null, newText: operation.content })
+      continue
+    }
+    if (operation.kind === 'delete') {
+      await ctx.fs.deleteFile(operation.target, { version: operation.info.version }, exec.signal, sandboxPolicy)
+      ctx.emit('fs/observed', operation.target, { kind: 'absent' }, exec)
+      results.push({ path: operation.target.displayPath, operation: 'delete' })
+      diffs.push({ path: operation.target.displayPath, oldText: operation.original, newText: '' })
+      continue
+    }
+    const written = await writePatchedFile(
+      ctx, exec, operation.target, operation.content, operation.info.version, sandboxPolicy,
+    )
+    diffs.push(...computeHunkDiffs(
+      operation.destination?.displayPath ?? operation.target.displayPath,
+      operation.original,
+      operation.content,
+    ))
+    if (operation.destination === undefined) {
+      results.push(written)
+      continue
+    }
+    const movedInfo = await ctx.fs.stat(operation.target, exec.signal)
+    if (movedInfo === undefined) throw new Error(`apply_patch move source disappeared: ${operation.path}`)
+    const outcome = await ctx.fs.moveFile(
+      operation.target, operation.destination, { version: movedInfo.version }, exec.signal, sandboxPolicy,
+    )
+    ctx.emit('fs/observed', operation.target, { kind: 'absent' }, exec)
+    ctx.emit('fs/observed', operation.destination, { kind: 'present', version: outcome.version }, exec)
+    results.push({ path: operation.destination.displayPath, operation: 'move' })
+  }
   return { files: results, diffs }
 }
 
 function registerApplyPatch(ctx) {
   ctx.tools.register(defineTool({
     name: 'apply_patch',
-    description: [
-      'Apply a focused text patch. Pass standard *** Begin Patch / *** End Patch text in patch.',
-      'Add File and Update File are supported. Delete File and Move to are unavailable on this host; to delete or move files, use the separately approved `exec_command` instead of bypassing apply_patch for ordinary content edits.',
-    ].join('\n'),
+    description: 'The apply_patch tool edits files with standard *** Begin Patch / *** End Patch text. Add, Delete, Update, and Move operations are supported. Paths must be relative to the turn cwd. This host uses an object wrapper because dsh Code Mode does not expose OpenAI freeform tools.',
     parameters: { patch: { type: 'string', required: true, description: 'Free-form patch text.' } },
     output: {
       schema: {
@@ -737,13 +995,17 @@ function registerViewImage(ctx) {
   ctx.tools.register(defineTool({
     name: 'view_image',
     description: 'View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.',
-    parameters: { path: { type: 'string', required: true, description: 'Local filesystem path to an image file.' } },
+    parameters: {
+      path: { type: 'string', required: true, description: 'Local filesystem path to an image file.' },
+      detail: { type: 'string', enum: ['high', 'original'], description: 'Image detail level. Defaults to high; use original to preserve exact resolution.' },
+    },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
           path: { type: 'string', required: true },
+          detail: { type: 'string', required: true, enum: ['high', 'original'] },
           image: {
             type: 'object',
             required: true,
@@ -777,7 +1039,7 @@ function registerViewImage(ctx) {
         attachments.imageLimits.maxMessageImageBytes,
       ))
       const ref = await attachments.saveImage({ data: bytes, mediaType, name: target.displayPath.split('/').at(-1) })
-      return { path: target.displayPath, image: ref }
+      return { path: target.displayPath, detail: args.detail ?? 'high', image: ref }
     },
     presentCall(args) {
       return { card: 'generic', title: `View image ${args.path}`, kind: 'read', locations: [{ path: args.path }] }
@@ -820,7 +1082,7 @@ function registerPlan(ctx) {
       if (active.length > 1) throw new Error('at most one plan item may be in_progress')
       const todos = args.plan.map(item => ({ content: item.step, status: item.status }))
       agent.session.append('todo/write', { todos })
-      return { text: 'Plan updated' }
+      return 'Plan updated'
     },
     presentCall(args) {
       const active = args.plan.find(item => item.status === 'in_progress')
@@ -885,7 +1147,7 @@ function registerQuestions(ctx) {
         throw new Error('request_user_input requires two to three options for every question')
       }
       const value = await ctx.userQuestions.ask({ questions: args.questions, agent, signal: exec.signal })
-      return { text: JSON.stringify(value) }
+      return JSON.stringify(value)
     },
     presentCall(args) {
       return {
@@ -1063,12 +1325,12 @@ function registerAgents(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'multi_agent_v1__spawn_agent',
-    // Upstream text: codex-rs/core/src/tools/handlers/multi_agents_spec.rs (V1).
-    description: 'Spawn a sub-agent for a well-scoped task. Returns the spawned agent id plus the user-facing nickname when available. Sub-agents inherit your current model by default; do not set the `model` field unless the user explicitly asks for a different model or there is a clear task-specific reason.',
+    description: SPAWN_AGENT_DESCRIPTION,
     parameters: {
       message: { type: 'string', required: true, description: 'Initial plain-text task for the new agent.' },
       fork_context: { type: 'boolean', description: 'True forks completed parent history; false or omitted starts from only the task.' },
       model: { type: 'string', description: 'Optional model override for the new agent.' },
+      reasoning_effort: { type: 'string', description: 'Reasoning effort override for the new agent. Omit to inherit the parent effort.' },
     },
     output: {
       schema: {
@@ -1085,15 +1347,17 @@ function registerAgents(ctx) {
       const parent = agentOf(exec)
       const provider = args.fork_context === true ? 'fork' : 'spawn'
       if (!ctx.subagents.list().includes(provider)) throw new Error(`subagent provider is unavailable: ${provider}`)
+      const agentOptions = {
+        ...(args.model !== undefined ? { model: args.model } : {}),
+        ...(args.reasoning_effort !== undefined ? { reasoningEffort: args.reasoning_effort } : {}),
+      }
       const child = await ctx.subagents.startContinuable({
         provider,
         label: args.message.trim().slice(0, 80) || 'subagent',
         request: {
           parent,
           prompt: [{ type: 'text', text: args.message }],
-          ...(args.model !== undefined ? {
-            agentOptions: { model: args.model },
-          } : {}),
+          ...(Object.keys(agentOptions).length > 0 ? { agentOptions } : {}),
         },
         signal: exec.signal,
       })
@@ -1243,6 +1507,10 @@ export const name = 'codex-surface'
 export const inject = [
   'tools',
   'terminals',
+  'shell',
+  'shellEnv',
+  'sandboxPolicy',
+  'approval',
   'userQuestions',
   'subagents',
   'agents',

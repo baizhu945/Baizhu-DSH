@@ -22,12 +22,14 @@ const piAiRoot = pathToFileURL(nodePath.join(dshHome, 'profiles/node_modules/@ea
 const { openaiCodexOAuth } = await import(new URL('dist/auth/oauth/openai-codex.js', piAiRoot).href)
 
 const CODEX_SEARCH_URL = 'https://chatgpt.com/backend-api/codex/alpha/search'
-const CODEX_MODEL = 'gpt-5.6-luna'
 const SEARCH_TIMEOUT_MS = 60_000
-const MAX_RESULTS = 8
 const REFRESH_SKEW_MS = 60_000
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 const credentialFile = nodePath.join(dshHome, 'openai-codex-credentials.json')
+const WEB_RUN_DESCRIPTION = (await fs.readFile(
+  nodePath.join(dshHome, '.agent-presets/codex/codex-web-run-description.md'),
+  'utf8',
+)).trimEnd()
 let refreshChain = Promise.resolve()
 
 async function readCredential() {
@@ -266,8 +268,10 @@ function searchCommands(args) {
   return commands
 }
 
-async function searchCodex(commands, signal) {
-  const auth = await accessToken(signal)
+async function searchCodex(commands, exec) {
+  const agent = exec.agent
+  if (agent === undefined) throw new Error('web.run requires a live agent')
+  const auth = await accessToken(exec.signal)
   const headers = {
     Authorization: `Bearer ${auth.token}`,
     'Content-Type': 'application/json',
@@ -278,16 +282,16 @@ async function searchCodex(commands, signal) {
     method: 'POST',
     headers,
     body: JSON.stringify({
-      id: randomUUID(),
-      model: CODEX_MODEL,
+      id: String(agent.session.id ?? randomUUID()),
+      model: agent.options.model ?? 'gpt-5.6-luna',
       commands,
       settings: {
         allowed_callers: ['direct'],
         external_web_access: true,
       },
-      max_output_tokens: 2500,
+      max_output_tokens: 10_000,
     }),
-    signal: AbortSignal.any([signal, AbortSignal.timeout(SEARCH_TIMEOUT_MS)]),
+    signal: AbortSignal.any([exec.signal, AbortSignal.timeout(SEARCH_TIMEOUT_MS)]),
   })
   const body = await response.text()
   if (body.length > MAX_RESPONSE_BYTES) throw new Error('OpenAI Codex web search response exceeded the size limit')
@@ -303,11 +307,8 @@ async function searchCodex(commands, signal) {
   const answer = typeof parsed?.output === 'string' ? parsed.output.trim() : ''
   const allSources = extractStructuredSources(parsed?.results)
   if (answer === '' && allSources.length === 0) throw new Error('OpenAI Codex web search returned no answer or sources')
-  return {
-    ...(answer !== '' ? { content: answer } : {}),
-    sources: allSources.slice(0, MAX_RESULTS),
-    truncated: allSources.length > MAX_RESULTS,
-  }
+  if (answer !== '') return answer
+  return allSources.map(source => `- [${sourceLabel(source)}](${source.url})`).join('\n')
 }
 
 function sourceLabel(source) {
@@ -319,60 +320,12 @@ function sourceLabel(source) {
   }
 }
 
-function formatSearchOutput(value) {
-  const parts = []
-  if (value.content !== undefined && value.content !== '') parts.push(value.content)
-  if (value.sources.length > 0) {
-    parts.push(`Sources:\n${value.sources.map(source => {
-      const metadata = []
-      if (source.snippet !== undefined && source.snippet !== '') metadata.push(source.snippet)
-      const suffix = metadata.length > 0 ? ` — ${metadata.join(' ')}` : ''
-      return `- [${sourceLabel(source)}](${source.url})${suffix}`
-    }).join('\n')}`)
-  } else if (value.content === undefined || value.content === '') {
-    parts.push('No results found.')
-  }
-  if (value.truncated) parts.push(`(Showing the first ${value.sources.length} sources. Refine the query for more.)`)
-  parts.push('Cite the relevant URLs above as markdown links in your answer.')
-  return parts.join('\n\n')
-}
-
-function projectSource(source) {
-  return {
-    url: source.url,
-    ...(source.title !== undefined ? { title: source.title } : {}),
-    ...(source.snippet !== undefined ? { snippet: source.snippet } : {}),
-  }
-}
-
-function searchMeta(value) {
-  return {
-    sources: value.sources.map(projectSource),
-    truncated: value.truncated,
-    ...(value.content !== undefined ? { answer: value.content } : {}),
-  }
-}
-
-function validMeta(meta) {
-  if (meta === null || typeof meta !== 'object' || Array.isArray(meta)) return undefined
-  const value = meta
-  if (!Array.isArray(value.sources) || typeof value.truncated !== 'boolean') return undefined
-  if (value.answer !== undefined && typeof value.answer !== 'string') return undefined
-  const sources = value.sources.filter(source => (
-    source !== null && typeof source === 'object' && typeof source.url === 'string'
-    && (source.title === undefined || typeof source.title === 'string')
-    && (source.snippet === undefined || typeof source.snippet === 'string')
-  ))
-  if (sources.length !== value.sources.length) return undefined
-  return { sources, truncated: value.truncated, ...(value.answer !== undefined ? { answer: value.answer } : {}) }
-}
-
 const SEARCH_QUERY = {
   type: 'object',
   additionalProperties: false,
   properties: {
     q: { type: 'string', required: true, description: 'Search query.' },
-    recency: { type: 'number', description: 'Optional recency filter in days.' },
+    recency: { type: 'integer', description: 'Whether to filter by recency, as a number of recent days.' },
     domains: { type: 'array', items: { type: 'string' }, description: 'Optional domain allowlist.' },
   },
 }
@@ -382,7 +335,51 @@ const OPEN_OPERATION = {
   additionalProperties: false,
   properties: {
     ref_id: { type: 'string', required: true, description: 'Reference id or URL to open.' },
-    lineno: { type: 'number', description: 'Optional line number.' },
+    lineno: { type: 'integer', description: 'Line number to position the page at.' },
+  },
+}
+
+const FINANCE_OPERATION = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ticker: { type: 'string', required: true, description: 'Ticker symbol to look up.' },
+    type: { type: 'string', required: true, enum: ['equity', 'fund', 'crypto', 'index'], description: 'Asset type to look up.' },
+    market: { type: 'string', description: 'ISO 3166-1 alpha-3 country code, OTC, or empty for cryptocurrency.' },
+  },
+}
+
+const WEATHER_OPERATION = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    location: { type: 'string', required: true, description: 'Location in Country, Area, City format.' },
+    start: { type: 'string', description: 'Start date in YYYY-MM-DD format. Defaults to today.' },
+    duration: { type: 'integer', description: 'Number of days to return. Defaults to 7.' },
+  },
+}
+
+const SPORTS_OPERATION = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    tool: { type: 'string', enum: ['sports'] },
+    fn: { type: 'string', required: true, enum: ['schedule', 'standings'], description: 'Sports function to call.' },
+    league: { type: 'string', required: true, enum: ['nba', 'wnba', 'nfl', 'nhl', 'mlb', 'epl', 'ncaamb', 'ncaawb', 'ipl'] },
+    team: { type: 'string' },
+    opponent: { type: 'string' },
+    date_from: { type: 'string' },
+    date_to: { type: 'string' },
+    num_games: { type: 'integer' },
+    locale: { type: 'string' },
+  },
+}
+
+const TIME_OPERATION = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    utc_offset: { type: 'string', required: true, description: 'UTC offset formatted like +03:00.' },
   },
 }
 
@@ -394,17 +391,9 @@ function webCallLabel(args) {
 }
 
 function registerWebSearch(ctx) {
-  // Responses Lite exposes standalone web search as the `web.run` extension,
-  // not as a hosted Responses `web_search` declaration.
-  ctx.systemPrompt.section({
-    name: 'tool:web.run',
-    order: 110,
-    text: 'Use the standalone web.run extension (called tools.web__run from dsh Code Mode) to discover current information. Cite relevant source URLs as markdown links in the final answer. Use search_query for web search, image_query for image search, open/click/find for page inspection, and response_length to control detail.',
-  })
-
   ctx.tools.register(defineTool({
     name: 'web__run',
-    description: 'Access the internet through the standalone Codex web.run extension. Use search_query, image_query, open, click, find, screenshot, finance, weather, sports, or time commands. Search results include source URLs; cite them in the final answer.',
+    description: WEB_RUN_DESCRIPTION,
     parameters: {
       search_query: { type: 'array', items: SEARCH_QUERY, description: 'Search the internet for one to four queries.' },
       image_query: { type: 'array', items: SEARCH_QUERY, description: 'Search the internet for images.' },
@@ -416,7 +405,7 @@ function registerWebSearch(ctx) {
           additionalProperties: false,
           properties: {
             ref_id: { type: 'string', required: true },
-            id: { type: 'number', required: true },
+            id: { type: 'integer', required: true },
           },
         },
       },
@@ -438,68 +427,34 @@ function registerWebSearch(ctx) {
           additionalProperties: false,
           properties: {
             ref_id: { type: 'string', required: true },
-            pageno: { type: 'number', required: true },
+            pageno: { type: 'integer', required: true },
           },
         },
       },
-      finance: { type: 'array', items: { type: 'json' } },
-      weather: { type: 'array', items: { type: 'json' } },
-      sports: { type: 'array', items: { type: 'json' } },
-      time: { type: 'array', items: { type: 'json' } },
+      finance: { type: 'array', items: FINANCE_OPERATION },
+      weather: { type: 'array', items: WEATHER_OPERATION },
+      sports: { type: 'array', items: SPORTS_OPERATION },
+      time: { type: 'array', items: TIME_OPERATION },
       response_length: { type: 'string', enum: ['short', 'medium', 'long'] },
     },
     output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          content: { type: 'string' },
-          sources: {
-            type: 'array',
-            required: true,
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                url: { type: 'string', required: true },
-                title: { type: 'string' },
-                snippet: { type: 'string' },
-              },
-            },
-          },
-          truncated: { type: 'boolean', required: true },
-        },
-      },
-      render: (_args, value) => [{ type: 'text', text: formatSearchOutput(value) }],
-      presentationMeta: (_args, value) => searchMeta(value),
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
     },
     timeoutMs: SEARCH_TIMEOUT_MS,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
-      return searchCodex(searchCommands(args), exec.signal)
+      return searchCodex(searchCommands(args), exec)
     },
     presentCall(args) {
       const label = webCallLabel(args)
       return { card: 'generic', title: label, kind: 'search', rawInput: JSON.stringify(args) }
     },
-    presentResult(args, result) {
-      if (result.isError) return undefined
-      const meta = validMeta(result.meta)
-      if (meta === undefined) return undefined
-      return {
-        card: 'web',
-        kind: 'search',
-        title: webCallLabel(args),
-        sources: meta.sources,
-        truncated: meta.truncated,
-        ...(meta.answer !== undefined ? { answer: meta.answer } : {}),
-      }
-    },
   }))
 }
 
 export const name = 'codex-web-search'
-export const inject = ['tools', 'systemPrompt']
+export const inject = ['tools']
 
 export function apply(ctx) {
   registerWebSearch(ctx)
