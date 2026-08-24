@@ -44,6 +44,8 @@ let
       # Optional trusted terminal/FS seams used only by the Codex preset.
       # Existing callers omit the new fields/methods and retain upstream behavior.
       ./patches/codex-runtime-parity.patch
+      # Let Code Mode subcalls reuse the same human-facing tool cards as native calls.
+      ./patches/codex-readable-tools.patch
     ];
 
     nativeBuildInputs = [
@@ -82,8 +84,10 @@ let
       # 所以列表永远无法自愈。这里在构建期把正式版补进内置目录数据,
       # 重启 dsh 后 4 个版本(flash/pro × 预览/正式)都会出现在模型列表。
       python3 ${./patches/inject-openrouter-models.py} ${./patches/openrouter-extra-models.json}
-      # pi-ai 0.82.1 把 GPT-5.6 的 272000 价格分层阈值误当成上下文上限；
-      # OpenAI API / Codex 目录统一修正为公开目录报告的 1050000。
+      # pi-ai 0.82.1 的 OpenAI API 目录把 GPT-5.6 的 272000 价格分层阈值
+      # 误当成上下文上限，修正 OpenAI API 目录；OpenAI Codex 目录保留
+      # 官方 Codex CLI 的 272000 值，由 Codex preset 的官方 catalog 驱动
+      # max_context_window 等模型能力。
       python3 ${./patches/fix-gpt56-context.py}
     '';
 

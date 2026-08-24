@@ -29,7 +29,9 @@
 - id: codex-tool-presentation
   name: '@deepseek-ai/dsh-agent-tool-presentation'
   config:
-    mode: code
+    # The official catalog decides native versus CodeModeOnly per model. The
+    # parity row projects and guards the effective surface at each request.
+    mode: both
 
 # Supply the host PTY capability used by the Codex-shaped exec_command adapter.
 # The service and its consumer share an entry-local realm so mounting this
@@ -59,6 +61,11 @@
 
     - id: codex-surface
       name: './codex-surface.mjs'
+
+    # Read the pinned official model catalog at every prompt/request boundary.
+    # This row is inside the Codex preset scope and cannot affect other agents.
+    - id: codex-model-parity
+      name: './codex-model-parity.mjs'
 
 # Codex-shaped end tools are mounted with the PTY consumer above. They inherit
 # the host-owned sandbox, fs, attachment, interaction, and subagent services;

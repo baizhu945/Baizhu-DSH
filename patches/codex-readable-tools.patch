@@ -1,0 +1,85 @@
+--- a/packages/host/apiproxy/src/api-proxy.ts
++++ b/packages/host/apiproxy/src/api-proxy.ts
+@@ -704,6 +704,20 @@
+   scope?: ScopeKey,
+ ): ToolEventView | undefined {
+   try {
++    if (event.type === 'tool/code-dispatch-start' || event.type === 'tool/code-dispatch') {
++      const { name, arguments: args } = event.data
++      const tool = ctx.tools.get(name, scope)
++      if (tool === undefined) return undefined
++      if (event.type === 'tool/code-dispatch-start') {
++        const view = tool.presentCall?.(args)
++        return view === undefined ? undefined : { for: 'call', view }
++      }
++      const view = tool.presentResult?.(args, {
++        content: event.data.content,
++        isError: event.data.isError === true,
++      })
++      return view === undefined ? undefined : { for: 'result', view }
++    }
+     if (event.type === 'tool/call') {
+       const { name, arguments: raw } = event.data as ToolCallData
+       const view = ctx.tools.get(name, scope)?.presentCall?.(JSON.parse(raw))
+--- a/packages/client/ui-conversation/src/client/conversation-nodes/tool.ts
++++ b/packages/client/ui-conversation/src/client/conversation-nodes/tool.ts
+@@ -87,7 +87,7 @@
+     turn: locationTurn(match),
+     step: locationStep(match),
+     time: match.event.time,
+-    callView: null,
++    callView: match.view?.for === 'call' ? match.view.view : null,
+     subCalls: [],
+   }
+ }
+@@ -102,8 +102,8 @@
+     callTime: previous?.time ?? null,
+     content: data.content ?? [],
+     isError: data.isError === true,
+-    callView: null,
+-    resultView: null,
++    callView: previous?.callView ?? (match.view?.for === 'call' ? match.view.view : null),
++    resultView: match.view?.for === 'result' ? match.view.view : null,
+     subCalls: [],
+   }
+ }
+--- a/packages/client/ui-trajectory/src/client/layout.ts
++++ b/packages/client/ui-trajectory/src/client/layout.ts
+@@ -432,7 +432,7 @@
+             kind: 'tool',
+             sourceSeq: node.seq,
+             ...(node.call !== null
+-              ? summarizeCall(node.call.name, node.call.argsRaw)
++              ? summarizeCall(node.call.name, node.call.argsRaw, node.callView)
+               : resultAsText(resultPreview)),
+             ...(node.call !== null ? { inputDetail: node.call.argsRaw } : {}),
+             outputDetail: detailResult(node),
+@@ -1010,9 +1010,9 @@
+         callId: sub.callId,
+         ...(settled
+           ? (sub.call !== null
+-            ? summarizeCall(sub.call.name, sub.call.argsRaw)
++            ? summarizeCall(sub.call.name, sub.call.argsRaw, sub.callView)
+             : resultAsText(resultPreview))
+-          : summarizeCall(sub.name, sub.argsRaw)),
++          : summarizeCall(sub.name, sub.argsRaw, sub.callView)),
+         ...(settled
+           ? (sub.call !== null ? { inputDetail: sub.call.argsRaw } : {})
+           : { inputDetail: sub.argsRaw }),
+@@ -1044,7 +1044,16 @@
+ function summarizeCall(
+   name: string,
+   argsRaw: string,
++  view?: unknown,
+ ): Pick<TrajectoryCellProps, 'text' | 'previewMarkdown'> {
++  if (typeof view === 'object' && view !== null && 'title' in view && typeof view.title === 'string') {
++    const record = view as { title: string; card?: string; cwd?: string; rawInput?: string }
++    if (record.card === 'terminal') {
++      return { text: record.title, ...(record.cwd === undefined ? {} : { previewMarkdown: 'Working directory: ' + record.cwd }) }
++    }
++    if (record.rawInput !== undefined) return { text: record.title, previewMarkdown: record.rawInput }
++    return { text: record.title }
++  }
+   return {
+     text: name,
+     ...(argsRaw === '' ? {} : { previewMarkdown: argsRaw }),

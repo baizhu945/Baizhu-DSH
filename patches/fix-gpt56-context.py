@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""修复 pi-ai 内置 GPT-5.6 目录的上下文长度。
+"""修复 pi-ai 内置 OpenAI API GPT-5.6 目录的上下文长度。
 
-pi-ai 0.82.1 把 GPT-5.6 的 OpenAI / OpenAI Codex 条目错误地写成
-272000；这个数是价格分层的 inputTokensAbove 阈值，不是模型上下文上限。
-OpenRouter 的公开模型目录对同一系列报告 1050000，上游条目应与之保持一致。
+OpenAI API / OpenRouter 的 GPT-5.6 目录使用 1050000；OpenAI Codex
+不是同一目录语义，官方 Codex CLI 当前模型目录明确使用 272000（并以
+max_context_window 单独表示可扩展上限）。因此 Codex 目录不在这里改写，
+由其上游值保持官方 Codex 语义。
 """
 
 import json
@@ -12,9 +13,7 @@ import os
 
 CATALOGS = (
     "node_modules/@earendil-works/pi-ai/dist/providers/data/openai.json",
-    "node_modules/@earendil-works/pi-ai/dist/providers/data/openai-codex.json",
     "node_modules/@earendil-works/pi-ai/src/providers/data/openai.json",
-    "node_modules/@earendil-works/pi-ai/src/providers/data/openai-codex.json",
 )
 TARGET_CONTEXT_WINDOW = 1_050_000
 

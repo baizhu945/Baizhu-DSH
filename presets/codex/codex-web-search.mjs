@@ -283,7 +283,7 @@ async function searchCodex(commands, exec) {
     headers,
     body: JSON.stringify({
       id: String(agent.session.id ?? randomUUID()),
-      model: agent.options.model ?? 'gpt-5.6-luna',
+      model: agent.session.requestHeader?.()?.config?.model ?? agent.options.model ?? 'gpt-5.6-luna',
       commands,
       settings: {
         allowed_callers: ['direct'],
