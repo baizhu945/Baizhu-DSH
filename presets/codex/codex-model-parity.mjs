@@ -16,10 +16,14 @@ const toolsEntry = requireFromDsh.resolve('@deepseek-ai/dsh-tools')
 const { defineTool, renderToolsSdk } = await import(toolsEntry)
 const llmEntry = requireFromDsh.resolve('@deepseek-ai/dsh-llm')
 const { createUserMessage } = await import(llmEntry)
+const { structuredPatch } = requireFromDsh('diff')
 
 const MODEL_CATALOG_PATH = nodePath.join(dshHome, '.agent-presets/codex/codex-models.json')
 const FALLBACK_PROMPT_PATH = nodePath.join(dshHome, '.agent-presets/codex/codex-luna-prompt.md')
 const RUN_CODE = 'run_code'
+// DSH reserves run_code as its transport name. Keep that host-only name
+// behind the Codex-scoped exec facade so the model sees the upstream name.
+const CODE_MODE_TOOL = 'exec'
 const SKILL = 'skill'
 const WEB_RUN = 'web__run'
 const V1_PREFIX = 'multi_agent_v1__'
@@ -31,6 +35,156 @@ const V2_NAMES = new Set([
   'interrupt_agent',
   'list_agents',
 ])
+
+// Only the preset-owned exec facade may dispatch the reserved transport. The
+// set is intentionally short-lived so ordinary nested SDK calls cannot name
+// run_code directly.
+const INTERNAL_RUN_CODE_CALLS = new Set()
+
+function humanLabel(key) {
+  return String(key)
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replaceAll('_', ' ')
+    .replace(/\b\w/g, character => character.toUpperCase())
+    .replace(/\bId\b/g, 'ID')
+    .replace(/\bUrl\b/g, 'URL')
+}
+
+function humanScalar(value) {
+  if (value === null || value === undefined) return 'none'
+  if (typeof value === 'boolean') return value ? 'yes' : 'no'
+  if (typeof value === 'string') return value === '' ? '(empty)' : value
+  return String(value)
+}
+
+function isPatchResult(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  if (!Array.isArray(value.files) || !Array.isArray(value.diffs)) return false
+  return value.files.every(file => file !== null && typeof file === 'object' && typeof file.path === 'string' && typeof file.operation === 'string')
+    && value.diffs.every(diff => diff !== null && typeof diff === 'object' && typeof diff.path === 'string' && typeof diff.newText === 'string')
+}
+
+function patchLineCount(text) {
+  const value = String(text)
+  if (value === '') return 0
+  const lines = value.split(String.fromCharCode(10))
+  return lines.at(-1) === '' ? lines.length - 1 : lines.length
+}
+
+function patchStats(diff) {
+  const lines = Array.isArray(diff.lines) ? diff.lines : undefined
+  if (lines !== undefined) {
+    return lines.reduce((stats, line) => {
+      if (line.startsWith('+')) stats.added++
+      else if (line.startsWith('-')) stats.removed++
+      return stats
+    }, { added: 0, removed: 0 })
+  }
+  if (diff.oldText === null) return { added: patchLineCount(diff.newText), removed: 0 }
+  const patch = structuredPatch('', '', diff.oldText, diff.newText, undefined, undefined, { context: 3 })
+  return patch.hunks.reduce((stats, hunk) => {
+    for (const line of hunk.lines) {
+      if (line.startsWith('+')) stats.added++
+      else if (line.startsWith('-')) stats.removed++
+    }
+    return stats
+  }, { added: 0, removed: 0 })
+}
+
+function patchOperationLabel(operation) {
+  switch (operation) {
+    case 'add': return 'Added'
+    case 'delete': return 'Deleted'
+    case 'move': return 'Moved'
+    default: return 'Updated'
+  }
+}
+
+function patchHeader(oldStart, oldLines, newStart, newLines) {
+  return '@@ -' + String(oldStart) + ',' + String(oldLines)
+    + ' +' + String(newStart) + ',' + String(newLines) + ' @@'
+}
+
+function readablePatchLines(value, indent) {
+  const files = value.files
+  const diffs = value.diffs
+  const stats = diffs.reduce((total, diff) => {
+    const current = patchStats(diff)
+    return { added: total.added + current.added, removed: total.removed + current.removed }
+  }, { added: 0, removed: 0 })
+  const lines = [
+    indent + 'Patch applied successfully.',
+    indent + 'Summary: ' + String(files.length) + ' file(s), +' + String(stats.added) + ' line(s), -' + String(stats.removed) + ' line(s).',
+    indent + '',
+    indent + 'Files:',
+    ...(files.length === 0 ? [indent + '(none)'] : files.map(file => indent + '- ' + patchOperationLabel(file.operation) + ': ' + file.path)),
+  ]
+  if (diffs.length === 0) return lines
+  lines.push(indent + '', indent + 'Changes:')
+  for (const diff of diffs) {
+    const fallbackHunk = Array.isArray(diff.lines) || diff.oldText === null
+      ? undefined
+      : structuredPatch('', '', diff.oldText, diff.newText, undefined, undefined, { context: 3 }).hunks[0]
+    const oldStart = Number.isInteger(diff.oldStart) ? diff.oldStart : (fallbackHunk?.oldStart ?? 0)
+    const oldLines = Number.isInteger(diff.oldLines) ? diff.oldLines : (fallbackHunk?.oldLines ?? 0)
+    const newStart = Number.isInteger(diff.newStart) ? diff.newStart : (fallbackHunk?.newStart ?? 1)
+    const newLines = Number.isInteger(diff.newLines) ? diff.newLines : (fallbackHunk?.newLines ?? patchLineCount(diff.newText))
+    let hunkLines = Array.isArray(diff.lines) ? diff.lines : fallbackHunk?.lines
+    if (hunkLines === undefined && diff.oldText === null) {
+      const added = diff.newText === '' ? [] : diff.newText.split(String.fromCharCode(10))
+      if (added.at(-1) === '') added.pop()
+      hunkLines = added.map(line => '+ ' + line)
+    }
+    lines.push(indent + '', indent + 'File: ' + diff.path, indent + patchHeader(oldStart, oldLines, newStart, newLines))
+    for (const line of hunkLines ?? []) {
+      if (line.startsWith(String.fromCharCode(92))) continue
+      lines.push(indent + line[0] + ' ' + line.slice(1))
+    }
+  }
+  return lines
+}
+
+function humanLines(value, indent = '') {
+  if (value === null || typeof value !== 'object') return [indent + humanScalar(value)]
+  if (isPatchResult(value)) return readablePatchLines(value, indent)
+  if (Array.isArray(value)) {
+    if (value.length === 0) return [indent + '(none)']
+    return value.flatMap(item => {
+      const lines = humanLines(item, indent + '  ')
+      const first = lines[0]?.trimStart() ?? humanScalar(item)
+      return [indent + '- ' + first, ...lines.slice(1)]
+    })
+  }
+  const entries = Object.entries(value)
+  if (entries.length === 0) return [indent + '(none)']
+  return entries.flatMap(([key, child]) => {
+    const label = humanLabel(key)
+    if (child === null || typeof child !== 'object') return [indent + label + ': ' + humanScalar(child)]
+    return [indent + label + ':', ...humanLines(child, indent + '  ')]
+  })
+}
+
+function humanizeValue(value, title) {
+  const body = humanLines(value).join('\n')
+  return title === undefined ? body : title + '\n' + body
+}
+
+function humanizeText(text, title) {
+  const value = String(text)
+  const trimmed = value.trim()
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      return humanizeValue(JSON.parse(trimmed), title)
+    } catch {
+      // Preserve non-JSON command or provider text verbatim.
+    }
+  }
+  return title === undefined ? value : title + '\n' + value
+}
+
+function readableValue(value, title) {
+  return typeof value === 'string' ? humanizeText(value, title) : humanizeValue(value, title)
+}
 
 const DEFAULT_PROFILE = Object.freeze({
   toolMode: 'native',
@@ -165,10 +319,11 @@ function isV1Tool(name) {
 }
 
 function modelToolAllowed(ctx, profile, name, agent, nested) {
-  if (!nested && profile.toolMode === 'code_mode_only' && name !== RUN_CODE) return false
-  if (!nested && profile.toolMode !== 'code_mode_only' && name === RUN_CODE) return false
-  if (nested && name === RUN_CODE) return false
-  if (name === WEB_RUN && !profile.useResponsesLite) return false
+  if (!nested && name === RUN_CODE) return false
+  if (!nested && profile.toolMode === 'code_mode_only' && name !== CODE_MODE_TOOL) return false
+  if (!nested && profile.toolMode === 'native' && name === CODE_MODE_TOOL) return false
+  if (nested && (name === RUN_CODE || name === CODE_MODE_TOOL)) return false
+  if (name === WEB_RUN && (!profile.useResponsesLite || !profile.supportsSearchTool)) return false
   if (name === SKILL && !profile.includeSkillsUsageInstructions) return false
   if (name === 'view_image' && !isImageCapable(profile)) return false
   if (name === 'request_user_input' && profile.toolMode !== 'code_mode_only' && !planModeActive(ctx, agent)) return false
@@ -213,9 +368,81 @@ function dynamicSdk(ctx, agent, profile, fallback) {
   }
 }
 
-function v2JsonOutput() {
+function rewriteCodeModeName(text) {
+  return typeof text === 'string' ? text.replaceAll(RUN_CODE, CODE_MODE_TOOL) : text
+}
+
+function codeModeErrorText(result) {
+  if (!Array.isArray(result?.content)) return ''
+  return result.content
+    .filter(block => block?.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text)
+    .join(String.fromCharCode(10))
+    .trim()
+}
+
+/**
+ * Present DSH's function-shaped Code Mode under Codex's exec name. DSH's
+ * core still owns the actual reserved transport; the nested parent token is
+ * required so the dispatch is accepted as the facade's child call.
+ */
+function registerCodeModeAlias(ctx) {
+  ctx.tools.register(defineTool({
+    name: CODE_MODE_TOOL,
+    description: 'Execute an async TypeScript function body in Code Mode. Use tools.<tool_name>(arguments) for tool calls and return a JSON-serializable value.',
+    parameters: {
+      code: { type: 'string', required: true, description: 'The body of an async TypeScript function to execute in Code Mode.' },
+      description: { type: 'string', required: true, description: 'Short summary of what the program does.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          logs: { type: 'array', required: true, items: { type: 'string' } },
+          result: { type: 'json' },
+        },
+      },
+      render: (_args, value) => {
+        const parts = [value.logs.map(log => humanizeText(log)).join(String.fromCharCode(10))]
+        if (value.result !== undefined) parts.push(readableValue(value.result))
+        const text = parts.filter(part => part.length > 0).join(String.fromCharCode(10))
+        return [{ type: 'text', text: text.length > 0 ? text : '(exec completed with no output)' }]
+      },
+    },
+    presentCall: args => ({
+      card: 'generic',
+      title: args.description,
+      kind: 'execute',
+      rawInput: args.code,
+    }),
+    async execute(args, execution) {
+      if (args.description.trim().length === 0) throw new Error('invalid description: expected a non-empty string')
+      const callId = execution.callId + ':run_code'
+      INTERNAL_RUN_CODE_CALLS.add(callId)
+      try {
+        const result = await ctx.tools.execute({
+          callId,
+          rootCallId: execution.rootCallId ?? execution.callId,
+          name: RUN_CODE,
+          arguments: { code: args.code, description: args.description },
+          agent: execution.agent,
+          parent: execution.token,
+          signal: execution.signal,
+        })
+        if (result.isError) throw new Error(codeModeErrorText(result) || 'Code Mode execution failed')
+        if (result.value === undefined) throw new Error('Code Mode returned no result')
+        return result.value
+      } finally {
+        INTERNAL_RUN_CODE_CALLS.delete(callId)
+      }
+    },
+  }))
+}
+
+function v2JsonOutput(title) {
   return {
-    render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    render: (_args, value) => [{ type: 'text', text: readableValue(value, title) }],
   }
 }
 
@@ -239,6 +466,24 @@ function v2Status(ctx, id) {
   return child.status === 'running' ? 'running' : { completed: null }
 }
 
+function v2AgentStatusSchema() {
+  return {
+    oneOf: [
+      { type: 'string', enum: ['pending_init', 'running', 'interrupted', 'shutdown', 'not_found'] },
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: { completed: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] } },
+      },
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: { errored: { type: 'string', required: true } },
+      },
+    ],
+  }
+}
+
 function registerV2Agents(ctx) {
   ctx.tools.register(defineTool({
     name: 'spawn_agent',
@@ -247,10 +492,8 @@ function registerV2Agents(ctx) {
       task_name: { type: 'string', required: true, description: 'Task name for the new agent. Use lowercase letters, digits, and underscores.' },
       message: { type: 'string', required: true, description: 'Initial plain-text task for the new agent.' },
       fork_turns: { type: 'string', enum: ['none', 'all'], description: 'Use none for no surrounding context, or all to inherit completed parent history.' },
-      agent_type: { type: 'string', description: 'Agent type override. Omit unless explicitly asked.' },
       model: { type: 'string', description: 'Model override for the new agent. Omit unless explicitly requested.' },
       reasoning_effort: { type: 'string', description: 'Reasoning effort override for the new agent. Omit unless explicitly requested.' },
-      service_tier: { type: 'string', description: 'Service tier override for the new agent. Omit unless explicitly requested.' },
     },
     output: {
       schema: {
@@ -258,7 +501,7 @@ function registerV2Agents(ctx) {
         additionalProperties: false,
         properties: { task_name: { type: 'string', required: true, description: 'Durable task identifier for the spawned agent.' } },
       },
-      ...v2JsonOutput(),
+      ...v2JsonOutput('Agent spawned'),
     },
     async execute(args, execution) {
       const parent = v2AgentOf(execution)
@@ -289,7 +532,7 @@ function registerV2Agents(ctx) {
       target: { type: 'string', required: true, description: 'Relative or canonical task name, or the durable id returned by spawn_agent.' },
       message: { type: 'string', required: true, description: 'Message text to queue on the target agent.' },
     },
-    output: { schema: { type: 'object', additionalProperties: false, properties: { submission_id: { type: 'string', required: true } } }, ...v2JsonOutput() },
+    output: { schema: { type: 'object', additionalProperties: false, properties: { submission_id: { type: 'string', required: true } } }, ...v2JsonOutput('Message queued') },
     async execute(args, execution) {
       const parent = v2AgentOf(execution)
       const rows = await v2Children(ctx, parent, execution.signal)
@@ -309,7 +552,7 @@ function registerV2Agents(ctx) {
       target: { type: 'string', required: true, description: 'Agent id or task name returned by spawn_agent.' },
       message: { type: 'string', required: true, description: 'Message text to send to the target agent.' },
     },
-    output: { schema: { type: 'object', additionalProperties: false, properties: { submission_id: { type: 'string', required: true } } }, ...v2JsonOutput() },
+    output: { schema: { type: 'object', additionalProperties: false, properties: { submission_id: { type: 'string', required: true } } }, ...v2JsonOutput('Follow-up queued') },
     async execute(args, execution) {
       const parent = v2AgentOf(execution)
       const rows = await v2Children(ctx, parent, execution.signal)
@@ -323,7 +566,7 @@ function registerV2Agents(ctx) {
     name: 'wait_agent',
     description: 'Wait for a mailbox update from any live agent, including queued messages and final-status notifications. Returns a summary without the agent final content, or a timeout summary.',
     parameters: { timeout_ms: { type: 'number', description: 'Timeout in milliseconds. Defaults to 30000; maximum 3600000.' } },
-    output: { schema: { type: 'object', additionalProperties: false, properties: { message: { type: 'string', required: true }, timed_out: { type: 'boolean', required: true } } }, ...v2JsonOutput() },
+    output: { schema: { type: 'object', additionalProperties: false, properties: { message: { type: 'string', required: true }, timed_out: { type: 'boolean', required: true } } }, ...v2JsonOutput('Agent wait') },
     async execute(args, execution) {
       const parent = v2AgentOf(execution)
       const rows = await v2Children(ctx, parent, execution.signal)
@@ -343,14 +586,14 @@ function registerV2Agents(ctx) {
     name: 'interrupt_agent',
     description: "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
     parameters: { target: { type: 'string', required: true, description: 'Agent id or task name returned by spawn_agent.' } },
-    output: { schema: { type: 'object', additionalProperties: false, properties: { previous_status: { type: 'string', required: true } } }, ...v2JsonOutput() },
+    output: { schema: { type: 'object', additionalProperties: false, properties: { previous_status: { ...v2AgentStatusSchema(), required: true } } }, ...v2JsonOutput('Agent interrupted') },
     async execute(args, execution) {
       const parent = v2AgentOf(execution)
       const rows = await v2Children(ctx, parent, execution.signal)
       if (!rows.some(row => row.id === args.target)) throw new Error('unknown subagent: ' + args.target)
       const previousStatus = v2Status(ctx, args.target)
       ctx.subagents.interrupt(args.target, { kind: 'ancestor', agent: parent })
-      return { previous_status: typeof previousStatus === 'string' ? previousStatus : 'completed' }
+      return { previous_status: previousStatus }
     },
   }))
 
@@ -358,12 +601,32 @@ function registerV2Agents(ctx) {
     name: 'list_agents',
     description: 'List live agents in the current root thread tree. Optionally filter by task-path prefix.',
     parameters: { path_prefix: { type: 'string', description: 'Task-path prefix filter without a trailing slash. Omit to list all live agents.' } },
-    output: { schema: { type: 'object', additionalProperties: false, properties: { agents: { type: 'array', required: true, items: { type: 'object', additionalProperties: true } } } }, ...v2JsonOutput() },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          agents: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                agent_name: { type: 'string', required: true },
+                agent_status: { ...v2AgentStatusSchema(), required: true },
+              },
+            },
+          },
+        },
+      },
+      ...v2JsonOutput('Agents'),
+    },
     async execute(args, execution) {
       const parent = v2AgentOf(execution)
       const rows = await v2Children(ctx, parent, execution.signal)
       const prefix = typeof args.path_prefix === 'string' ? args.path_prefix : undefined
-      return { agents: rows.filter(row => prefix === undefined || String(row.id).startsWith(prefix)).map(row => ({ agent_name: row.id, status: v2Status(ctx, row.id) })) }
+      return { agents: rows.filter(row => prefix === undefined || String(row.id).startsWith(prefix)).map(row => ({ agent_name: row.id, agent_status: v2Status(ctx, row.id) })) }
     },
   }))
 }
@@ -372,6 +635,7 @@ function registerModelParity(ctx) {
   ctx.tools.guard(execution => {
     const agent = execution.agent
     if (agent === undefined) return undefined
+    if (execution.name === RUN_CODE && INTERNAL_RUN_CODE_CALLS.has(execution.callId)) return undefined
     const profile = profileForModel(currentModel(agent))
     const nested = execution.parent !== undefined
     if (modelToolAllowed(ctx, profile, execution.name, agent, nested)) return undefined
@@ -391,18 +655,17 @@ function registerModelParity(ctx) {
     const agent = context.agent
     if (agent === undefined) return assembled
     const profile = profileForModel(currentModel(agent, assembled))
-    const direct = profile.toolMode !== 'code_mode_only'
-    const tools = profile.toolMode === 'code_mode_only'
-      ? assembled.tools.filter(tool => tool.name === RUN_CODE)
-      : direct
-        ? nativeSchemas(ctx, agent, profile)
-        : assembled.tools.filter(tool => modelToolAllowed(ctx, profile, tool.name, agent, false))
+    const tools = nativeSchemas(ctx, agent, profile)
+      .filter(tool => profile.toolMode !== 'code_mode_only' || tool.name === CODE_MODE_TOOL)
     const sections = assembled.sections
-      .filter(section => direct || section.name !== 'tools:code-only')
-      .filter(section => !direct || section.name !== 'tools:sdk')
+      .filter(section => profile.toolMode !== 'native' || section.name !== 'tools:code-only')
+      .filter(section => profile.toolMode !== 'native' || section.name !== 'tools:sdk')
       .map(section => {
         if (section.name === 'deployment:persona') return { ...section, text: profile.instructions }
-        if (!direct && section.name === 'tools:sdk') return { ...section, text: dynamicSdk(ctx, agent, profile, section.text) }
+        if (section.name === 'tools:code-only') return { ...section, text: rewriteCodeModeName(section.text) }
+        if (profile.toolMode !== 'native' && section.name === 'tools:sdk') {
+          return { ...section, text: rewriteCodeModeName(dynamicSdk(ctx, agent, profile, section.text)) }
+        }
         return section
       })
     return { ...assembled, sections, tools }
@@ -413,6 +676,7 @@ export const name = 'codex-model-parity'
 export const inject = ['tools', 'systemPrompt', 'subagents', 'agents']
 
 export function apply(ctx) {
+  registerCodeModeAlias(ctx)
   registerV2Agents(ctx)
   registerModelParity(ctx)
 }

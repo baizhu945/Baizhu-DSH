@@ -805,9 +805,104 @@ function computeHunkDiffs(path, before, after) {
       path,
       oldText: oldLines.length > 0 ? oldLines.join('\n') : null,
       newText: newLines.join('\n'),
+      oldStart: hunk.oldStart,
+      oldLines: hunk.oldLines,
+      newStart: hunk.newStart,
+      newLines: hunk.newLines,
+      lines: hunk.lines,
     })
   }
   return diffs
+}
+
+function lineCount(text) {
+  const value = String(text)
+  if (value === '') return 0
+  const lines = value.split('\n')
+  return lines.at(-1) === '' ? lines.length - 1 : lines.length
+}
+
+function diffHeader(oldStart, oldLines, newStart, newLines) {
+  return '@@ -' + String(oldStart) + ',' + String(oldLines)
+    + ' +' + String(newStart) + ',' + String(newLines) + ' @@'
+}
+
+function diffStats(diff) {
+  if (diff.oldText === null) return { added: lineCount(diff.newText), removed: 0 }
+  if (Array.isArray(diff.lines)) {
+    return diff.lines.reduce((stats, line) => {
+      if (line.startsWith('+')) stats.added++
+      else if (line.startsWith('-')) stats.removed++
+      return stats
+    }, { added: 0, removed: 0 })
+  }
+  const patch = structuredPatch('', '', diff.oldText, diff.newText, undefined, undefined, { context: 3 })
+  return patch.hunks.reduce((stats, hunk) => {
+    for (const line of hunk.lines) {
+      if (line.startsWith('+')) stats.added++
+      else if (line.startsWith('-')) stats.removed++
+    }
+    return stats
+  }, { added: 0, removed: 0 })
+}
+
+function renderDiffHunk(diff) {
+  const oldText = diff.oldText
+  const fallbackPatch = oldText === null
+    ? undefined
+    : structuredPatch('', '', oldText, diff.newText, undefined, undefined, { context: 3 })
+  const fallbackHunk = fallbackPatch?.hunks[0]
+  const oldStart = Number.isInteger(diff.oldStart) ? diff.oldStart : (fallbackHunk?.oldStart ?? 0)
+  const oldLines = Number.isInteger(diff.oldLines) ? diff.oldLines : (fallbackHunk?.oldLines ?? 0)
+  const newStart = Number.isInteger(diff.newStart) ? diff.newStart : (fallbackHunk?.newStart ?? 1)
+  const newLines = Number.isInteger(diff.newLines) ? diff.newLines : (fallbackHunk?.newLines ?? lineCount(diff.newText))
+  const header = diffHeader(oldStart, oldLines, newStart, newLines)
+  if (oldText === null) {
+    const added = diff.newText === '' ? [] : diff.newText.split('\n')
+    if (added.at(-1) === '') added.pop()
+    return [header, ...added.map(line => '+ ' + line)]
+  }
+  const hunks = Array.isArray(diff.lines)
+    ? [{ oldStart, oldLines, newStart, newLines, lines: diff.lines }]
+    : (fallbackPatch?.hunks ?? [])
+  if (hunks.length === 0) return [header]
+  return hunks.flatMap((hunk, index) => {
+    const lines = hunk.lines
+      .filter(line => !line.startsWith(String.fromCharCode(92)))
+      .map(line => line[0] + ' ' + line.slice(1))
+    return [index === 0 ? header : diffHeader(hunk.oldStart, hunk.oldLines, hunk.newStart, hunk.newLines), ...lines]
+  })
+}
+
+function patchOperationLabel(operation) {
+  switch (operation) {
+    case 'add': return 'Added'
+    case 'delete': return 'Deleted'
+    case 'move': return 'Moved'
+    default: return 'Updated'
+  }
+}
+
+function patchResultText(value) {
+  const files = Array.isArray(value.files) ? value.files : []
+  const diffs = Array.isArray(value.diffs) ? value.diffs : []
+  const stats = diffs.reduce((total, diff) => {
+    const current = diffStats(diff)
+    return { added: total.added + current.added, removed: total.removed + current.removed }
+  }, { added: 0, removed: 0 })
+  const lines = [
+    'Patch applied successfully.',
+    'Summary: ' + String(files.length) + ' file(s), +' + String(stats.added) + ' line(s), -' + String(stats.removed) + ' line(s).',
+    '',
+    'Files:',
+    ...(files.length === 0 ? ['(none)'] : files.map(file => '- ' + patchOperationLabel(file.operation) + ': ' + file.path)),
+  ]
+  if (diffs.length === 0) return lines.join('\n')
+  lines.push('', 'Changes:')
+  for (const diff of diffs) {
+    lines.push('', 'File: ' + diff.path, ...renderDiffHunk(diff))
+  }
+  return lines.join('\n')
 }
 
 /** Build a pure approval-time preview from the patch text itself. */
@@ -962,14 +1057,36 @@ async function applyPatch(ctx, exec, patch) {
   for (const operation of operations) {
     if (operation.kind === 'add') {
       results.push(await writePatchedFile(ctx, exec, operation.target, operation.content, undefined, sandboxPolicy))
-      diffs.push({ path: operation.target.displayPath, oldText: null, newText: operation.content })
+      diffs.push({
+        path: operation.target.displayPath,
+        oldText: null,
+        newText: operation.content,
+        oldStart: 0,
+        oldLines: 0,
+        newStart: 1,
+        newLines: lineCount(operation.content),
+        lines: (operation.content === '' ? [] : operation.content.split('\n'))
+          .filter((line, index, all) => !(index === all.length - 1 && line === ''))
+          .map(line => '+ ' + line),
+      })
       continue
     }
     if (operation.kind === 'delete') {
       await ctx.fs.deleteFile(operation.target, { version: operation.info.version }, exec.signal, sandboxPolicy)
       ctx.emit('fs/observed', operation.target, { kind: 'absent' }, exec)
       results.push({ path: operation.target.displayPath, operation: 'delete' })
-      diffs.push({ path: operation.target.displayPath, oldText: operation.original, newText: '' })
+      diffs.push({
+        path: operation.target.displayPath,
+        oldText: operation.original,
+        newText: '',
+        oldStart: 1,
+        oldLines: lineCount(operation.original),
+        newStart: 0,
+        newLines: 0,
+        lines: (operation.original === '' ? [] : operation.original.split('\n'))
+          .filter((line, index, all) => !(index === all.length - 1 && line === ''))
+          .map(line => '- ' + line),
+      })
       continue
     }
     const written = await writePatchedFile(
@@ -1028,15 +1145,17 @@ function registerApplyPatch(ctx) {
                 path: { type: 'string', required: true },
                 oldText: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
                 newText: { type: 'string', required: true },
+                oldStart: { type: 'integer' },
+                oldLines: { type: 'integer' },
+                newStart: { type: 'integer' },
+                newLines: { type: 'integer' },
+                lines: { type: 'array', items: { type: 'string' } },
               },
             },
           },
         },
       },
-      render: (_args, value) => [{
-        type: 'text',
-        text: value.files.map(file => `${file.operation} ${file.path}`).join('\n'),
-      }],
+      render: (_args, value) => [{ type: 'text', text: patchResultText(value) }],
       presentationMeta: (_args, value) => ({ diffs: value.diffs }),
     },
     async execute(args, exec) {
@@ -1070,6 +1189,11 @@ function narrowDiffs(meta) {
     && typeof diff.path === 'string'
     && typeof diff.newText === 'string'
     && (diff.oldText === null || typeof diff.oldText === 'string')
+    && (diff.oldStart === undefined || Number.isInteger(diff.oldStart))
+    && (diff.oldLines === undefined || Number.isInteger(diff.oldLines))
+    && (diff.newStart === undefined || Number.isInteger(diff.newStart))
+    && (diff.newLines === undefined || Number.isInteger(diff.newLines))
+    && (diff.lines === undefined || (Array.isArray(diff.lines) && diff.lines.every(line => typeof line === 'string')))
   ))
   return valid ? diffs : undefined
 }
@@ -1184,6 +1308,22 @@ function registerPlan(ctx) {
 }
 
 function registerQuestions(ctx) {
+  function normalizeQuestionResponse(value) {
+    if (value === null || typeof value !== 'object' || !Array.isArray(value.answers)) {
+      throw new Error('request_user_input returned an invalid answer payload')
+    }
+    const answers = {}
+    for (const answer of value.answers) {
+      if (answer === null || typeof answer !== 'object' || typeof answer.id !== 'string' || !Array.isArray(answer.selected)) {
+        throw new Error('request_user_input returned an invalid answer item')
+      }
+      const selected = answer.selected.filter(item => typeof item === 'string')
+      if (answer.custom !== undefined) selected.push(String(answer.custom))
+      answers[answer.id] = { answers: selected }
+    }
+    return { answers }
+  }
+
   ctx.tools.register(defineTool({
     name: 'request_user_input',
     description: 'Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.',
@@ -1229,8 +1369,18 @@ function registerQuestions(ctx) {
       if (args.questions.some(question => question.options.length < 2 || question.options.length > 3)) {
         throw new Error('request_user_input requires two to three options for every question')
       }
-      const value = await ctx.userQuestions.ask({ questions: args.questions, agent, signal: exec.signal })
-      return JSON.stringify(value)
+      const value = await ctx.userQuestions.ask({
+        questions: args.questions.map(question => ({
+          id: question.id,
+          header: question.header,
+          question: question.question,
+          isOther: true,
+          options: question.options.map(option => ({ label: option.label, description: option.description })),
+        })),
+        agent,
+        signal: exec.signal,
+      })
+      return JSON.stringify(normalizeQuestionResponse(value))
     },
     presentCall(args) {
       return {
@@ -1283,9 +1433,9 @@ async function directChildren(ctx, parent, signal) {
   return rows.filter(row => row.kind === 'child' && row.mode === 'continuable')
 }
 
-function renderJsonOutput() {
+function renderJsonOutput(title) {
   return {
-    render: (_args, value) => [{ type: 'text', text: humanizeValue(value) }],
+    render: (_args, value) => [{ type: 'text', text: humanizeValue(value, title) }],
   }
 }
 

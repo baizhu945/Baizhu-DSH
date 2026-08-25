@@ -1,13 +1,13 @@
 { pkgs, lib, ... }:
 
 let
-  # OpenAI/codex model catalog @ 339751715c64496cb86246bfb3935f40e309dd3d.
+  # OpenAI/codex model catalog @ 80cce09d059780528e59353ab3d87e4c97d1e944.
   # The catalog is mounted only below the Codex preset. Its base_instructions
   # and capability fields are read by codex-model-parity.mjs per request, so a
   # model switch changes the model-facing contract without touching other
   # agent presets or the host model registry.
   codexModels = pkgs.fetchurl {
-    url = "https://raw.githubusercontent.com/openai/codex/339751715c64496cb86246bfb3935f40e309dd3d/codex-rs/models-manager/models.json";
+    url = "https://raw.githubusercontent.com/openai/codex/80cce09d059780528e59353ab3d87e4c97d1e944/codex-rs/models-manager/models.json";
     hash = "sha256-6w17ml3K8QOJXF+KFMFrJp30bgObN1pVupf2I4VC0u0=";
   };
 

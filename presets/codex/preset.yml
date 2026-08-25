@@ -1,3 +1,3 @@
 name: Codex Mode
-description: 贴近当前 Codex CLI 的本地编码 Agent：固定官方 Luna prompt，Code Mode，pipe/PTY unified exec，完整 apply_patch，on-request 权限，Plan Mode，Skills，图片、V1 多代理和 Responses Lite web.run。主机仍掌管最终权限。
+description: 贴近当前 Codex CLI 的本地编码 Agent：官方 catalog 驱动的 exec Code Mode，pipe/PTY unified exec，完整 apply_patch，on-request 权限，Plan Mode，Skills，图片、V1/V2 多代理和 Responses Lite web.run。主机仍掌管最终权限。
 order: 2

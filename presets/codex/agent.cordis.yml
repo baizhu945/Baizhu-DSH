@@ -1,6 +1,6 @@
 # Codex-compatible agent-plane composition for DeepSeek Harness.
 #
-# OpenAI/codex reference: official HEAD @ 76d98a771e6cd44a79a3ab895a9f7c49d27d6deb.
+# OpenAI/codex reference: official HEAD @ 80cce09d059780528e59353ab3d87e4c97d1e944.
 # The Luna model instructions and web.run description are pinned verbatim from
 # that tree; only host-mechanism adaptations are maintained locally.
 # The host remains authoritative for sandboxing, approval, persistence, model
@@ -22,10 +22,10 @@
 - id: codex-approval-boundary
   name: './codex-approval.mjs'
 
-# Current GPT-5.6 Luna uses Code Mode upstream. dsh's reserved Code Mode
-# transport is named `run_code`; the scoped SDK below uses the official nested
-# names and schemas wherever the host can implement them. Native tools remain
-# hidden from the model, matching CodeModeOnly rather than `both`.
+# The official catalog selects native, CodeModeOnly, or both per model. DSH's
+# reserved Code Mode transport remains run_code internally; the Codex-scoped
+# parity adapter presents it to the model as exec and keeps native tools hidden
+# for CodeModeOnly rows.
 - id: codex-tool-presentation
   name: '@deepseek-ai/dsh-agent-tool-presentation'
   config:
