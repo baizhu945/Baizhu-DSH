@@ -8,6 +8,8 @@
  */
 const createRequire = process.getBuiltinModule('node:module').createRequire
 const fs = process.getBuiltinModule('node:fs/promises')
+const nodeDns = process.getBuiltinModule('node:dns')
+const nodeHttps = process.getBuiltinModule('node:https')
 const nodePath = process.getBuiltinModule('node:path')
 const { randomUUID } = process.getBuiltinModule('node:crypto')
 const { pathToFileURL } = process.getBuiltinModule('node:url')
@@ -268,6 +270,53 @@ function searchCommands(args) {
   return commands
 }
 
+/**
+ * POST with a preset-local IPv4 lookup. Node's undici fetch may select the
+ * unroutable IPv6 address on this host even though the same endpoint is
+ * reachable over IPv4; using https.request keeps the workaround local to this
+ * Codex web tool and does not mutate the dsh process-wide DNS policy.
+ */
+function requestCodexSearch(body, headers, signal) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      request.destroy(new Error('OpenAI Codex web search timed out'))
+    }, SEARCH_TIMEOUT_MS)
+    const finish = (error, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal.removeEventListener('abort', abort)
+      if (error !== undefined) reject(error)
+      else resolve(value)
+    }
+    const abort = () => request.destroy(new Error('web.run was aborted'))
+    const request = nodeHttps.request(CODEX_SEARCH_URL, {
+      method: 'POST',
+      headers,
+      lookup(hostname, options, callback) {
+        nodeDns.lookup(hostname, { ...options, family: 4 }, callback)
+      },
+    }, response => {
+      const chunks = []
+      response.on('data', chunk => chunks.push(Buffer.from(chunk)))
+      response.on('error', error => finish(error))
+      response.on('end', () => finish(undefined, {
+        statusCode: response.statusCode ?? 0,
+        body: Buffer.concat(chunks).toString('utf8'),
+      }))
+    })
+    request.on('error', error => finish(error))
+    request.setTimeout(SEARCH_TIMEOUT_MS, () => request.destroy(new Error('OpenAI Codex web search timed out')))
+    if (signal.aborted) {
+      abort()
+      return
+    }
+    signal.addEventListener('abort', abort, { once: true })
+    request.end(body)
+  })
+}
+
 async function searchCodex(commands, exec) {
   const agent = exec.agent
   if (agent === undefined) throw new Error('web.run requires a live agent')
@@ -275,13 +324,11 @@ async function searchCodex(commands, exec) {
   const headers = {
     Authorization: `Bearer ${auth.token}`,
     'Content-Type': 'application/json',
+    'User-Agent': 'codex_cli_rs',
     originator: 'codex_cli_rs',
     ...(auth.accountId !== undefined ? { 'chatgpt-account-id': auth.accountId } : {}),
   }
-  const response = await fetch(CODEX_SEARCH_URL, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
+  const response = await requestCodexSearch(JSON.stringify({
       id: String(agent.session.id ?? randomUUID()),
       model: agent.session.requestHeader?.()?.config?.model ?? agent.options.model ?? 'gpt-5.6-luna',
       commands,
@@ -290,13 +337,11 @@ async function searchCodex(commands, exec) {
         external_web_access: true,
       },
       max_output_tokens: 10_000,
-    }),
-    signal: AbortSignal.any([exec.signal, AbortSignal.timeout(SEARCH_TIMEOUT_MS)]),
-  })
-  const body = await response.text()
+    }), headers, exec.signal)
+  const body = response.body
   if (body.length > MAX_RESPONSE_BYTES) throw new Error('OpenAI Codex web search response exceeded the size limit')
-  if (!response.ok) {
-    throw new Error(`OpenAI Codex web.run failed (HTTP ${response.status}): ${redact(body.slice(0, 400), auth.token)}`)
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new Error(`OpenAI Codex web.run failed (HTTP ${response.statusCode}): ${redact(body.slice(0, 400), auth.token)}`)
   }
   let parsed
   try {
@@ -459,6 +504,17 @@ function registerWebSearch(ctx) {
     presentCall(args) {
       const label = webCallLabel(args)
       return { card: 'generic', title: label, kind: 'search', content: [{ type: 'text', text: webCallSummary(args) }] }
+    },
+    presentResult(_args, result) {
+      const text = result.content
+        .filter(block => block.type === 'text')
+        .map(block => block.text)
+        .join('')
+      return {
+        card: 'generic',
+        title: result.isError ? 'Web search failed' : 'Web search results',
+        content: [{ type: 'text', text: text || (result.isError ? 'The web search failed without additional details.' : 'No web results returned.') }],
+      }
     },
   }))
 }

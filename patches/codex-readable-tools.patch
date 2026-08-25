@@ -1,34 +1,83 @@
 --- a/packages/host/apiproxy/src/api-proxy.ts
 +++ b/packages/host/apiproxy/src/api-proxy.ts
-@@ -704,6 +704,20 @@
+@@ -693,3 +693,14 @@
+  * the client's documented default (generic JSON card) covers every miss.
+  */
++function isCodexPresenterScope(scope?: ScopeKey): boolean {
++  const candidate = scope as unknown as {
++    agentPreset?: unknown
++    session?: { header?: { agentPreset?: unknown } }
++  } | undefined
++  return candidate?.agentPreset === 'codex' || candidate?.session?.header?.agentPreset === 'codex'
++}
++
++function markCodexView<T extends object>(view: T): T {
++  return { ...view, __codexPreset: true } as T
++}
+ function viewFor(
+@@ -704,6 +704,21 @@
    scope?: ScopeKey,
  ): ToolEventView | undefined {
    try {
 +    if (event.type === 'tool/code-dispatch-start' || event.type === 'tool/code-dispatch') {
++      if (!isCodexPresenterScope(scope)) return undefined
 +      const { name, arguments: args } = event.data
 +      const tool = ctx.tools.get(name, scope)
 +      if (tool === undefined) return undefined
 +      if (event.type === 'tool/code-dispatch-start') {
 +        const view = tool.presentCall?.(args)
-+        return view === undefined ? undefined : { for: 'call', view }
++        return view === undefined ? undefined : { for: 'call', view: markCodexView(view) }
 +      }
 +      const view = tool.presentResult?.(args, {
 +        content: event.data.content,
 +        isError: event.data.isError === true,
 +      })
-+      return view === undefined ? undefined : { for: 'result', view }
++      return view === undefined ? undefined : { for: 'result', view: markCodexView(view) }
 +    }
      if (event.type === 'tool/call') {
        const { name, arguments: raw } = event.data as ToolCallData
        const view = ctx.tools.get(name, scope)?.presentCall?.(JSON.parse(raw))
+@@ -721,18 +721,24 @@
+     if (event.type === 'tool/call') {
+       const { name, arguments: raw } = event.data as ToolCallData
+       const view = ctx.tools.get(name, scope)?.presentCall?.(JSON.parse(raw))
+-      return view === undefined ? undefined : { for: 'call', view }
++      return view === undefined ? undefined : {
++        for: 'call',
++        view: isCodexPresenterScope(scope) ? markCodexView(view) : view,
++      }
+     }
+     if (event.type === 'tool/result') {
+       const { message, meta } = event.data
+       const [result] = message.content
+       const callId = message.source.callId
+       const call = argsFor(callId) as { name: string; args: unknown } | undefined
+       if (call === undefined) return undefined
+       const view = ctx.tools.get(call.name, scope)?.presentResult?.(call.args, {
+         content: result.content,
+         isError: result.isError === true,
+         ...meta === undefined ? {} : { meta },
+       })
+-      return view === undefined ? undefined : { for: 'result', view }
++      return view === undefined ? undefined : {
++        for: 'result',
++        view: isCodexPresenterScope(scope) ? markCodexView(view) : view,
++      }
+     }
 --- a/packages/client/ui-conversation/src/client/conversation-nodes/tool.ts
 +++ b/packages/client/ui-conversation/src/client/conversation-nodes/tool.ts
+@@ -82,1 +82,5 @@
++function codexView<T>(view: T | undefined): T | null {
++  const record = view as unknown as { __codexPreset?: unknown } | null | undefined
++  return record?.__codexPreset === true ? view ?? null : null
++}
+ function childCall(match: ConversationMatch, data: DispatchData): RunningToolCall {
 @@ -87,7 +87,7 @@
      turn: locationTurn(match),
      step: locationStep(match),
      time: match.event.time,
 -    callView: null,
-+    callView: match.view?.for === 'call' ? match.view.view : null,
++    callView: codexView(match.view?.for === 'call' ? match.view.view : undefined),
      subCalls: [],
    }
  }
@@ -38,11 +87,27 @@
      isError: data.isError === true,
 -    callView: null,
 -    resultView: null,
-+    callView: previous?.callView ?? (match.view?.for === 'call' ? match.view.view : null),
-+    resultView: match.view?.for === 'result' ? match.view.view : null,
++    callView: previous?.callView ?? codexView(match.view?.for === 'call' ? match.view.view : undefined),
++    resultView: codexView(match.view?.for === 'result' ? match.view.view : undefined),
      subCalls: [],
    }
  }
+--- a/packages/client/ui-trajectory/src/client/trajectory-tool-definition.ts
++++ b/packages/client/ui-trajectory/src/client/trajectory-tool-definition.ts
+@@ -79,1 +79,5 @@
++function codexView<T>(view: T | undefined): T | null {
++  const record = view as unknown as { __codexPreset?: unknown } | null | undefined
++  return record?.__codexPreset === true ? view ?? null : null
++}
+ function childCall(match: ConversationMatch, data: DispatchData): RunningToolCall {
+@@ -87,1 +87,1 @@
+-    callView: null,
++    callView: codexView(match.view?.for === 'call' ? match.view.view : undefined),
+@@ -106,2 +106,2 @@
+-    callView: null,
+-    resultView: null,
++    callView: previous?.callView ?? codexView(match.view?.for === 'call' ? match.view.view : undefined),
++    resultView: codexView(match.view?.for === 'result' ? match.view.view : undefined),
 --- a/packages/client/ui-trajectory/src/client/layout.ts
 +++ b/packages/client/ui-trajectory/src/client/layout.ts
 @@ -432,7 +432,7 @@

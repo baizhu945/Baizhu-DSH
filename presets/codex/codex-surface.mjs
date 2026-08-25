@@ -108,6 +108,10 @@ function genericToolResult(title, result) {
   return { card: 'generic', title, content: humanizeBlocks(result.content) }
 }
 
+function genericToolError(title, result) {
+  return genericToolResult(title, result)
+}
+
 /** Keep nested Code Mode results readable without changing canonical values. */
 function registerReadableDispatchLog(ctx) {
   const rawOutputTools = new Set(['exec_command', 'write_stdin', 'web__run'])
@@ -676,7 +680,7 @@ function registerExecCommand(ctx) {
       }
     },
     presentResult(_args, result) {
-      if (result.isError) return undefined
+      if (result.isError) return genericToolError('Command failed', result)
       return { card: 'terminal', output: result.content.filter(block => block.type === 'text').map(block => block.text).join('') }
     },
   }))
@@ -747,6 +751,10 @@ function registerWriteStdin(ctx) {
     presentCall(args) {
       return { card: 'terminal', title: args.chars || '(poll session)', description: `Session ${args.session_id}` }
     },
+    presentResult(_args, result) {
+      if (result.isError) return genericToolError('Terminal session failed', result)
+      return { card: 'terminal', output: result.content.filter(block => block.type === 'text').map(block => block.text).join('') }
+    },
   }))
 }
 
@@ -765,14 +773,18 @@ function waitOutputText(value) {
  * the direct model surface useful without changing the host scheduler.
  */
 function registerWait(ctx) {
-  const stdin = ctx.tools.get('write_stdin')
-  const outputSchema = stdin?.output?.schema ?? {
+  // Do not reuse write_stdin.output.schema here. Once a tool is registered,
+  // dsh stores the compiled JSON Schema there, while defineTool expects the
+  // author-facing ValueSchemaSpec. Keeping a fresh, permissive result shape
+  // also makes this adapter work when write_stdin is supplied by another
+  // preset-scoped composition.
+  const outputSchema = {
     type: 'object',
     additionalProperties: false,
     properties: {
       chunk_id: { type: 'string' },
-      wall_time_seconds: { type: 'number', required: true },
-      output: { type: 'string', required: true },
+      wall_time_seconds: { type: 'number' },
+      output: { type: 'string' },
       exit_code: { type: 'number' },
       session_id: { type: 'number' },
       original_token_count: { type: 'number' },
@@ -823,7 +835,7 @@ function registerWait(ctx) {
       return { card: 'generic', title: `Wait on exec cell ${args.cell_id}`, kind: 'other' }
     },
     presentResult(_args, result) {
-      if (result.isError) return undefined
+      if (result.isError) return genericToolError('Wait failed', result)
       return { card: 'terminal', output: result.content.filter(block => block.type === 'text').map(block => block.text).join('') }
     },
   }))
@@ -1266,9 +1278,13 @@ function registerApplyPatch(ctx) {
         locations,
       }
     },
-    presentResult(_args, result) {
-      if (result.isError) return undefined
-      const diffs = narrowDiffs(result.meta)
+    presentResult(args, result) {
+      if (result.isError) return genericToolError('Patch failed', result)
+      // A nested Code Mode result carries content/isError but not the native
+      // tool/result metadata envelope. Rebuild the same exact preview from
+      // the freeform input so the Web/Trajectory cards still show +/- lines.
+      const preview = previewPatchDiffs(args.input)
+      const diffs = narrowDiffs(result.meta) ?? (preview.length > 0 ? preview : undefined)
       return diffs === undefined ? undefined : { card: 'diff', title: 'Patch applied', diffs }
     },
   }))
@@ -1346,7 +1362,7 @@ function registerViewImage(ctx) {
       return { card: 'generic', title: `View image ${args.path}`, kind: 'read', locations: [{ path: args.path }] }
     },
     presentResult(args, result) {
-      if (result.isError) return undefined
+      if (result.isError) return genericToolError(`View image failed — ${args.path}`, result)
       const content = result.content.filter(block => block.type === 'text' || block.type === 'image')
       return { card: 'generic', title: `View image ${args.path}`, content: content.length > 0 ? content : undefined }
     },
@@ -1395,7 +1411,7 @@ function registerPlan(ctx) {
       }
     },
     presentResult(_args, result) {
-      if (result.isError) return undefined
+      if (result.isError) return genericToolError('Plan update failed', result)
       return { card: 'generic', title: 'Plan updated', content: result.content }
     },
   }))
@@ -1506,7 +1522,7 @@ function registerQuestions(ctx) {
       }
     },
     presentResult(_args, result) {
-      if (result.isError) return undefined
+      if (result.isError) return genericToolError('User input failed', result)
       return { card: 'generic', title: 'User answered', content: result.content }
     },
   }))
