@@ -16,6 +16,7 @@ const { defineTool } = await import(toolsEntry)
 const sandboxEntry = requireFromDsh.resolve('@deepseek-ai/dsh-sandbox')
 const { approveEscalation } = await import(sandboxEntry)
 const { structuredPatch } = requireFromDsh('diff')
+const DEFAULT_SHELL = '@bashPath@'.startsWith('@') ? 'bash' : '@bashPath@'
 const SPAWN_AGENT_DESCRIPTION = (await nodeFs.readFile(
   nodePath.join(dshHome, '.agent-presets/codex/codex-subagent-v1-description.md'),
   'utf8',
@@ -484,6 +485,16 @@ function execYieldTime(args) {
   return Math.min(30_000, Math.max(250, value))
 }
 
+function stdinYieldTime(chars, requested) {
+  const defaultMs = chars === '' ? 5_000 : 250
+  const maximumMs = chars === '' ? 300_000 : 30_000
+  const value = requested ?? defaultMs
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`invalid yield_time_ms: expected a non-negative number, got ${String(value)}`)
+  }
+  return Math.min(maximumMs, value)
+}
+
 function wrappedCommand(command, marker) {
   const encoded = Buffer.from(String(command)).toString('base64')
   return `__codex_cmd=$(printf %s ${encoded} | base64 -d); eval "$__codex_cmd"; __codex_status=$?; printf '\\n${marker}%s\\n' "$__codex_status"`
@@ -495,10 +506,11 @@ function shellQuote(value) {
 }
 
 function commandForShell(args) {
+  const login = args.login !== false
   if (args.shell !== undefined) {
-    return `exec ${shellQuote(args.shell)} ${args.login === true ? '-lc' : '-c'} ${shellQuote(args.cmd)}`
+    return `${shellQuote(args.shell)} ${login ? '-lc' : '-c'} ${shellQuote(args.cmd)}`
   }
-  if (args.login === true) return `exec bash -lc ${shellQuote(args.cmd)}`
+  if (login) return `${shellQuote(DEFAULT_SHELL)} -lc ${shellQuote(args.cmd)}`
   return args.cmd
 }
 
@@ -576,8 +588,8 @@ function registerExecCommand(ctx) {
       tty: { type: 'boolean', description: 'True allocates a PTY for the command; false or omitted uses plain pipes.' },
       yield_time_ms: { type: 'number', description: 'Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.' },
       max_output_tokens: { type: 'number', description: 'Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.' },
-      shell: { type: 'string', description: 'Shell binary to launch. Defaults to the preset environment shell.' },
-      login: { type: 'boolean', description: 'True runs the shell with login semantics; false or omitted disables them.' },
+      shell: { type: 'string', description: "Shell binary to launch. Defaults to the user's default shell." },
+      login: { type: 'boolean', description: 'True runs the shell with -l/-i semantics; false disables them. Defaults to true.' },
       sandbox_permissions: {
         type: 'string',
         enum: ['use_default', 'require_escalated'],
@@ -677,7 +689,7 @@ function registerWriteStdin(ctx) {
     parameters: {
       session_id: { type: 'number', required: true, description: 'Identifier of the running unified exec session.' },
       chars: { type: 'string', description: 'Bytes to write to stdin. Defaults to empty, which polls without writing.' },
-      yield_time_ms: { type: 'number', description: 'Wait before yielding output. Non-empty writes default to 250 ms; empty polls default to 5000 ms.' },
+      yield_time_ms: { type: 'number', description: 'Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.' },
       max_output_tokens: { type: 'number', description: 'Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.' },
     },
     output: {
@@ -711,14 +723,14 @@ function registerWriteStdin(ctx) {
           if (chars === '\u0003') record.process.kill()
           else throw new Error('stdin is closed for a non-TTY exec session; use tty=true for interactive input')
         }
-        await waitForPipeProcess(record.process, args.yield_time_ms ?? (chars === '' ? 5_000 : 250), exec.signal)
+        await waitForPipeProcess(record.process, stdinYieldTime(chars, args.yield_time_ms), exec.signal)
         const value = pipeOutput(record, Date.now() - startedAt, args.max_output_tokens)
         if (record.process.status !== 'running') execSessions.delete(record.id)
         return value
       }
       if (record.operation !== undefined) {
         const operation = record.operation
-        const settled = await waitForTerminalOperation(operation, args.yield_time_ms ?? (chars === '' ? 5_000 : 250), exec.signal)
+        const settled = await waitForTerminalOperation(operation, stdinYieldTime(chars, args.yield_time_ms), exec.signal)
         const value = await finishTerminalOperation(ctx, record, operation, startedAt, settled, args.max_output_tokens)
         if (!execSessions.has(args.session_id) || settled.kind === 'yield' || chars === '' || record.operation !== undefined) return value
       }
@@ -729,11 +741,90 @@ function registerWriteStdin(ctx) {
       })
       record.operation = operation
       record.echoedInput = chars
-      const settled = await waitForTerminalOperation(operation, args.yield_time_ms ?? (chars === '' ? 5_000 : 250), exec.signal)
+      const settled = await waitForTerminalOperation(operation, stdinYieldTime(chars, args.yield_time_ms), exec.signal)
       return finishTerminalOperation(ctx, record, operation, startedAt, settled, args.max_output_tokens)
     },
     presentCall(args) {
       return { card: 'terminal', title: args.chars || '(poll session)', description: `Session ${args.session_id}` }
+    },
+  }))
+}
+
+function waitOutputText(value) {
+  const output = typeof value?.output === 'string' && value.output.length > 0 ? value.output : '(no output)'
+  const markers = []
+  if (typeof value?.exit_code === 'number') markers.push(`[exit code: ${value.exit_code}]`)
+  if (value?.session_id !== undefined) markers.push(`[session ID: ${value.session_id}]`)
+  return markers.length === 0 ? output : `${output}\n${markers.join('\n')}`
+}
+
+/**
+ * Codex exposes `wait` beside Code Mode `exec`. DSH has no resumable V8 cell
+ * runtime, so this preset-scoped adapter accepts the official schema and maps
+ * a cell_id to the string form of a local unified-exec session_id. That keeps
+ * the direct model surface useful without changing the host scheduler.
+ */
+function registerWait(ctx) {
+  const stdin = ctx.tools.get('write_stdin')
+  const outputSchema = stdin?.output?.schema ?? {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      chunk_id: { type: 'string' },
+      wall_time_seconds: { type: 'number', required: true },
+      output: { type: 'string', required: true },
+      exit_code: { type: 'number' },
+      session_id: { type: 'number' },
+      original_token_count: { type: 'number' },
+    },
+  }
+  ctx.tools.register(defineTool({
+    name: 'wait',
+    description: 'Waits on a yielded `exec` cell and returns new output or completion.\n- Use `wait` only after `exec` returns `Script running with cell ID ...`.\n- `cell_id` identifies the running `exec` cell to resume.\n- `yield_time_ms` controls how long to wait for output. Defaults to 10000 ms.\n- `max_tokens` limits how much new output this wait call returns. Defaults to 10000 tokens.\n- `terminate: true` stops the running `exec` cell; false or omitted waits for output.\n- `wait` returns only the new output since the last yield, or the final completion or termination result for that cell.\n- If the cell is still running, `wait` may yield again with the same `cell_id`.\n- If the cell has already finished, the completed result is returned and the cell closes.',
+    parameters: {
+      cell_id: { type: 'string', required: true, description: 'Identifier of the running exec cell.' },
+      yield_time_ms: { type: 'number', description: 'Wait before yielding more output. Defaults to 10000 ms.' },
+      max_tokens: { type: 'number', description: 'Output token budget for this wait call. Defaults to 10000 tokens.' },
+      terminate: { type: 'boolean', description: 'True stops the running exec cell; false or omitted waits for output.' },
+    },
+    output: {
+      schema: outputSchema,
+      render: (_args, value) => [{ type: 'text', text: waitOutputText(value) }],
+    },
+    async execute(args, execution) {
+      const sessionId = Number(args.cell_id)
+      if (!Number.isSafeInteger(sessionId) || sessionId <= 0) {
+        throw new Error('wait compatibility adapter expects cell_id to be a numeric unified-exec session ID')
+      }
+      if (args.max_tokens !== undefined && (!Number.isFinite(args.max_tokens) || args.max_tokens <= 0)) {
+        throw new Error(`invalid max_tokens: expected a positive number, got ${String(args.max_tokens)}`)
+      }
+      const result = await ctx.tools.execute({
+        callId: execution.callId + ':write_stdin',
+        rootCallId: execution.rootCallId ?? execution.callId,
+        name: 'write_stdin',
+        arguments: {
+          session_id: sessionId,
+          chars: args.terminate === true ? '\u0003' : '',
+          yield_time_ms: args.yield_time_ms ?? 10_000,
+          ...(args.max_tokens === undefined ? {} : { max_output_tokens: args.max_tokens }),
+        },
+        agent: execution.agent,
+        parent: execution.token,
+        signal: execution.signal,
+      })
+      if (result.isError) {
+        throw new Error(result.content.filter(block => block.type === 'text').map(block => block.text).join('\n') || 'wait failed')
+      }
+      if (result.value === undefined) throw new Error('wait returned no result')
+      return result.value
+    },
+    presentCall(args) {
+      return { card: 'generic', title: `Wait on exec cell ${args.cell_id}`, kind: 'other' }
+    },
+    presentResult(_args, result) {
+      if (result.isError) return undefined
+      return { card: 'terminal', output: result.content.filter(block => block.type === 'text').map(block => block.text).join('') }
     },
   }))
 }
@@ -895,7 +986,16 @@ function patchResultText(value) {
     'Summary: ' + String(files.length) + ' file(s), +' + String(stats.added) + ' line(s), -' + String(stats.removed) + ' line(s).',
     '',
     'Files:',
-    ...(files.length === 0 ? ['(none)'] : files.map(file => '- ' + patchOperationLabel(file.operation) + ': ' + file.path)),
+    ...(files.length === 0 ? ['(none)'] : files.map(file => {
+      const fileStats = diffs
+        .filter(diff => diff.path === file.path)
+        .reduce((total, diff) => {
+          const current = diffStats(diff)
+          return { added: total.added + current.added, removed: total.removed + current.removed }
+        }, { added: 0, removed: 0 })
+      return '- ' + patchOperationLabel(file.operation) + ': ' + file.path
+        + ' (+' + String(fileStats.added) + '/-' + String(fileStats.removed) + ')'
+    })),
   ]
   if (diffs.length === 0) return lines.join('\n')
   lines.push('', 'Changes:')
@@ -906,19 +1006,13 @@ function patchResultText(value) {
 }
 
 /** Build a pure approval-time preview from the patch text itself. */
-/**
- * Strip the Begin/End Patch wrapper. Upstream requires the exact
- * "*** End Patch" terminator, but tolerates whitespace around markers; we add
- * a little more tolerance for trailing-asterisk variants (e.g.
- * "*** End Patch ***") from models that were not trained on the format.
- * Legitimate patch content never starts a bare line with the marker.
- */
+/** Strip the exact wrapper used by the upstream freeform apply_patch tool. */
 function patchBody(patch) {
-  return String(patch)
-    .replace(/^[^\S\n]*\*\*\* Begin Patch[^\n]*\n?/, '')
-    .split('\n')
-    .filter(line => !/^\*\*\* End Patch/.test(line.trimStart()))
-    .join('\n')
+  const lines = String(patch).replaceAll('\r\n', '\n').split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  if (lines[0] !== '*** Begin Patch') throw new Error('apply_patch must start with "*** Begin Patch"')
+  if (lines.at(-1) !== '*** End Patch') throw new Error('apply_patch must end with "*** End Patch"')
+  return lines.slice(1, -1).join('\n')
 }
 
 function parsePatchOperations(patch) {
@@ -1116,8 +1210,8 @@ async function applyPatch(ctx, exec, patch) {
 function registerApplyPatch(ctx) {
   ctx.tools.register(defineTool({
     name: 'apply_patch',
-    description: 'The apply_patch tool edits files with standard *** Begin Patch / *** End Patch text. Add, Delete, Update, and Move operations are supported. Paths must be relative to the turn cwd. This host uses an object wrapper because dsh Code Mode does not expose OpenAI freeform tools.',
-    parameters: { patch: { type: 'string', required: true, description: 'Free-form patch text.' } },
+    description: 'The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON. Because dsh currently exposes function tools only, pass the exact freeform patch as the required input string property. Add, Delete, Update, and Move operations are supported; paths must be relative to the turn cwd.',
+    parameters: { input: { type: 'string', required: true, description: 'The exact free-form patch text, including *** Begin Patch and *** End Patch.' } },
     output: {
       schema: {
         type: 'object',
@@ -1159,10 +1253,10 @@ function registerApplyPatch(ctx) {
       presentationMeta: (_args, value) => ({ diffs: value.diffs }),
     },
     async execute(args, exec) {
-      return applyPatch(ctx, exec, args.patch)
+      return applyPatch(ctx, exec, args.input)
     },
     presentCall(args) {
-      const diffs = previewPatchDiffs(args.patch)
+      const diffs = previewPatchDiffs(args.input)
       if (diffs.length === 0) return { card: 'generic', title: 'Apply patch', kind: 'edit' }
       const locations = [...new Set(diffs.map(diff => diff.path))].map(path => ({ path }))
       return {
@@ -1324,6 +1418,24 @@ function registerQuestions(ctx) {
     return { answers }
   }
 
+  const questionOutput = {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { answers: { type: 'json', required: true } },
+    },
+    render: (_args, value) => {
+      const answers = value && typeof value === 'object' && value.answers && typeof value.answers === 'object'
+        ? value.answers
+        : {}
+      const rows = Object.entries(answers).map(([id, answer]) => {
+        const selected = answer && Array.isArray(answer.answers) ? answer.answers : []
+        return '- ' + id + ': ' + (selected.length > 0 ? selected.join(', ') : '(no selection)')
+      })
+      return [{ type: 'text', text: rows.length > 0 ? rows.join('\n') : 'No answers returned.' }]
+    },
+  }
+
   ctx.tools.register(defineTool({
     name: 'request_user_input',
     description: 'Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.',
@@ -1357,7 +1469,7 @@ function registerQuestions(ctx) {
         },
       },
     },
-    output: textOutput,
+    output: questionOutput,
     async execute(args, exec) {
       const agent = agentOf(exec)
       if (ctx.get('planMode')?.get(agent)?.active !== true) {
@@ -1380,7 +1492,7 @@ function registerQuestions(ctx) {
         agent,
         signal: exec.signal,
       })
-      return JSON.stringify(normalizeQuestionResponse(value))
+      return normalizeQuestionResponse(value)
     },
     presentCall(args) {
       return {
@@ -1787,6 +1899,7 @@ export function apply(ctx) {
   registerReadableDispatchLog(ctx)
   registerExecCommand(ctx)
   registerWriteStdin(ctx)
+  registerWait(ctx)
   registerApplyPatch(ctx)
   registerViewImage(ctx)
   registerPlan(ctx)

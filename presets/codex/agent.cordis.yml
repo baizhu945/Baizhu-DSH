@@ -1,10 +1,10 @@
 # Codex-compatible agent-plane composition for DeepSeek Harness.
 #
-# OpenAI/codex reference: official HEAD @ 80cce09d059780528e59353ab3d87e4c97d1e944.
+# OpenAI/codex reference: official HEAD @ 70b5cfc73b25458a7af225d24b16ef4794f8f380.
 # The Luna model instructions and web.run description are pinned verbatim from
 # that tree; only host-mechanism adaptations are maintained locally.
 # The host remains authoritative for sandboxing, approval, persistence, model
-# routing, the code runtime, filesystem access, Skills, and subagent providers.
+# routing, the code runtime, filesystem access, and subagent providers.
 # Every compatibility change in this file is scoped to sessions selecting this
 # preset. Nix build identity (the shell service itself remains host-owned):
 # @bashPath@
@@ -91,15 +91,11 @@
   config:
     maxBytes: 32768
 
-# ── Skills ──────────────────────────────────────────────────────────────────
-
-- id: skill-filesystem
-  name: '@deepseek-ai/dsh-skill-filesystem'
-
-# The official prompt requires complete skill instructions before action. This
-# model-facing loader is mounted only in the Codex agent scope.
-- id: tool-skill
-  name: '@deepseek-ai/dsh-tool-skill'
+# The pinned Luna catalog sets include_skills_usage_instructions=false. Do not
+# mount dsh-skill-filesystem or dsh-tool-skill here: their dynamic
+# <available_skills> catalog would be visible to this preset even when the
+# model-facing `skill` tool is filtered out. Other presets keep their own skill
+# composition unchanged.
 
 # ── Plan mode ───────────────────────────────────────────────────────────────
 

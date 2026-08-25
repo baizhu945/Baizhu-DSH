@@ -24,6 +24,7 @@ const RUN_CODE = 'run_code'
 // DSH reserves run_code as its transport name. Keep that host-only name
 // behind the Codex-scoped exec facade so the model sees the upstream name.
 const CODE_MODE_TOOL = 'exec'
+const WAIT_TOOL = 'wait'
 const SKILL = 'skill'
 const WEB_RUN = 'web__run'
 const V1_PREFIX = 'multi_agent_v1__'
@@ -40,6 +41,7 @@ const V2_NAMES = new Set([
 // set is intentionally short-lived so ordinary nested SDK calls cannot name
 // run_code directly.
 const INTERNAL_RUN_CODE_CALLS = new Set()
+const SERIAL_ROOT_TAILS = new WeakMap()
 
 function humanLabel(key) {
   return String(key)
@@ -189,11 +191,17 @@ function readableValue(value, title) {
 const DEFAULT_PROFILE = Object.freeze({
   toolMode: 'native',
   multiAgentVersion: 'none',
+  applyPatchToolType: 'freeform',
+  shellType: 'unified_exec',
+  supportsParallelToolCalls: true,
   useResponsesLite: false,
   includeSkillsUsageInstructions: true,
+  includeAppsUsageInstructions: true,
+  includePluginUsageInstructions: true,
   inputModalities: ['text'],
   supportsImageDetailOriginal: false,
   supportsSearchTool: true,
+  webSearchToolType: undefined,
   defaultReasoningLevel: undefined,
   contextWindow: undefined,
   maxContextWindow: undefined,
@@ -237,13 +245,13 @@ function modelTail(model) {
 function heuristicRow(model) {
   const id = modelTail(model)
   if (id === 'gpt-5.6-luna') {
-    return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v1', use_responses_lite: true, include_skills_usage_instructions: false, context_window: 272000, max_context_window: 872000, default_reasoning_level: 'medium', input_modalities: ['text', 'image'], supports_image_detail_original: true, supports_search_tool: true }
+    return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v1', use_responses_lite: true, include_skills_usage_instructions: false, include_apps_usage_instructions: true, include_plugin_usage_instructions: true, web_search_tool_type: 'text_and_image', context_window: 272000, max_context_window: 872000, default_reasoning_level: 'medium', input_modalities: ['text', 'image'], supports_image_detail_original: true, supports_search_tool: true }
   }
   if (id === 'gpt-5.6-sol' || id === 'gpt-5.6-terra') {
-    return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v2', use_responses_lite: true, include_skills_usage_instructions: false, context_window: 272000, max_context_window: 872000, default_reasoning_level: id.endsWith('sol') ? 'low' : 'medium', input_modalities: ['text', 'image'], supports_image_detail_original: true, supports_search_tool: true }
+    return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v2', use_responses_lite: true, include_skills_usage_instructions: false, include_apps_usage_instructions: true, include_plugin_usage_instructions: true, web_search_tool_type: 'text_and_image', context_window: 272000, max_context_window: 872000, default_reasoning_level: id.endsWith('sol') ? 'low' : 'medium', input_modalities: ['text', 'image'], supports_image_detail_original: true, supports_search_tool: true }
   }
   if (id === 'gpt-5.3-codex-spark') {
-    return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v1', use_responses_lite: true, include_skills_usage_instructions: false, context_window: 128000, max_context_window: 128000, default_reasoning_level: 'medium', input_modalities: ['text'], supports_image_detail_original: false, supports_search_tool: true }
+    return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v1', use_responses_lite: true, include_skills_usage_instructions: false, include_apps_usage_instructions: true, include_plugin_usage_instructions: true, web_search_tool_type: 'text', context_window: 128000, max_context_window: 128000, default_reasoning_level: 'medium', input_modalities: ['text'], supports_image_detail_original: false, supports_search_tool: true }
   }
   return undefined
 }
@@ -264,11 +272,17 @@ function profileForModel(model) {
     instructions: typeof row.base_instructions === 'string' ? row.base_instructions : FALLBACK_INSTRUCTIONS,
     toolMode,
     multiAgentVersion,
+    applyPatchToolType: typeof row.apply_patch_tool_type === 'string' ? row.apply_patch_tool_type : 'freeform',
+    shellType: typeof row.shell_type === 'string' ? row.shell_type : 'unified_exec',
+    supportsParallelToolCalls: row.supports_parallel_tool_calls !== false,
     useResponsesLite: row.use_responses_lite === true,
     includeSkillsUsageInstructions: row.include_skills_usage_instructions !== false,
+    includeAppsUsageInstructions: row.include_apps_usage_instructions !== false,
+    includePluginUsageInstructions: row.include_plugin_usage_instructions !== false,
     inputModalities: Array.isArray(row.input_modalities) ? row.input_modalities : ['text'],
     supportsImageDetailOriginal: row.supports_image_detail_original === true,
     supportsSearchTool: row.supports_search_tool !== false,
+    webSearchToolType: typeof row.web_search_tool_type === 'string' ? row.web_search_tool_type : undefined,
     defaultReasoningLevel: typeof row.default_reasoning_level === 'string' ? row.default_reasoning_level : undefined,
     contextWindow: Number.isInteger(row.context_window) ? row.context_window : undefined,
     maxContextWindow: Number.isInteger(row.max_context_window) ? row.max_context_window : undefined,
@@ -320,9 +334,11 @@ function isV1Tool(name) {
 
 function modelToolAllowed(ctx, profile, name, agent, nested) {
   if (!nested && name === RUN_CODE) return false
-  if (!nested && profile.toolMode === 'code_mode_only' && name !== CODE_MODE_TOOL) return false
-  if (!nested && profile.toolMode === 'native' && name === CODE_MODE_TOOL) return false
-  if (nested && (name === RUN_CODE || name === CODE_MODE_TOOL)) return false
+  if (!nested && profile.toolMode === 'code_mode_only' && name !== CODE_MODE_TOOL && name !== WAIT_TOOL) return false
+  if (!nested && profile.toolMode === 'native' && (name === CODE_MODE_TOOL || name === WAIT_TOOL)) return false
+  if (nested && (name === RUN_CODE || name === CODE_MODE_TOOL || name === WAIT_TOOL)) return false
+  if ((name === 'exec_command' || name === 'write_stdin') && profile.shellType !== 'unified_exec') return false
+  if (name === 'apply_patch' && profile.applyPatchToolType === 'none') return false
   if (name === WEB_RUN && (!profile.useResponsesLite || !profile.supportsSearchTool)) return false
   if (name === SKILL && !profile.includeSkillsUsageInstructions) return false
   if (name === 'view_image' && !isImageCapable(profile)) return false
@@ -369,7 +385,10 @@ function dynamicSdk(ctx, agent, profile, fallback) {
 }
 
 function rewriteCodeModeName(text) {
-  return typeof text === 'string' ? text.replaceAll(RUN_CODE, CODE_MODE_TOOL) : text
+  if (typeof text !== 'string') return text
+  return text
+    .replaceAll(RUN_CODE, CODE_MODE_TOOL)
+    .replace('`exec` is the only tool you can call directly', '`exec` and `wait` are the only tools you can call directly')
 }
 
 function codeModeErrorText(result) {
@@ -381,6 +400,15 @@ function codeModeErrorText(result) {
     .trim()
 }
 
+function codeModeDescription(input) {
+  const firstLine = String(input)
+    .split(String.fromCharCode(10))
+    .map(line => line.trim())
+    .find(line => line.length > 0)
+  if (firstLine === undefined) return 'Execute Code Mode program'
+  return firstLine.length > 120 ? firstLine.slice(0, 117) + '…' : firstLine
+}
+
 /**
  * Present DSH's function-shaped Code Mode under Codex's exec name. DSH's
  * core still owns the actual reserved transport; the nested parent token is
@@ -389,10 +417,10 @@ function codeModeErrorText(result) {
 function registerCodeModeAlias(ctx) {
   ctx.tools.register(defineTool({
     name: CODE_MODE_TOOL,
-    description: 'Execute an async TypeScript function body in Code Mode. Use tools.<tool_name>(arguments) for tool calls and return a JSON-serializable value.',
+    description: 'Execute raw JavaScript source in the Codex Code Mode runtime. The source is the program text, not a JSON object or fenced code block. Use tools.<tool_name>(arguments) for tool calls and return a JSON-serializable value. The dsh compatibility transport carries that source in the required input string property.',
     parameters: {
-      code: { type: 'string', required: true, description: 'The body of an async TypeScript function to execute in Code Mode.' },
-      description: { type: 'string', required: true, description: 'Short summary of what the program does.' },
+      input: { type: 'string', required: true, description: 'Raw JavaScript source text. Do not wrap it in JSON or markdown fences.' },
+      description: { type: 'string', description: 'Optional short summary of what the program does.' },
     },
     output: {
       schema: {
@@ -412,12 +440,13 @@ function registerCodeModeAlias(ctx) {
     },
     presentCall: args => ({
       card: 'generic',
-      title: args.description,
+      title: args.description?.trim() || codeModeDescription(args.input),
       kind: 'execute',
-      rawInput: args.code,
+      rawInput: args.input,
     }),
     async execute(args, execution) {
-      if (args.description.trim().length === 0) throw new Error('invalid description: expected a non-empty string')
+      const description = args.description?.trim() || codeModeDescription(args.input)
+      if (description.length === 0) throw new Error('invalid input: expected non-empty JavaScript source')
       const callId = execution.callId + ':run_code'
       INTERNAL_RUN_CODE_CALLS.add(callId)
       try {
@@ -425,7 +454,7 @@ function registerCodeModeAlias(ctx) {
           callId,
           rootCallId: execution.rootCallId ?? execution.callId,
           name: RUN_CODE,
-          arguments: { code: args.code, description: args.description },
+          arguments: { code: args.input, description },
           agent: execution.agent,
           parent: execution.token,
           signal: execution.signal,
@@ -650,13 +679,35 @@ function registerModelParity(ctx) {
     return { ...resolved, reasoningEffort: profile.defaultReasoningLevel }
   })
 
+  // Some official catalog rows explicitly disable parallel tool calls. DSH's
+  // scheduler is shared and has no per-model request flag, so serialize only
+  // direct Codex calls for those rows. Nested Code Mode dispatches retain the
+  // runtime's own scheduler and are deliberately not placed behind this lock.
+  ctx.on('tools/execute', async (execution, next) => {
+    const agent = execution.agent
+    if (agent === undefined || execution.parent !== undefined) return next()
+    const profile = profileForModel(currentModel(agent))
+    if (profile.supportsParallelToolCalls) return next()
+    const previous = SERIAL_ROOT_TAILS.get(agent) ?? Promise.resolve()
+    let release
+    const current = new Promise(resolve => { release = resolve })
+    SERIAL_ROOT_TAILS.set(agent, current)
+    await previous.catch(() => {})
+    try {
+      return await next()
+    } finally {
+      release()
+      if (SERIAL_ROOT_TAILS.get(agent) === current) SERIAL_ROOT_TAILS.delete(agent)
+    }
+  })
+
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const assembled = await next()
     const agent = context.agent
     if (agent === undefined) return assembled
     const profile = profileForModel(currentModel(agent, assembled))
     const tools = nativeSchemas(ctx, agent, profile)
-      .filter(tool => profile.toolMode !== 'code_mode_only' || tool.name === CODE_MODE_TOOL)
+      .filter(tool => profile.toolMode !== 'code_mode_only' || tool.name === CODE_MODE_TOOL || tool.name === WAIT_TOOL)
     const sections = assembled.sections
       .filter(section => profile.toolMode !== 'native' || section.name !== 'tools:code-only')
       .filter(section => profile.toolMode !== 'native' || section.name !== 'tools:sdk')

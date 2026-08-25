@@ -1,13 +1,13 @@
 { pkgs, lib, ... }:
 
 let
-  # OpenAI/codex model catalog @ 80cce09d059780528e59353ab3d87e4c97d1e944.
+  # OpenAI/codex model catalog @ 70b5cfc73b25458a7af225d24b16ef4794f8f380.
   # The catalog is mounted only below the Codex preset. Its base_instructions
   # and capability fields are read by codex-model-parity.mjs per request, so a
   # model switch changes the model-facing contract without touching other
   # agent presets or the host model registry.
   codexModels = pkgs.fetchurl {
-    url = "https://raw.githubusercontent.com/openai/codex/80cce09d059780528e59353ab3d87e4c97d1e944/codex-rs/models-manager/models.json";
+    url = "https://raw.githubusercontent.com/openai/codex/70b5cfc73b25458a7af225d24b16ef4794f8f380/codex-rs/models-manager/models.json";
     hash = "sha256-6w17ml3K8QOJXF+KFMFrJp30bgObN1pVupf2I4VC0u0=";
   };
 
@@ -24,12 +24,18 @@ let
     bashPath = "${pkgs.bashInteractive}/bin/bash";
     inherit codexPrompt;
   };
+
+  # Keep the shell path override scoped to the Codex surface. Other dsh
+  # presets continue to use their own tool definitions and shell defaults.
+  codexSurface = pkgs.replaceVars ./codex-surface.mjs {
+    bashPath = "${pkgs.bashInteractive}/bin/bash";
+  };
 in
 {
   home.file = {
     ".dsh/.agent-presets/codex/agent.cordis.yml".source = codexComposition;
     ".dsh/.agent-presets/codex/preset.yml".source = ./preset.yml;
-    ".dsh/.agent-presets/codex/codex-surface.mjs".source = ./codex-surface.mjs;
+    ".dsh/.agent-presets/codex/codex-surface.mjs".source = codexSurface;
     ".dsh/.agent-presets/codex/codex-model-parity.mjs".source = ./codex-model-parity.mjs;
     ".dsh/.agent-presets/codex/codex-models.json".source = codexModels;
     ".dsh/.agent-presets/codex/codex-web-search.mjs".source = ./codex-web-search.mjs;
