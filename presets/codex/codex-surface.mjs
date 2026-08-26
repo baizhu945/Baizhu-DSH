@@ -879,14 +879,17 @@ function findBlock(lines, needle, start = 0, endOfFile = false) {
   const first = Math.max(0, start)
   const last = lines.length - needle.length
   if (first > last) return -1
-  const starts = []
-  if (endOfFile) starts.push(Math.max(first, last))
-  for (let index = first; index <= last; index++) {
-    if (!starts.includes(index)) starts.push(index)
-  }
+  const matchesAt = (index, mode) => needle.every((line, offset) => (
+    normalizedMatchLine(lines[index + offset], mode) === normalizedMatchLine(line, mode)
+  ))
   for (const mode of ['exact', 'rstrip', 'trim', 'unicode']) {
-    for (const index of starts) {
-      if (needle.every((line, offset) => normalizedMatchLine(lines[index + offset], mode) === normalizedMatchLine(line, mode))) return index
+    // Prefer the EOF anchor, then scan the remaining candidates once. The
+    // old starts.includes(index) construction made this loop quadratic for
+    // large files, even when the hunk matched near the beginning.
+    if (endOfFile && matchesAt(last, mode)) return last
+    const limit = endOfFile ? last - 1 : last
+    for (let index = first; index <= limit; index++) {
+      if (matchesAt(index, mode)) return index
     }
   }
   return -1
@@ -946,6 +949,13 @@ function applyHunks(original, patchLines, path) {
       if (isHunkHeader(line)) break
       if (control === '*** End of File') {
         endOfFile = true
+        cursor++
+        continue
+      }
+      // The official parser permits a blank separator after an EOF marker
+      // before the next @@ chunk. It is not an empty context line: a real
+      // empty context line carries the required leading space marker.
+      if (endOfFile && line === '') {
         cursor++
         continue
       }
@@ -1217,13 +1227,15 @@ function previewPatchDiffs(patch) {
   return diffs
 }
 
-async function writePatchedFile(ctx, exec, target, content, expectedVersion, sandboxPolicy) {
+async function writePatchedFile(ctx, exec, target, content, expectedVersion, sandboxPolicy, explicitIntent) {
   const intent = await ctx.waterfall('fs/write-intent', target, exec, () => (
-    expectedVersion === undefined ? undefined : { version: expectedVersion }
+    explicitIntent ?? (expectedVersion === undefined
+      ? undefined
+      : { kind: 'replaceIfVersion', version: expectedVersion })
   ))
   const outcome = await ctx.fs.writeText(target, content, intent, exec.signal, sandboxPolicy)
   ctx.emit('fs/observed', target, { kind: 'present', version: outcome.version }, exec)
-  return { path: target.displayPath, operation: outcome.operation }
+  return outcome
 }
 
 async function preflightPatch(ctx, exec, patch) {
@@ -1236,6 +1248,9 @@ async function preflightPatch(ctx, exec, patch) {
       if (operation.body.length === 0 || operation.body.some(line => patchControlLine(line) === '*** End of File' || !line.startsWith('+'))) {
         throw new Error('invalid apply_patch Add File body for ' + operation.path)
       }
+      const existing = await ctx.fs.stat(target, exec.signal)
+      if (existing !== undefined) throw new Error('apply_patch Add File target already exists: ' + operation.path)
+      ctx.emit('fs/observed', target, { kind: 'absent' }, exec)
       const content = operation.body.map(line => line.slice(1)).join('\n') + '\n'
       prepared.push({ ...operation, target, content })
       continue
@@ -1257,9 +1272,43 @@ async function preflightPatch(ctx, exec, patch) {
     const destination = operation.moveTo === undefined
       ? undefined
       : await ctx.fs.resolve(operation.moveTo, { cwd: cwdOf(agent), signal: exec.signal })
-    prepared.push({ ...operation, target, destination, info, original, content })
+    if (destination !== undefined && destination.targetKey === target.targetKey) {
+      throw new Error('apply_patch cannot move a file onto itself: ' + operation.path)
+    }
+    let destinationInfo
+    let destinationOriginal
+    if (destination !== undefined) {
+      destinationInfo = await ctx.fs.stat(destination, exec.signal)
+      if (destinationInfo !== undefined && destinationInfo.type !== 'file') {
+        throw new Error('apply_patch move destination is not a regular file: ' + operation.moveTo)
+      }
+      if (destinationInfo !== undefined) {
+        destinationOriginal = await ctx.fs.readText(destination, exec.signal)
+        ctx.emit('fs/observed', destination, { kind: 'present', version: destinationInfo.version }, exec)
+      } else {
+        ctx.emit('fs/observed', destination, { kind: 'absent' }, exec)
+      }
+    }
+    prepared.push({ ...operation, target, destination, destinationInfo, destinationOriginal, info, original, content })
   }
   return prepared
+}
+
+async function rollbackMoveDestination(ctx, exec, operation, written, sandboxPolicy) {
+  if (operation.destinationInfo === undefined) {
+    await ctx.fs.deleteFile(operation.destination, { version: written.version }, exec.signal, sandboxPolicy)
+    ctx.emit('fs/observed', operation.destination, { kind: 'absent' }, exec)
+    return
+  }
+  const restored = await writePatchedFile(
+    ctx,
+    exec,
+    operation.destination,
+    operation.destinationOriginal,
+    written.version,
+    sandboxPolicy,
+  )
+  ctx.emit('fs/observed', operation.destination, { kind: 'present', version: restored.version }, exec)
 }
 
 async function applyPatch(ctx, exec, patch) {
@@ -1274,7 +1323,11 @@ async function applyPatch(ctx, exec, patch) {
   const diffs = []
   for (const operation of operations) {
     if (operation.kind === 'add') {
-      results.push(await writePatchedFile(ctx, exec, operation.target, operation.content, undefined, sandboxPolicy))
+      const written = await writePatchedFile(
+        ctx, exec, operation.target, operation.content, undefined, sandboxPolicy,
+        { kind: 'createIfAbsent' },
+      )
+      results.push({ path: operation.target.displayPath, operation: written.operation })
       diffs.push({
         path: operation.target.displayPath,
         oldText: null,
@@ -1307,25 +1360,51 @@ async function applyPatch(ctx, exec, patch) {
       })
       continue
     }
-    const written = await writePatchedFile(
-      ctx, exec, operation.target, operation.content, operation.info.version, sandboxPolicy,
-    )
     diffs.push(...computeHunkDiffs(
       operation.destination?.displayPath ?? operation.target.displayPath,
       operation.original,
       operation.content,
     ))
     if (operation.destination === undefined) {
-      results.push(written)
+      const written = await writePatchedFile(
+        ctx, exec, operation.target, operation.content, operation.info.version, sandboxPolicy,
+      )
+      results.push({ path: operation.target.displayPath, operation: written.operation })
       continue
     }
-    const movedInfo = await ctx.fs.stat(operation.target, exec.signal)
-    if (movedInfo === undefined) throw new Error(`apply_patch move source disappeared: ${operation.path}`)
-    const outcome = await ctx.fs.moveFile(
-      operation.target, operation.destination, { version: movedInfo.version }, exec.signal, sandboxPolicy,
+    // Match Codex's move ordering: publish the updated destination first,
+    // then remove the source. This leaves the source untouched when the
+    // destination write fails. If source deletion fails, restore the prior
+    // destination content (or remove a newly created destination).
+    const written = await writePatchedFile(
+      ctx,
+      exec,
+      operation.destination,
+      operation.content,
+      operation.destinationInfo?.version,
+      sandboxPolicy,
+      operation.destinationInfo === undefined ? { kind: 'createIfAbsent' } : undefined,
     )
+    try {
+      await ctx.fs.deleteFile(
+        operation.target,
+        { version: operation.info.version },
+        exec.signal,
+        sandboxPolicy,
+      )
+    } catch (error) {
+      try {
+        await rollbackMoveDestination(ctx, exec, operation, written, sandboxPolicy)
+      } catch (rollbackError) {
+        throw new Error(
+          'apply_patch move failed for ' + operation.path
+            + '; destination rollback also failed: ' + String(rollbackError),
+          { cause: error },
+        )
+      }
+      throw error
+    }
     ctx.emit('fs/observed', operation.target, { kind: 'absent' }, exec)
-    ctx.emit('fs/observed', operation.destination, { kind: 'present', version: outcome.version }, exec)
     results.push({ path: operation.destination.displayPath, operation: 'move' })
   }
   return { files: results, diffs }
