@@ -46,6 +46,8 @@ let
       ./presets/codex/patches/codex-runtime-parity.patch
       # One Codex-scoped UI patch keeps live, replay, and trajectory rendering together.
       ./presets/codex/patches/codex-readable-tools.patch
+      # Promote only marked Codex Code Mode children to native tool rows.
+      ./presets/codex/patches/codex-native-display.patch
     ];
 
     nativeBuildInputs = [

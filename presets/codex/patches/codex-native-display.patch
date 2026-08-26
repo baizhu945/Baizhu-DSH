@@ -1,0 +1,228 @@
+--- a/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx
++++ b/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx
+@@ -10,6 +10,19 @@
+   return 'kind' in node ? node.call?.name ?? '' : node.name
+ }
+ 
++function codexMarkedView(value: unknown): boolean {
++  return value !== null
++    && typeof value === 'object'
++    && (value as { __codexPreset?: unknown }).__codexPreset === true
++}
++
++/** Code Mode's outer `exec` call is only a transport envelope in Codex. */
++function isCodexTransport(block: ToolCallBlock): boolean {
++  return callName(block) === 'exec'
++    && block.subCalls.length > 0
++    && (codexMarkedView(block.callView) || ('kind' in block && codexMarkedView(block.resultView)))
++}
++
+ /** One atomic call dispatched through the Tool-owned keyed slot. */
+ const ToolCall = memo(function ToolCall({
+   renderSlot, callId, toolName, block, openFile, selected, cwd, home, inspectCall, t, children,
+@@ -52,6 +65,39 @@
+   block: ToolCallBlock
+   home?: string | undefined
+ }) {
++  const transport = isCodexTransport(block)
++  const childRows = block.subCalls.map(child => (
++    <ToolCallBranch
++      key={child.callId}
++      renderSlot={renderSlot}
++      block={child}
++      selectedCallId={selectedCallId}
++      cwd={cwd}
++      home={home}
++      openFile={openFile}
++      inspectCall={inspectCall}
++      t={t}
++    />
++  ))
++  const children = block.subCalls.length > 0 ? (
++    <div className={transport ? css.codexSubCalls : css.subCalls} data-subcalls>
++      {childRows}
++    </div>
++  ) : null
++  if (transport) {
++    return (
++      <div
++        className={css.codexSubCalls}
++        data-subcalls
++        data-codex-transport
++        data-chat-anchor-key={`call:${block.callId}`}
++        data-chat-call-id={block.callId}
++        data-selected={block.callId === selectedCallId || undefined}
++      >
++        {childRows}
++      </div>
++    )
++  }
+   return (
+     <ToolCall
+       renderSlot={renderSlot}
+@@ -65,23 +111,7 @@
+       inspectCall={inspectCall}
+       t={t}
+     >
+-      {block.subCalls.length > 0 ? (
+-        <div className={css.subCalls} data-subcalls>
+-          {block.subCalls.map(child => (
+-            <ToolCallBranch
+-              key={child.callId}
+-              renderSlot={renderSlot}
+-              block={child}
+-              selectedCallId={selectedCallId}
+-              cwd={cwd}
+-              home={home}
+-              openFile={openFile}
+-              inspectCall={inspectCall}
+-              t={t}
+-            />
+-          ))}
+-        </div>
+-      ) : null}
++      {children}
+     </ToolCall>
+   )
+ })
+--- a/packages/client/ui-tool/src/client/tool/ToolCallTree.module.css
++++ b/packages/client/ui-tool/src/client/tool/ToolCallTree.module.css
+@@ -10,3 +10,11 @@
+   padding-left: 8px;
+   border-left: 1px solid var(--dsw-alias-border-l2);
+ }
++
++/* Only the Codex transport branch uses this class; standard nested calls keep
++ * the existing `.subCalls` indentation and border. */
++.codexSubCalls {
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++}
+--- a/packages/client/ui-trajectory/src/client/layout.ts
++++ b/packages/client/ui-trajectory/src/client/layout.ts
+@@ -57,6 +57,7 @@
+   toolName?: string
+   callId?: string
+   subCalls?: readonly ToolCallBlock[]
++  codexTransport?: boolean
+ }
+ 
+ interface LaidGroup {
+@@ -106,6 +107,21 @@
+     : entry.seq
+ }
+ 
++function codexMarkedView(value: unknown): boolean {
++  return value !== null
++    && typeof value === 'object'
++    && (value as { __codexPreset?: unknown }).__codexPreset === true
++}
++
++/** Code Mode's outer `exec` cell is a transport envelope in Codex. */
++function isCodexTransport(name: string, callView: unknown, resultView?: unknown): boolean {
++  return name === 'exec' && (codexMarkedView(callView) || codexMarkedView(resultView))
++}
++
++function resultViewOf(block: ToolCallBlock | undefined): unknown {
++  return block !== undefined && 'kind' in block ? block.resultView : undefined
++}
++
+ function inputCellDetail(node: InputNode): Pick<
+   TrajectoryCellProps,
+   | 'text'
+@@ -422,11 +438,12 @@
+       if (!emittedCallIds.has(node.callId)) {
+         const toolName = node.call?.name
+         const resultPreview = summarizeResult(node)
+-        const laidList: LaidCell[] = [{
++        const laidList = withSubCalls([{
+           absTime: finiteTime(node.callTime ?? node.time),
+           ...(toolName !== undefined ? { toolName } : {}),
+           callId: node.callId,
+           subCalls: node.subCalls,
++          codexTransport: toolName !== undefined && isCodexTransport(toolName, node.callView, node.resultView),
+           cell: {
+             index: ++index,
+             kind: 'tool',
+@@ -443,11 +460,8 @@
+             timeSeconds: durationSeconds(node.time, node.callTime),
+             startedAt: finiteTime(node.callTime),
+           },
+-        }]
+-        for (const laid of expandSubCalls(node.subCalls, index)) {
+-          laidList.push(laid)
+-          index = laid.cell.index
+-        }
++        }])
++        if (laidList.length > 0) index = laidList[laidList.length - 1]!.cell.index
+         pushStep(0, 1, laidList)
+       }
+       prevAbsTime = finiteTime(node.time) ?? prevAbsTime
+@@ -477,11 +491,12 @@
+   const seenCalls = collectCallIds(turns)
+   for (const call of runningCalls) {
+     if (seenCalls.has(call.callId)) continue
+-    const laidList: LaidCell[] = [{
++    const laidList = withSubCalls([{
+       absTime: null,
+       toolName: call.name,
+       callId: call.callId,
+       subCalls: call.subCalls,
++      codexTransport: isCodexTransport(call.name, call.callView),
+       cell: {
+         index: ++index,
+         kind: 'tool',
+@@ -491,11 +506,8 @@
+         timeSeconds: null,
+         startedAt: finiteTime(call.time),
+       },
+-    }]
+-    for (const laid of expandSubCalls(call.subCalls, index)) {
+-      laidList.push(laid)
+-      index = laid.cell.index
+-    }
++    }])
++    if (laidList.length > 0) index = laidList[laidList.length - 1]!.cell.index
+     if (call.step > 0) pushStep(call.turn, call.step, laidList)
+     else for (const laid of laidList) pushMessage(call.turn, laid)
+   }
+@@ -735,6 +747,7 @@
+       toolName: block.name,
+       callId: block.callId,
+       ...(call === undefined ? {} : { subCalls: call.subCalls }),
++      codexTransport: isCodexTransport(block.name, call?.callView, resultViewOf(call)),
+       cell: {
+         index: ++index, kind: 'tool',
+         ...summarizeCall(block.name, block.argsRaw),
+@@ -980,6 +993,13 @@
+   const out: LaidCell[] = []
+   let index = laidList[0] !== undefined ? laidList[0].cell.index - 1 : 0
+   for (const laid of laidList) {
++    if (laid.codexTransport === true && laid.subCalls !== undefined && laid.subCalls.length > 0) {
++      for (const sub of expandSubCalls(laid.subCalls, index, 'tool')) {
++        out.push(sub)
++        index = sub.cell.index
++      }
++      continue
++    }
+     out.push({ ...laid, cell: { ...laid.cell, index: ++index } })
+     for (const sub of expandSubCalls(laid.subCalls, index)) {
+       out.push(sub)
+@@ -993,6 +1013,7 @@
+ function expandSubCalls(
+   subs: readonly ToolCallBlock[] | undefined,
+   startIndex: number,
++  rowKind: 'subtool' | 'tool' = 'subtool',
+ ): LaidCell[] {
+   if (subs === undefined || subs.length === 0) return []
+   const out: LaidCell[] = []
+@@ -1006,7 +1027,7 @@
+       callId: sub.callId,
+       cell: {
+         index: ++index,
+-        kind: 'subtool',
++        kind: rowKind,
+         callId: sub.callId,
+         ...(settled
+           ? (sub.call !== null
