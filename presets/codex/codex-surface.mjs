@@ -514,8 +514,7 @@ function commandForShell(args) {
   if (args.shell !== undefined) {
     return `${shellQuote(args.shell)} ${login ? '-lc' : '-c'} ${shellQuote(args.cmd)}`
   }
-  if (login) return `${shellQuote(DEFAULT_SHELL)} -lc ${shellQuote(args.cmd)}`
-  return args.cmd
+  return `${shellQuote(DEFAULT_SHELL)} ${login ? '-lc' : '-c'} ${shellQuote(args.cmd)}`
 }
 
 async function waitForPipeProcess(process, yieldTimeMs, signal) {
@@ -585,7 +584,7 @@ function registerExecCommand(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'exec_command',
-    description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction.',
+    description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction. `cmd` is a plain shell-command string; the tool-call transport handles JSON quoting, so do not JSON-encode the command a second time.',
     parameters: {
       cmd: { type: 'string', required: true, description: 'Shell command to execute.' },
       workdir: { type: 'string', description: 'Working directory for the command. Defaults to the turn cwd.' },
@@ -842,49 +841,150 @@ function registerWait(ctx) {
 }
 
 function patchPath(header) {
-  const match = /^(?:\*\*\* (?:Update|Add|Delete) File): (.+)$/.exec(header)
-  if (match === null) throw new Error(`unsupported apply_patch header: ${header}`)
-  return match[1]
+  const normalized = String(header).trim()
+  const match = /^\*\*\* (?:Update|Add|Delete) File:\s*(.*?)\s*$/.exec(normalized)
+  if (match === null || match[1].trim() === '') throw new Error('unsupported apply_patch header: ' + String(header))
+  return match[1].trim()
 }
 
-function findBlock(lines, needle, start = 0) {
-  for (let index = start; index <= lines.length - needle.length; index++) {
-    if (needle.every((line, offset) => lines[index + offset] === line)) return index
+function patchControlLine(line) {
+  return String(line).trim()
+}
+
+function isHunkHeader(line) {
+  const normalized = patchControlLine(line)
+  return normalized === '@@' || normalized.startsWith('@@ ')
+}
+
+function isPatchLine(line) {
+  return line === '' || [' ', '+', '-'].includes(line[0])
+}
+
+function normalizedMatchLine(value, mode) {
+  const text = String(value)
+  if (mode === 'rstrip') return text.trimEnd()
+  if (mode === 'trim') return text.trim()
+  if (mode !== 'unicode') return text
+  return text.trim().replace(/[\u2010-\u2015\u2212\u2018-\u201b\u201c-\u201f\u00a0\u2000-\u200a\u202f\u205f\u3000]/g, character => {
+    if ('‐‑‒–—―−'.includes(character)) return '-'
+    if ('‘’‚‛'.includes(character)) return String.fromCharCode(39)
+    if ('“”„‟'.includes(character)) return String.fromCharCode(34)
+    return ' '
+  })
+}
+
+function findBlock(lines, needle, start = 0, endOfFile = false) {
+  if (needle.length === 0) return endOfFile ? lines.length : Math.min(start, lines.length)
+  if (needle.length > lines.length) return -1
+  const first = Math.max(0, start)
+  const last = lines.length - needle.length
+  if (first > last) return -1
+  const starts = []
+  if (endOfFile) starts.push(Math.max(first, last))
+  for (let index = first; index <= last; index++) {
+    if (!starts.includes(index)) starts.push(index)
+  }
+  for (const mode of ['exact', 'rstrip', 'trim', 'unicode']) {
+    for (const index of starts) {
+      if (needle.every((line, offset) => normalizedMatchLine(lines[index + offset], mode) === normalizedMatchLine(line, mode))) return index
+    }
   }
   return -1
 }
 
+function splitSourceLines(text) {
+  const value = String(text)
+  const lines = []
+  let preferredEnding
+  let start = 0
+  let cursor = 0
+  while (cursor < value.length) {
+    const character = value[cursor]
+    let ending
+    if (character === '\r') ending = value[cursor + 1] === '\n' ? '\r\n' : '\r'
+    else if (character === '\n') ending = '\n'
+    if (ending === undefined) {
+      cursor++
+      continue
+    }
+    lines.push({ text: value.slice(start, cursor), ending })
+    preferredEnding ??= ending
+    cursor += ending.length
+    start = cursor
+  }
+  if (start < value.length) lines.push({ text: value.slice(start), ending: '' })
+  return { lines, preferredEnding: preferredEnding ?? '\n' }
+}
+
 function applyHunks(original, patchLines, path) {
-  const hadTrailingNewline = original.endsWith('\n')
-  const lines = original.split('\n')
-  if (hadTrailingNewline) lines.pop()
+  const source = splitSourceLines(original)
+  const lines = source.lines.slice()
   let cursor = 0
   let searchFrom = 0
   let changed = false
   while (cursor < patchLines.length) {
-    if (!patchLines[cursor].startsWith('@@')) {
+    const first = patchLines[cursor]
+    if (patchControlLine(first) === '*** End of File') {
       cursor++
       continue
     }
-    cursor++
+    let context
+    if (isHunkHeader(first)) {
+      const normalized = patchControlLine(first)
+      const suffix = normalized.slice(2).trim()
+      if (suffix !== '' && !/^-[0-9].*\+[0-9]/.test(suffix)) context = suffix
+      cursor++
+    } else if (!isPatchLine(first)) {
+      cursor++
+      continue
+    }
     const hunk = []
-    while (cursor < patchLines.length && !patchLines[cursor].startsWith('@@')) {
+    let endOfFile = false
+    while (cursor < patchLines.length) {
       const line = patchLines[cursor]
-      if (line === '*** End of File') break
-      if (![' ', '+', '-'].includes(line[0])) throw new Error(`invalid apply_patch hunk for ${path}`)
+      const control = patchControlLine(line)
+      if (isHunkHeader(line)) break
+      if (control === '*** End of File') {
+        endOfFile = true
+        cursor++
+        continue
+      }
+      if (!isPatchLine(line)) throw new Error('invalid apply_patch hunk for ' + path)
       hunk.push(line)
       cursor++
     }
-    const oldLines = hunk.filter(line => line[0] !== '+').map(line => line.slice(1))
-    const newLines = hunk.filter(line => line[0] !== '-').map(line => line.slice(1))
-    const index = findBlock(lines, oldLines, searchFrom)
-    if (index < 0) throw new Error(`apply_patch context did not match ${path}`)
-    lines.splice(index, oldLines.length, ...newLines)
-    searchFrom = index + newLines.length
+    if (hunk.length === 0) throw new Error('apply_patch contained an empty hunk for ' + path)
+    const oldLines = hunk.filter(line => line === '' || line[0] !== '+').map(line => line === '' ? '' : line.slice(1))
+    let anchorStart = searchFrom
+    if (context !== undefined) {
+      const contextIndex = findBlock(lines.map(line => line.text), [context], searchFrom)
+      if (contextIndex < 0) throw new Error('apply_patch context did not match ' + path + ': ' + context)
+      anchorStart = contextIndex + 1
+    }
+    const insertionAtEnd = oldLines.length === 0 && context === undefined
+    const index = findBlock(lines.map(line => line.text), oldLines, anchorStart, endOfFile || insertionAtEnd)
+    if (index < 0) throw new Error('apply_patch context did not match ' + path)
+    const replacement = []
+    let oldOffset = 0
+    for (const line of hunk) {
+      if (line === '' || line[0] === ' ') {
+        const originalLine = lines[index + oldOffset]
+        if (originalLine === undefined) throw new Error('apply_patch context did not match ' + path)
+        replacement.push(originalLine)
+        oldOffset++
+      } else if (line[0] === '-') {
+        oldOffset++
+      } else {
+        replacement.push({ text: line.slice(1), ending: source.preferredEnding })
+      }
+    }
+    lines.splice(index, oldLines.length, ...replacement)
+    searchFrom = index + replacement.length
     changed = true
   }
-  if (!changed) throw new Error(`apply_patch contained no hunks for ${path}`)
-  return lines.join('\n') + (hadTrailingNewline ? '\n' : '')
+  if (!changed) throw new Error('apply_patch contained no hunks for ' + path)
+  for (const line of lines) line.ending ||= source.preferredEnding
+  return lines.map(line => line.text + line.ending).join('')
 }
 
 /** Match dsh-tool-fs: one three-line-context FileDiff per applied hunk. */
@@ -1020,10 +1120,11 @@ function patchResultText(value) {
 /** Build a pure approval-time preview from the patch text itself. */
 /** Strip the exact wrapper used by the upstream freeform apply_patch tool. */
 function patchBody(patch) {
-  const lines = String(patch).replaceAll('\r\n', '\n').split('\n')
-  if (lines.at(-1) === '') lines.pop()
-  if (lines[0] !== '*** Begin Patch') throw new Error('apply_patch must start with "*** Begin Patch"')
-  if (lines.at(-1) !== '*** End Patch') throw new Error('apply_patch must end with "*** End Patch"')
+  let lines = String(patch).replace(/\r\n?/g, '\n').trim().split('\n')
+  const heredoc = /^(?:apply_patch\s+)?<<(?:EOF|'EOF'|"EOF")$/.test(lines[0]?.trim() ?? '')
+  if (heredoc && lines.length >= 4 && lines.at(-1).trim() === 'EOF') lines = lines.slice(1, -1).join('\n').trim().split('\n')
+  if (lines.length < 2 || lines[0].trim() !== '*** Begin Patch') throw new Error('apply_patch must start with "*** Begin Patch"')
+  if (lines.at(-1).trim() !== '*** End Patch') throw new Error('apply_patch must end with "*** End Patch"')
   return lines.slice(1, -1).join('\n')
 }
 
@@ -1033,43 +1134,49 @@ function parsePatchOperations(patch) {
   let cursor = 0
   while (cursor < lines.length) {
     const header = lines[cursor]
-    if (!header.startsWith('*** ')) {
+    const normalizedHeader = patchControlLine(header)
+    if (normalizedHeader === '') {
       cursor++
       continue
     }
-    if (header === '*** End of File') {
+    if (normalizedHeader.startsWith('*** Environment ID:')) {
+      if (normalizedHeader.slice('*** Environment ID:'.length).trim() === '') throw new Error('apply_patch environment_id cannot be empty')
       cursor++
       continue
     }
-    if (header.startsWith('*** Move to:')) throw new Error(`apply_patch move has no Update File source: ${header}`)
-    const path = patchPath(header)
-    if (nodePath.isAbsolute(path)) throw new Error(`apply_patch paths must be relative to the turn cwd: ${path}`)
-    const kind = header.startsWith('*** Add File:')
-      ? 'add'
-      : header.startsWith('*** Delete File:') ? 'delete' : 'update'
+    if (normalizedHeader === '*** End of File') {
+      cursor++
+      continue
+    }
+    const headerMatch = /^\*\*\* (Update|Add|Delete) File:\s*(.*?)\s*$/.exec(normalizedHeader)
+    if (headerMatch === null) throw new Error('unsupported apply_patch hunk header: ' + header)
+    const path = patchPath(normalizedHeader)
+    const kind = headerMatch[1] === 'Add' ? 'add' : headerMatch[1] === 'Delete' ? 'delete' : 'update'
     cursor++
     let moveTo
-    if (kind === 'update' && lines[cursor]?.startsWith('*** Move to:')) {
-      moveTo = lines[cursor].slice('*** Move to:'.length).trim()
-      if (moveTo === '') throw new Error(`apply_patch move destination is empty for ${path}`)
-      if (nodePath.isAbsolute(moveTo)) throw new Error(`apply_patch move destination must be relative to the turn cwd: ${moveTo}`)
+    const moveHeader = cursor < lines.length ? patchControlLine(lines[cursor]) : ''
+    const moveMatch = /^\*\*\* Move to:\s*(.*?)\s*$/.exec(moveHeader)
+    if (moveMatch !== null) {
+      if (kind !== 'update') throw new Error('apply_patch Move to is only valid after Update File: ' + path)
+      moveTo = moveMatch[1].trim()
+      if (moveTo === '') throw new Error('apply_patch move destination is empty for ' + path)
       cursor++
     }
     const body = []
     while (cursor < lines.length) {
       const line = lines[cursor]
-      if (line === '*** End of File') {
-        body.push(line)
+      const control = patchControlLine(line)
+      if (control === '*** End of File') {
+        body.push(control)
         cursor++
         continue
       }
-      if (line.startsWith('*** ')) break
+      if (/^\*\*\* (?:Update|Add|Delete) File:\s*/.test(control) || control.startsWith('*** Environment ID:') || control.startsWith('*** Move to:')) break
       body.push(line)
       cursor++
     }
     operations.push({ kind, path, moveTo, body })
   }
-  if (operations.length === 0) throw new Error('apply_patch contained no file operations')
   return operations
 }
 
@@ -1085,22 +1192,21 @@ function previewPatchDiffs(patch) {
       diffs.push({ path: operation.path, oldText: null, newText: '' })
       continue
     }
-    let hunkCursor = 0
-    while (hunkCursor < operation.body.length) {
-      if (!operation.body[hunkCursor].startsWith('@@')) {
-        hunkCursor++
+    const hunks = []
+    let hunk = []
+    for (const line of operation.body) {
+      if (isHunkHeader(line)) {
+        if (hunk.length > 0) hunks.push(hunk)
+        hunk = []
         continue
       }
-      hunkCursor++
-      const oldLines = []
-      const newLines = []
-      while (hunkCursor < operation.body.length && !operation.body[hunkCursor].startsWith('@@')) {
-        const line = operation.body[hunkCursor++]
-        if (![' ', '+', '-'].includes(line[0])) continue
-        const text = line.slice(1)
-        if (line[0] !== '+') oldLines.push(text)
-        if (line[0] !== '-') newLines.push(text)
-      }
+      if (patchControlLine(line) === '*** End of File') continue
+      if (isPatchLine(line)) hunk.push(line)
+    }
+    if (hunk.length > 0) hunks.push(hunk)
+    for (const lines of hunks) {
+      const oldLines = lines.filter(line => line === '' || line[0] !== '+').map(line => line === '' ? '' : line.slice(1))
+      const newLines = lines.filter(line => line === '' || line[0] !== '-').map(line => line === '' ? '' : line.slice(1))
       diffs.push({
         path: operation.moveTo ?? operation.path,
         oldText: oldLines.length > 0 ? oldLines.join('\n') : null,
@@ -1127,7 +1233,10 @@ async function preflightPatch(ctx, exec, patch) {
   for (const operation of operations) {
     const target = await ctx.fs.resolve(operation.path, { cwd: cwdOf(agent), signal: exec.signal })
     if (operation.kind === 'add') {
-      const content = operation.body.filter(line => line.startsWith('+')).map(line => line.slice(1)).join('\n') + '\n'
+      if (operation.body.length === 0 || operation.body.some(line => patchControlLine(line) === '*** End of File' || !line.startsWith('+'))) {
+        throw new Error('invalid apply_patch Add File body for ' + operation.path)
+      }
+      const content = operation.body.map(line => line.slice(1)).join('\n') + '\n'
       prepared.push({ ...operation, target, content })
       continue
     }
@@ -1138,11 +1247,13 @@ async function preflightPatch(ctx, exec, patch) {
     const original = await ctx.fs.readText(target, exec.signal)
     ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec)
     if (operation.kind === 'delete') {
+      if (operation.body.some(line => line.trim() !== '' && patchControlLine(line) !== '*** End of File')) {
+        throw new Error('invalid apply_patch Delete File body for ' + operation.path)
+      }
       prepared.push({ ...operation, target, info, original })
       continue
     }
-    const hasHunks = operation.body.some(line => line.startsWith('@@'))
-    const content = hasHunks ? applyHunks(original, operation.body, target.displayPath) : original
+    const content = applyHunks(original, operation.body, target.displayPath)
     const destination = operation.moveTo === undefined
       ? undefined
       : await ctx.fs.resolve(operation.moveTo, { cwd: cwdOf(agent), signal: exec.signal })
@@ -1153,6 +1264,7 @@ async function preflightPatch(ctx, exec, patch) {
 
 async function applyPatch(ctx, exec, patch) {
   const operations = await preflightPatch(ctx, exec, patch)
+  if (operations.length === 0) return { files: [], diffs: [] }
   const policyTargets = operations.flatMap(operation => [
     operation.target,
     ...(operation.destination === undefined ? [] : [operation.destination]),
@@ -1222,7 +1334,7 @@ async function applyPatch(ctx, exec, patch) {
 function registerApplyPatch(ctx) {
   ctx.tools.register(defineTool({
     name: 'apply_patch',
-    description: 'The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON. Because dsh currently exposes function tools only, pass the exact freeform patch as the required input string property. Add, Delete, Update, and Move operations are supported; paths must be relative to the turn cwd.',
+    description: 'The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON or add a second JSON encoding. Because dsh currently exposes function tools only, pass the exact freeform patch as the required input string property. Add, Delete, Update, and Move operations are supported; relative paths resolve from the turn cwd and absolute paths are accepted.',
     parameters: { input: { type: 'string', required: true, description: 'The exact free-form patch text, including *** Begin Patch and *** End Patch.' } },
     output: {
       schema: {

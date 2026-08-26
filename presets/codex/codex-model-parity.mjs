@@ -409,6 +409,280 @@ function codeModeDescription(input) {
   return firstLine.length > 120 ? firstLine.slice(0, 117) + '…' : firstLine
 }
 
+// Code Mode is a model-facing adapter, but its source is an implementation
+// detail for people looking at a Codex run. These small, deliberately static
+// readers extract the common literal argument shapes emitted by the model so
+// the outer exec card can show the same kind of summary as a native tool card.
+// They never evaluate source code: unresolved expressions are reported as
+// computed values instead of being executed during presentation.
+function previewQuotedToken(text, start) {
+  const quote = text[start]
+  if (quote !== '"' && quote !== String.fromCharCode(39) && quote !== String.fromCharCode(96)) return undefined
+  let escaped = false
+  for (let index = start + 1; index < text.length; index++) {
+    const character = text[index]
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (character === String.fromCharCode(92)) {
+      escaped = true
+      continue
+    }
+    if (character === quote) return { token: text.slice(start, index + 1), end: index + 1 }
+  }
+  return undefined
+}
+
+function previewDecodeString(token) {
+  const text = String(token).trim()
+  const quote = text[0]
+  if ((quote !== '"' && quote !== String.fromCharCode(39) && quote !== String.fromCharCode(96)) || text.at(-1) !== quote) return undefined
+  const body = text.slice(1, -1)
+  let output = ''
+  for (let index = 0; index < body.length; index++) {
+    const character = body[index]
+    if (character !== String.fromCharCode(92)) {
+      output += character
+      continue
+    }
+    const escaped = body[++index]
+    if (escaped === undefined) break
+    switch (escaped) {
+      case 'n': output += String.fromCharCode(10); break
+      case 'r': output += String.fromCharCode(13); break
+      case 't': output += String.fromCharCode(9); break
+      case 'b': output += String.fromCharCode(8); break
+      case 'f': output += String.fromCharCode(12); break
+      case 'v': output += String.fromCharCode(11); break
+      case '0': output += String.fromCharCode(0); break
+      case 'x': {
+        const hex = body.slice(index + 1, index + 3)
+        if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+          output += String.fromCharCode(Number.parseInt(hex, 16))
+          index += 2
+        } else output += escaped
+        break
+      }
+      case 'u': {
+        if (body[index + 1] === '{') {
+          const end = body.indexOf('}', index + 2)
+          const hex = end < 0 ? '' : body.slice(index + 2, end)
+          if (/^[0-9a-fA-F]+$/.test(hex)) {
+            try { output += String.fromCodePoint(Number.parseInt(hex, 16)); index = end } catch { output += escaped }
+          } else output += escaped
+        } else {
+          const hex = body.slice(index + 1, index + 5)
+          if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+            output += String.fromCharCode(Number.parseInt(hex, 16))
+            index += 4
+          } else output += escaped
+        }
+        break
+      }
+      case String.fromCharCode(10):
+      case String.fromCharCode(13):
+        if (escaped === String.fromCharCode(13) && body[index + 1] === String.fromCharCode(10)) index++
+        break
+      default: output += escaped
+    }
+  }
+  if (quote === String.fromCharCode(96)) return output.replace(/\$\{[^}]*\}/g, '…')
+  return output
+}
+
+function previewBalancedEnd(text, start) {
+  const opening = text[start]
+  const closing = opening === '(' ? ')' : opening === '[' ? ']' : opening === '{' ? '}' : undefined
+  if (closing === undefined) return undefined
+  let depth = 0
+  let quote
+  let escaped = false
+  for (let index = start; index < text.length; index++) {
+    const character = text[index]
+    if (quote !== undefined) {
+      if (escaped) escaped = false
+      else if (character === String.fromCharCode(92)) escaped = true
+      else if (character === quote) quote = undefined
+      continue
+    }
+    if (character === '"' || character === String.fromCharCode(39) || character === String.fromCharCode(96)) {
+      quote = character
+      continue
+    }
+    if (character === opening) depth++
+    else if (character === closing) {
+      depth--
+      if (depth === 0) return index
+    }
+  }
+  return undefined
+}
+
+function previewExpressionEnd(text, start) {
+  let depth = 0
+  let quote
+  let escaped = false
+  for (let index = start; index < text.length; index++) {
+    const character = text[index]
+    if (quote !== undefined) {
+      if (escaped) escaped = false
+      else if (character === String.fromCharCode(92)) escaped = true
+      else if (character === quote) quote = undefined
+      continue
+    }
+    if (character === '"' || character === String.fromCharCode(39) || character === String.fromCharCode(96)) {
+      quote = character
+      continue
+    }
+    if (character === '(' || character === '[' || character === '{') {
+      depth++
+      continue
+    }
+    if (character === ')' || character === ']' || character === '}') {
+      if (depth === 0) return text.slice(start, index).trim()
+      depth--
+      continue
+    }
+    if (depth === 0 && character === ',') return text.slice(start, index).trim()
+  }
+  return text.slice(start).trim()
+}
+
+function previewKeyEscape(key) {
+  return String(key).replace(/[^A-Za-z0-9_]/g, character => String.fromCharCode(92) + character)
+}
+
+function previewPropertyExpression(source, key) {
+  const match = new RegExp('(?:^|[,{]\\s*)' + previewKeyEscape(key) + '\\s*:').exec(String(source))
+  if (match === null) return undefined
+  const colon = String(source).indexOf(':', match.index)
+  return previewExpressionEnd(String(source), colon + 1)
+}
+
+function previewLiteral(expression) {
+  if (expression === undefined) return undefined
+  const text = String(expression).trim().replace(/;$/, '')
+  const quoted = previewQuotedToken(text, 0)
+  if (quoted !== undefined && quoted.end === text.length) return previewDecodeString(quoted.token)
+  if (text.startsWith('[')) {
+    const arrayEnd = previewBalancedEnd(text, 0)
+    if (arrayEnd !== undefined && text.slice(arrayEnd + 1).trim().startsWith('.join')) {
+      const tail = text.slice(arrayEnd + 1).trim()
+      const open = tail.indexOf('(')
+      const close = open < 0 ? -1 : previewBalancedEnd(tail, open)
+      const separator = open < 0 || close === undefined ? undefined : previewLiteral(tail.slice(open + 1, close))
+      const values = []
+      const arrayText = text.slice(1, arrayEnd)
+      for (let index = 0; index < arrayText.length;) {
+        const token = previewQuotedToken(arrayText, index)
+        if (token === undefined) { index++; continue }
+        const value = previewDecodeString(token.token)
+        if (value !== undefined) values.push(value)
+        index = token.end
+      }
+      if (values.length > 0) return values.join(separator ?? '')
+    }
+  }
+  return undefined
+}
+
+function previewStringProperties(source, key) {
+  const pattern = new RegExp('\\b' + previewKeyEscape(key) + '\\s*:\\s*', 'g')
+  const values = []
+  let match
+  while ((match = pattern.exec(String(source))) !== null) {
+    const token = previewQuotedToken(String(source), match.index + match[0].length)
+    if (token === undefined) continue
+    const value = previewDecodeString(token.token)
+    if (value !== undefined) values.push(value)
+    pattern.lastIndex = token.end
+  }
+  return values
+}
+
+function previewShortTitle(value, fallback) {
+  if (typeof value !== 'string' || value.trim() === '') return fallback
+  const compact = value.replace(/\s+/g, ' ').trim()
+  return compact.length > 120 ? compact.slice(0, 117) + '…' : compact
+}
+
+function previewCodeCalls(source) {
+  const text = String(source)
+  const pattern = /\btools\.([A-Za-z0-9_]+)\s*\(/g
+  const calls = []
+  let match
+  while ((match = pattern.exec(text)) !== null) {
+    const open = text.indexOf('(', match.index)
+    const close = previewBalancedEnd(text, open)
+    if (close === undefined) continue
+    calls.push({ name: match[1], arguments: text.slice(open + 1, close) })
+    pattern.lastIndex = close + 1
+  }
+  return calls
+}
+
+function previewCodeToolCall(name, source) {
+  const label = name === WEB_RUN ? 'web.run' : humanLabel(name)
+  if (name === 'exec_command') {
+    const command = previewLiteral(previewPropertyExpression(source, 'cmd'))
+    const workdir = previewLiteral(previewPropertyExpression(source, 'workdir'))
+    const tty = previewLiteral(previewPropertyExpression(source, 'tty'))
+    const lines = ['Command: ' + (command ?? '(computed at runtime)')]
+    if (workdir !== undefined) lines.push('Working directory: ' + workdir)
+    if (tty === 'true' || tty === true) lines.push('Interactive PTY: yes')
+    return { title: previewShortTitle(command, 'exec_command'), text: lines.join(String.fromCharCode(10)), kind: 'execute' }
+  }
+  if (name === WEB_RUN) {
+    const queries = previewStringProperties(source, 'q')
+    const refs = previewStringProperties(source, 'ref_id')
+    const urls = previewStringProperties(source, 'url')
+    const lines = []
+    if (queries.length > 0) lines.push('Search: ' + queries.join('; '))
+    if (refs.length > 0) lines.push('Open: ' + refs.join('; '))
+    if (urls.length > 0) lines.push('URL: ' + urls.join('; '))
+    if (lines.length === 0) lines.push('Search request (arguments assembled at runtime)')
+    return { title: previewShortTitle(queries[0] ?? refs[0] ?? urls[0], 'Search web'), text: lines.join(String.fromCharCode(10)), kind: 'search' }
+  }
+  if (name === 'apply_patch') {
+    const input = previewLiteral(previewPropertyExpression(source, 'input'))
+    const paths = typeof input === 'string'
+      ? [...input.matchAll(/^\*\*\* (?:Update|Add|Delete|Move) File: (.+)$/gm)].map(item => item[1].trim())
+      : []
+    const text = paths.length > 0 ? 'Patch files:\n' + paths.map(path => '- ' + path).join(String.fromCharCode(10)) : 'Patch content (computed at runtime)'
+    return { title: paths.length === 1 ? 'Apply patch — ' + paths[0] : 'Apply patch', text, kind: 'edit' }
+  }
+  if (name === 'view_image') {
+    const path = previewLiteral(previewPropertyExpression(source, 'path'))
+    return { title: previewShortTitle(path, 'View image'), text: 'Image: ' + (path ?? '(computed at runtime)'), kind: 'read' }
+  }
+  if (name === 'write_stdin') {
+    const session = previewLiteral(previewPropertyExpression(source, 'session_id'))
+    const chars = previewLiteral(previewPropertyExpression(source, 'chars'))
+    const text = 'Session: ' + (session ?? '(computed at runtime)') + (chars === undefined ? '' : String.fromCharCode(10) + 'Input: ' + chars)
+    return { title: previewShortTitle(chars, 'Poll exec session'), text, kind: 'execute' }
+  }
+  if (name === 'wait') {
+    const cell = previewLiteral(previewPropertyExpression(source, 'cell_id'))
+    return { title: 'Wait on exec cell ' + (cell ?? '(computed at runtime)'), text: 'Wait for the yielded exec cell to produce more output.', kind: 'other' }
+  }
+  if (name === 'update_plan') return { title: 'Update plan', text: 'Update the current execution plan.', kind: 'other' }
+  if (name === 'request_user_input') return { title: 'Ask user', text: 'Request user input.', kind: 'other' }
+  if (name.includes('spawn_agent')) {
+    const message = previewLiteral(previewPropertyExpression(source, 'message'))
+    return { title: 'Spawn sub-agent', text: 'Task: ' + (message ?? '(computed at runtime)'), kind: 'execute' }
+  }
+  return { title: label, text: label + ' (arguments assembled at runtime)', kind: 'other' }
+}
+
+function codeModePreview(source) {
+  const calls = previewCodeCalls(source).map(call => previewCodeToolCall(call.name, call.arguments))
+  if (calls.length === 0) return { title: codeModeDescription(source), text: 'Code Mode program (no direct tool call detected)', kind: 'execute' }
+  if (calls.length === 1) return calls[0]
+  const text = calls.map((call, index) => String(index + 1) + '. ' + call.text.replace(/^/gm, '  ')).join(String.fromCharCode(10) + String.fromCharCode(10))
+  return { title: 'Code Mode — ' + String(calls.length) + ' tool calls', text, kind: 'execute' }
+}
+
 /**
  * Keep common shell snippets valid when a model writes them in a JavaScript
  * string. Node's erasable-TypeScript parser rejects literal line terminators in
@@ -478,6 +752,7 @@ function registerCodeModeAlias(ctx) {
       'Execute raw JavaScript/TypeScript source in the Codex Code Mode runtime.',
       'The required input is the body of an async function, not a JSON object or fenced code block; Node parses it with its erasable TypeScript parser.',
       'For multiline shell commands, build cmd with ["line 1", "line 2"].join("\\n") instead of putting a literal newline inside a JavaScript quoted string.',
+      'Nested tools.exec_command takes a JavaScript object such as { cmd: "printf hello" }; do not wrap that object in JSON.stringify or double-escape the cmd value.',
       'Do not put Bash parameter expansions such as ${rc:-0} inside a JavaScript template literal; use an array of shell lines joined with "\\n".',
       'Call tools as await tools.<tool_name>(arguments) and return a JSON-serializable value.',
       'The dsh compatibility transport carries that source in the required input string property.',
@@ -502,12 +777,15 @@ function registerCodeModeAlias(ctx) {
         return [{ type: 'text', text: text.length > 0 ? text : '(exec completed with no output)' }]
       },
     },
-    presentCall: args => ({
-      card: 'generic',
-      title: args.description?.trim() || codeModeDescription(args.input),
-      kind: 'execute',
-      rawInput: args.input,
-    }),
+    presentCall(args) {
+      const preview = codeModePreview(args.input)
+      return {
+        card: 'generic',
+        title: args.description?.trim() || preview.title,
+        kind: preview.kind,
+        content: [{ type: 'text', text: preview.text }],
+      }
+    },
     async execute(args, execution) {
       const description = args.description?.trim() || codeModeDescription(args.input)
       if (description.length === 0) throw new Error('invalid input: expected non-empty JavaScript source')
