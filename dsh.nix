@@ -43,9 +43,9 @@ let
       ./patches/durable-session-lease.patch
       # Optional trusted terminal/FS seams used only by the Codex preset.
       # Existing callers omit the new fields/methods and retain upstream behavior.
-      ./patches/codex-runtime-parity.patch
-      # Let Code Mode subcalls reuse the same human-facing tool cards as native calls.
-      ./patches/codex-readable-tools.patch
+      ./presets/codex/patches/codex-runtime-parity.patch
+      # One Codex-scoped UI patch keeps live, replay, and trajectory rendering together.
+      ./presets/codex/patches/codex-readable-tools.patch
     ];
 
     nativeBuildInputs = [

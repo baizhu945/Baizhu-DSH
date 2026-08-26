@@ -1268,7 +1268,21 @@ function registerApplyPatch(ctx) {
       return applyPatch(ctx, exec, args.input)
     },
     presentCall(args) {
-      const diffs = previewPatchDiffs(args.input)
+      let diffs
+      try {
+        diffs = previewPatchDiffs(args.input)
+      } catch (error) {
+        // A malformed/absolute patch path must remain a tool error, but the
+        // UI still needs the authored patch text instead of raw JSON while it
+        // is reporting that error.
+        return {
+          card: 'generic',
+          title: 'Apply patch',
+          kind: 'edit',
+          rawInput: args.input,
+          content: [{ type: 'text', text: `Patch preview unavailable: ${String(error)}` }],
+        }
+      }
       if (diffs.length === 0) return { card: 'generic', title: 'Apply patch', kind: 'edit' }
       const locations = [...new Set(diffs.map(diff => diff.path))].map(path => ({ path }))
       return {

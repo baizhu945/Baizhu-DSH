@@ -1,0 +1,513 @@
+--- a/packages/host/apiproxy/src/api-proxy.ts
++++ b/packages/host/apiproxy/src/api-proxy.ts
+@@ -44,6 +44,7 @@
+   ModelCatalogFailure, ModelProviderGroup,
+   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
+   QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
++  ToolCallView, ToolResultView,
+   WorkspaceId, WorkspaceView,
+ } from './api/index.ts'
+ import {
+@@ -692,6 +693,114 @@
+  * which soft-falls to no view. Presenter or JSON.parse throws also soft-fall:
+  * the client's documented default (generic JSON card) covers every miss.
+  */
++function isCodexPresenterScope(scope?: ScopeKey): boolean {
++  const candidate = scope as unknown as {
++    agentPreset?: unknown
++    session?: { header?: { agentPreset?: unknown } }
++  } | undefined
++  return candidate?.agentPreset === 'codex' || candidate?.session?.header?.agentPreset === 'codex'
++}
++
++function markCodexView<T extends object>(view: T): T {
++  return { ...view, __codexPreset: true } as T
++}
++
++/** Code Mode's outer wrapper and presenter failures need a readable fallback. */
++function codexHumanLabel(value: unknown): string {
++  return String(value)
++    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
++    .replaceAll('_', ' ')
++    .replace(/\b\w/g, character => character.toUpperCase())
++    .replace(/\bId\b/g, 'ID')
++    .replace(/\bUrl\b/g, 'URL')
++}
++
++function codexHumanScalar(value: unknown): string {
++  if (value === null || value === undefined) return 'none'
++  if (typeof value === 'boolean') return value ? 'yes' : 'no'
++  if (typeof value === 'string') return value === '' ? '(empty)' : value
++  return String(value)
++}
++
++function codexHumanLines(value: unknown, indent = ''): string[] {
++  if (value === null || typeof value !== 'object') return [`${indent}${codexHumanScalar(value)}`]
++  if (Array.isArray(value)) {
++    if (value.length === 0) return [`${indent}(none)`]
++    return value.flatMap(item => {
++      const lines = codexHumanLines(item, `${indent}  `)
++      return [`${indent}- ${lines[0]?.trimStart() ?? codexHumanScalar(item)}`, ...lines.slice(1)]
++    })
++  }
++  const entries = Object.entries(value as Record<string, unknown>)
++  if (entries.length === 0) return [`${indent}(none)`]
++  return entries.flatMap(([key, child]) => {
++    const label = codexHumanLabel(key)
++    if (child === null || typeof child !== 'object') return [`${indent}${label}: ${codexHumanScalar(child)}`]
++    return [`${indent}${label}:`, ...codexHumanLines(child, `${indent}  `)]
++  })
++}
++
++function codexHumanText(value: unknown): string {
++  if (typeof value !== 'string') return codexHumanLines(value).join('\n')
++  const trimmed = value.trim()
++  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return value
++  try {
++    return codexHumanLines(JSON.parse(trimmed)).join('\n')
++  } catch {
++    return value
++  }
++}
++
++function codexHumanContent(content: unknown): ContentBlock[] {
++  if (!Array.isArray(content)) return [{ type: 'text', text: codexHumanText(content) }]
++  return content.map(block => {
++    if (block === null || typeof block !== 'object') return block
++    const record = block as Record<string, unknown>
++    return record.type === 'text' && typeof record.text === 'string'
++      ? { ...record, text: codexHumanText(record.text) }
++      : block
++  }) as ContentBlock[]
++}
++
++function codexToolTitle(name: string): string {
++  if (name === 'exec') return 'Code Mode'
++  if (name === 'apply_patch') return 'Apply patch'
++  return codexHumanLabel(name)
++}
++
++function codexFallbackCallView(name: string, args: unknown): ToolCallView {
++  const record = args !== null && typeof args === 'object' ? args as Record<string, unknown> : undefined
++  const rawInput = typeof record?.code === 'string'
++    ? record.code
++    : typeof record?.input === 'string'
++      ? record.input
++      : typeof record?.cmd === 'string' ? record.cmd : undefined
++  return {
++    card: 'generic',
++    title: codexToolTitle(name),
++    kind: 'other',
++    ...(rawInput === undefined ? {} : { rawInput }),
++    content: [{ type: 'text', text: codexHumanText(args) }],
++  }
++}
++
++function codexFallbackResultView(name: string, content: unknown, isError: boolean): ToolResultView {
++  return {
++    card: 'generic',
++    title: `${codexToolTitle(name)} ${isError ? 'failed' : 'completed'}`,
++    content: codexHumanContent(content),
++  }
++}
++
++function codexTryPresent<T>(presenter: unknown, args: unknown, result?: unknown): T | undefined {
++  if (typeof presenter !== 'function') return undefined
++  try {
++    const callable = presenter as (args: unknown, result?: unknown) => T
++    return result === undefined ? callable(args) : callable(args, result)
++  } catch {
++    return undefined
++  }
++}
+ function viewFor(
+   ctx: Context,
+   event: SessionEvent,
+@@ -704,23 +813,57 @@
+   scope?: ScopeKey,
+ ): ToolEventView | undefined {
+   try {
++    if (event.type === 'tool/code-dispatch-start' || event.type === 'tool/code-dispatch') {
++      if (!isCodexPresenterScope(scope)) return undefined
++      const { name, arguments: args } = event.data
++      const tool = ctx.tools.get(name, scope)
++      if (event.type === 'tool/code-dispatch-start') {
++        const view = codexTryPresent<ToolCallView>(tool?.presentCall, args) ?? codexFallbackCallView(name, args)
++        return { for: 'call', view: markCodexView(view) }
++      }
++      const result = {
++        content: event.data.content,
++        isError: event.data.isError === true,
++      }
++      const view = codexTryPresent<ToolResultView>(tool?.presentResult, args, result)
++        ?? codexFallbackResultView(name, result.content, result.isError)
++      return { for: 'result', view: markCodexView(view) }
++    }
+     if (event.type === 'tool/call') {
+       const { name, arguments: raw } = event.data as ToolCallData
+-      const view = ctx.tools.get(name, scope)?.presentCall?.(JSON.parse(raw))
+-      return view === undefined ? undefined : { for: 'call', view }
++      const args = JSON.parse(raw)
++      const view = codexTryPresent<ToolCallView>(ctx.tools.get(name, scope)?.presentCall, args)
++      if (view === undefined && isCodexPresenterScope(scope)) {
++        return { for: 'call', view: markCodexView(codexFallbackCallView(name, args)) }
++      }
++      return view === undefined ? undefined : {
++        for: 'call',
++        view: isCodexPresenterScope(scope) ? markCodexView(view) : view,
++      }
+     }
+     if (event.type === 'tool/result') {
+       const { message, meta } = event.data
+       const [result] = message.content
+       const callId = message.source.callId
+       const call = argsFor(callId) as { name: string; args: unknown } | undefined
+-      if (call === undefined) return undefined
+-      const view = ctx.tools.get(call.name, scope)?.presentResult?.(call.args, {
++      if (call === undefined) {
++        return isCodexPresenterScope(scope)
++          ? { for: 'result', view: markCodexView(codexFallbackResultView('tool', result.content, result.isError === true)) }
++          : undefined
++      }
++      const resultValue = {
+         content: result.content,
+         isError: result.isError === true,
+         ...meta === undefined ? {} : { meta },
+-      })
+-      return view === undefined ? undefined : { for: 'result', view }
++      }
++      const view = codexTryPresent<ToolResultView>(ctx.tools.get(call.name, scope)?.presentResult, call.args, resultValue)
++      if (view === undefined && isCodexPresenterScope(scope)) {
++        return { for: 'result', view: markCodexView(codexFallbackResultView(call.name, result.content, result.isError === true)) }
++      }
++      return view === undefined ? undefined : {
++        for: 'result',
++        view: isCodexPresenterScope(scope) ? markCodexView(view) : view,
++      }
+     }
+   } catch (error: unknown) {
+     // A throwing presenter (or unparseable arguments) must not break delivery;
+--- a/packages/client/ui-conversation/src/client/conversation-nodes/tool.ts
++++ b/packages/client/ui-conversation/src/client/conversation-nodes/tool.ts
+@@ -79,6 +79,10 @@
+   readonly content?: ToolResultNode['content']
+ }
+ 
++function codexView<T>(view: T | undefined): T | null {
++  const record = view as unknown as { __codexPreset?: unknown } | null | undefined
++  return record?.__codexPreset === true ? view ?? null : null
++}
+ function childCall(match: ConversationMatch, data: DispatchData): RunningToolCall {
+   return {
+     callId: data.subCallId,
+@@ -87,7 +91,7 @@
+     turn: locationTurn(match),
+     step: locationStep(match),
+     time: match.event.time,
+-    callView: null,
++    callView: codexView(match.view?.for === 'call' ? match.view.view : undefined),
+     subCalls: [],
+   }
+ }
+@@ -102,8 +106,8 @@
+     callTime: previous?.time ?? null,
+     content: data.content ?? [],
+     isError: data.isError === true,
+-    callView: null,
+-    resultView: null,
++    callView: previous?.callView ?? codexView(match.view?.for === 'call' ? match.view.view : undefined),
++    resultView: codexView(match.view?.for === 'result' ? match.view.view : undefined),
+     subCalls: [],
+   }
+ }
+--- a/packages/client/ui-trajectory/src/client/trajectory-tool-definition.ts
++++ b/packages/client/ui-trajectory/src/client/trajectory-tool-definition.ts
+@@ -76,6 +76,10 @@
+   return match.location.kind === 'step' ? match.location.step.step : 0
+ }
+ 
++function codexView<T>(view: T | undefined): T | null {
++  const record = view as unknown as { __codexPreset?: unknown } | null | undefined
++  return record?.__codexPreset === true ? view ?? null : null
++}
+ function childCall(match: ConversationMatch, data: DispatchData): RunningToolCall {
+   return {
+     callId: data.subCallId,
+@@ -84,7 +88,7 @@
+     turn: locationTurn(match),
+     step: locationStep(match),
+     time: match.event.time,
+-    callView: null,
++    callView: codexView(match.view?.for === 'call' ? match.view.view : undefined),
+     subCalls: [],
+   }
+ }
+@@ -103,8 +107,8 @@
+     callTime: previous === undefined || 'kind' in previous ? null : previous.time,
+     content: data.content ?? [],
+     isError: data.isError === true,
+-    callView: null,
+-    resultView: null,
++    callView: previous?.callView ?? codexView(match.view?.for === 'call' ? match.view.view : undefined),
++    resultView: codexView(match.view?.for === 'result' ? match.view.view : undefined),
+     subCalls: [],
+   }
+ }
+--- a/packages/client/ui-trajectory/src/client/layout.ts
++++ b/packages/client/ui-trajectory/src/client/layout.ts
+@@ -432,9 +432,9 @@
+             kind: 'tool',
+             sourceSeq: node.seq,
+             ...(node.call !== null
+-              ? summarizeCall(node.call.name, node.call.argsRaw)
++              ? summarizeCall(node.call.name, node.call.argsRaw, node.callView)
+               : resultAsText(resultPreview)),
+-            ...(node.call !== null ? { inputDetail: node.call.argsRaw } : {}),
++            ...(node.call !== null ? { inputDetail: codexInputDetail(node.call.argsRaw, node.callView) } : {}),
+             outputDetail: detailResult(node),
+             outputBlocks: node.content.map(block => sourceBlock(block)),
+             ...resultPreview,
+@@ -486,7 +486,7 @@
+         index: ++index,
+         kind: 'tool',
+         ...summarizeCall(call.name, call.argsRaw),
+-        inputDetail: call.argsRaw,
++        inputDetail: codexInputDetail(call.argsRaw, call.callView),
+         callId: call.callId,
+         timeSeconds: null,
+         startedAt: finiteTime(call.time),
+@@ -738,7 +738,7 @@
+       cell: {
+         index: ++index, kind: 'tool',
+         ...summarizeCall(block.name, block.argsRaw),
+-        inputDetail: block.argsRaw,
++        inputDetail: codexInputDetail(block.argsRaw, call?.callView),
+         callId: block.callId,
+         ...(result !== undefined
+           ? {
+@@ -1010,12 +1010,12 @@
+         callId: sub.callId,
+         ...(settled
+           ? (sub.call !== null
+-            ? summarizeCall(sub.call.name, sub.call.argsRaw)
++            ? summarizeCall(sub.call.name, sub.call.argsRaw, sub.callView)
+             : resultAsText(resultPreview))
+-          : summarizeCall(sub.name, sub.argsRaw)),
++          : summarizeCall(sub.name, sub.argsRaw, sub.callView)),
+         ...(settled
+-          ? (sub.call !== null ? { inputDetail: sub.call.argsRaw } : {})
+-          : { inputDetail: sub.argsRaw }),
++          ? (sub.call !== null ? { inputDetail: codexInputDetail(sub.call.argsRaw, sub.callView) } : {})
++          : { inputDetail: codexInputDetail(sub.argsRaw, sub.callView) }),
+         ...(settled
+           ? {
+             outputDetail: detailResult(sub),
+@@ -1044,7 +1044,18 @@
+ function summarizeCall(
+   name: string,
+   argsRaw: string,
++  view?: unknown,
+ ): Pick<TrajectoryCellProps, 'text' | 'previewMarkdown'> {
++  if (typeof view === 'object' && view !== null && 'title' in view && typeof view.title === 'string') {
++    const record = view as { title: string; card?: string; cwd?: string; rawInput?: string }
++    if (record.card === 'terminal') {
++      return { text: record.title, ...(record.cwd === undefined ? {} : { previewMarkdown: 'Working directory: ' + record.cwd }) }
++    }
++    if (record.rawInput !== undefined) return { text: record.title, previewMarkdown: record.rawInput }
++    return { text: record.title }
++  }
++  const fallback = codexInputEnvelope(argsRaw)
++  if (fallback !== undefined) return { text: fallback.title, previewMarkdown: fallback.rawInput }
+   return {
+     text: name,
+     ...(argsRaw === '' ? {} : { previewMarkdown: argsRaw }),
+@@ -1124,3 +1135,48 @@
+   const previewMarkdown = previewContent(content)
+   return previewMarkdown === undefined ? {} : { previewMarkdown }
+ }
++function codexInputEnvelope(argsRaw: string): { title: string; rawInput: string } | undefined {
++  try {
++    const parsed: unknown = JSON.parse(argsRaw)
++    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
++    const record = parsed as Record<string, unknown>
++    if (typeof record.input !== 'string') return undefined
++    const rawInput = record.input
++    if (typeof record.description === 'string' && record.description.trim() !== '') {
++      return { title: record.description.trim(), rawInput }
++    }
++    if (rawInput.trimStart().startsWith('*** Begin Patch')) return { title: 'Apply patch', rawInput }
++    if (rawInput.includes('tools.exec_command(')) return { title: 'Code Mode', rawInput }
++  } catch {
++    return undefined
++  }
++  return undefined
++}
++
++function codexInputDetail(argsRaw: string, view?: unknown): string {
++  const record = view as {
++    __codexPreset?: unknown
++    card?: unknown
++    title?: unknown
++    rawInput?: unknown
++    diffs?: unknown
++  } | null | undefined
++  if (record?.__codexPreset !== true) return codexInputEnvelope(argsRaw)?.rawInput ?? argsRaw
++  if (typeof record.rawInput === 'string') return record.rawInput
++  if (Array.isArray(record.diffs)) {
++    const sections = record.diffs.flatMap((entry) => {
++      if (typeof entry !== 'object' || entry === null) return []
++      const diff = entry as { path?: unknown; oldText?: unknown; newText?: unknown }
++      const path = typeof diff.path === 'string' ? diff.path : 'unknown file'
++      const oldLines = typeof diff.oldText === 'string'
++        ? diff.oldText.split(String.fromCharCode(10)).filter((line, index, lines) => index < lines.length - 1 || line !== '')
++        : []
++      const newLines = typeof diff.newText === 'string'
++        ? diff.newText.split(String.fromCharCode(10)).filter((line, index, lines) => index < lines.length - 1 || line !== '')
++        : []
++      return ['File: ' + path, ...oldLines.map(line => '- ' + line), ...newLines.map(line => '+ ' + line)]
++    })
++    if (sections.length > 0) return sections.join(String.fromCharCode(10))
++  }
++  return typeof record.title === 'string' ? record.title : argsRaw
++}
+--- a/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx
++++ b/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx
+@@ -28,6 +28,97 @@
+   others: <IconSparkle16 size={14} />,
+ }
+ 
++interface CodexGenericView {
++  __codexPreset?: unknown
++  card?: unknown
++  title?: unknown
++  rawInput?: unknown
++  content?: unknown
++}
++
++function codexGenericView(value: unknown): CodexGenericView | null {
++  if (value === null || typeof value !== 'object') return null
++  const view = value as CodexGenericView
++  return view.__codexPreset === true && view.card === 'generic' ? view : null
++}
++
++function codexContentText(view: CodexGenericView | null): string | null {
++  if (!Array.isArray(view?.content)) return null
++  const text = view.content
++    .filter((block): block is { type: 'text'; text: string } => (
++      block !== null && typeof block === 'object'
++      && (block as { type?: unknown }).type === 'text'
++      && typeof (block as { text?: unknown }).text === 'string'
++    ))
++    .map(block => block.text)
++    .join('\n')
++  return text === '' ? null : text
++}
++function codexRawArguments(block: ToolCallOwnerProps['block']): Record<string, unknown> | null {
++  const raw = 'kind' in block ? block.call?.argsRaw : block.argsRaw
++  if (typeof raw !== 'string' || raw === '') return null
++  try {
++    const parsed: unknown = JSON.parse(raw)
++    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
++      ? parsed as Record<string, unknown>
++      : null
++  } catch {
++    return null
++  }
++}
++function codexMarkedView(value: unknown): boolean {
++  return value !== null
++    && typeof value === 'object'
++    && (value as { __codexPreset?: unknown }).__codexPreset === true
++}
++/** Replay/live paths can omit the envelope view; recognize only Codex-shaped wrappers. */
++function codexFallbackCallView(
++  toolName: string,
++  block: ToolCallOwnerProps['block'],
++): CodexGenericView | null {
++  const args = codexRawArguments(block)
++  if (args === null || typeof args.input !== 'string') return null
++  const input = args.input
++  if (toolName === 'exec' && (
++    typeof args.description === 'string' || input.includes('tools.exec_command(')
++  )) {
++    const description = typeof args.description === 'string' ? args.description.trim() : ''
++    return {
++      __codexPreset: true,
++      card: 'generic',
++      title: description === '' ? 'Code Mode' : description,
++      rawInput: input,
++    }
++  }
++  if (toolName === 'apply_patch' && input.trimStart().startsWith('*** Begin Patch')) {
++    return {
++      __codexPreset: true,
++      card: 'generic',
++      title: 'Apply patch',
++      rawInput: input,
++    }
++  }
++  return null
++}
++
++function codexGenericPresentation(block: ToolCallOwnerProps['block'], toolName: string): {
++  call: CodexGenericView | null
++  result: CodexGenericView | null
++} | null {
++  const marked = codexMarkedView(block.callView)
++    || ('kind' in block && codexMarkedView(block.resultView))
++  const call = codexGenericView(block.callView)
++    ?? (marked ? null : codexFallbackCallView(toolName, block))
++  const result = 'kind' in block
++    ? codexGenericView(block.resultView) ?? (call === null ? null : {
++      __codexPreset: true,
++      card: 'generic',
++      title: `${typeof call.title === 'string' ? call.title : toolName} ${block.isError ? 'failed' : 'completed'}`,
++      content: block.content,
++    })
++    : null
++  return call === null && result === null ? null : { call, result }
++}
+ /** Card props: the owner payload plus the render site's locale seat (plain prop). */
+ export interface GenericToolCardProps extends ToolCallOwnerProps {
+   t: ToolTreeProps['t']
+@@ -35,6 +126,18 @@
+ 
+ export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect, t }: GenericToolCardProps) {
+   const model = toolRowModel(toolName, block, cwd, home)
++  const codex = codexGenericPresentation(block, toolName)
++  const codexCallTitle = typeof codex?.call?.title === 'string' ? codex.call.title : undefined
++  const codexResultTitle = typeof codex?.result?.title === 'string' ? codex.result.title : undefined
++  const codexTitle = codexCallTitle ?? codexResultTitle
++  const codexInput = typeof codex?.call?.rawInput === 'string'
++    ? codex.call.rawInput
++    : codexContentText(codex?.call ?? null)
++  const codexOutput = codexContentText(codex?.result ?? null)
++  const rowTitle = codexTitle ?? model.title
++  const rowSummary = codexResultTitle ?? codexContentText(codex?.call ?? null) ?? model.summary
++  const rowBody = codex === null ? model.body : codexInput
++  const rowOutput = codex === null ? model.output : codexOutput
+   const terminal = terminalCardModel(block, cwd)
+   const read = readCardModel(block, cwd, home)
+   const diff = diffCardModel(block)
+@@ -52,16 +155,16 @@
+       variant={model.variant}
+       toolName={toolName}
+       icon={VARIANT_ICONS[model.variant]}
+-      title={model.title}
++      title={rowTitle}
+       // A terminal presenter's description is the contract's above-card text, so
+       // it outranks the args-derived summary here exactly as it does in BashRow;
+       // a search result view's replacement title outranks it the same way.
+-      summary={terminal?.description ?? search?.title ?? model.summary}
++      summary={terminal?.description ?? search?.title ?? rowSummary}
+       // Single-file tools never expose an args body — the path link is the only
+       // args interaction. A card is not an args body: a read/write/edit row is
+       // single-file AND carries a card, so the card expands under the path link.
+-      body={singleFile ? null : model.body}
+-      output={model.output}
++      body={singleFile ? null : rowBody}
++      output={rowOutput}
+       errorSummary={model.errorSummary}
+       terminal={terminal}
+       diff={diff}
+

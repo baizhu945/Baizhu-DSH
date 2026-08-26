@@ -410,6 +410,63 @@ function codeModeDescription(input) {
 }
 
 /**
+ * Keep common shell snippets valid when a model writes them in a JavaScript
+ * string. Node's erasable-TypeScript parser rejects literal line terminators in
+ * single/double-quoted strings and treats Bash `${name:-fallback}` as a JS
+ * interpolation. A valid program is left byte-for-byte unchanged.
+ */
+function normalizeCodeModeSource(source) {
+  const text = String(source)
+  let output = ''
+  let quote
+  let escaped = false
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index]
+    if (quote === undefined) {
+      output += character
+      if (character === "'" || character === '"' || character === '`') quote = character
+      continue
+    }
+    if (escaped) {
+      if ((quote === "'" || quote === '"') && (character === '\n' || character === '\r')) {
+        if (character === '\r' && text[index + 1] === '\n') index++
+        output += 'n'
+      } else {
+        output += character
+      }
+      escaped = false
+      continue
+    }
+    if (character === String.fromCharCode(92)) {
+      output += character
+      escaped = true
+      continue
+    }
+    if (character === quote) {
+      output += character
+      quote = undefined
+      continue
+    }
+    if ((quote === "'" || quote === '"') && (character === '\n' || character === '\r')) {
+      if (character === '\r' && text[index + 1] === '\n') index++
+      output += '\\n'
+      continue
+    }
+    if (quote === '`' && character === '$' && text[index + 1] === '{') {
+      const end = text.indexOf('}', index + 2)
+      const expression = end < 0 ? undefined : text.slice(index + 2, end)
+      if (expression !== undefined && /^[A-Za-z_][A-Za-z0-9_]*:[-+?=]/.test(expression)) {
+        output += String.fromCharCode(92) + '${' + expression + '}'
+        index = end
+        continue
+      }
+    }
+    output += character
+  }
+  return output
+}
+
+/**
  * Present DSH's function-shaped Code Mode under Codex's exec name. DSH's
  * core still owns the actual reserved transport; the nested parent token is
  * required so the dispatch is accepted as the facade's child call.
@@ -417,9 +474,16 @@ function codeModeDescription(input) {
 function registerCodeModeAlias(ctx) {
   ctx.tools.register(defineTool({
     name: CODE_MODE_TOOL,
-    description: 'Execute raw JavaScript source in the Codex Code Mode runtime. The source is the program text, not a JSON object or fenced code block. Use tools.<tool_name>(arguments) for tool calls and return a JSON-serializable value. The dsh compatibility transport carries that source in the required input string property.',
+    description: [
+      'Execute raw JavaScript/TypeScript source in the Codex Code Mode runtime.',
+      'The required input is the body of an async function, not a JSON object or fenced code block; Node parses it with its erasable TypeScript parser.',
+      'For multiline shell commands, build cmd with ["line 1", "line 2"].join("\\n") instead of putting a literal newline inside a JavaScript quoted string.',
+      'Do not put Bash parameter expansions such as ${rc:-0} inside a JavaScript template literal; use an array of shell lines joined with "\\n".',
+      'Call tools as await tools.<tool_name>(arguments) and return a JSON-serializable value.',
+      'The dsh compatibility transport carries that source in the required input string property.',
+    ].join(' '),
     parameters: {
-      input: { type: 'string', required: true, description: 'Raw JavaScript source text. Do not wrap it in JSON or markdown fences.' },
+      input: { type: 'string', required: true, description: 'Raw JavaScript/TypeScript function body. Build multiline shell commands with an array joined by "\\n"; do not wrap it in JSON or markdown fences.' },
       description: { type: 'string', description: 'Optional short summary of what the program does.' },
     },
     output: {
@@ -447,6 +511,7 @@ function registerCodeModeAlias(ctx) {
     async execute(args, execution) {
       const description = args.description?.trim() || codeModeDescription(args.input)
       if (description.length === 0) throw new Error('invalid input: expected non-empty JavaScript source')
+      const program = normalizeCodeModeSource(args.input)
       const callId = execution.callId + ':run_code'
       INTERNAL_RUN_CODE_CALLS.add(callId)
       try {
@@ -454,7 +519,7 @@ function registerCodeModeAlias(ctx) {
           callId,
           rootCallId: execution.rootCallId ?? execution.callId,
           name: RUN_CODE,
-          arguments: { code: args.input, description },
+          arguments: { code: program, description },
           agent: execution.agent,
           parent: execution.token,
           signal: execution.signal,
