@@ -61,6 +61,49 @@ test('malformed Code Mode strings compile after fallback repair', () => {
   }
 })
 
+test('Code Mode repairs multiple malformed command fields after a valid command', async () => {
+  const quote = String.fromCharCode(34)
+  const source = [
+    'const results = await Promise.all([',
+    '  tools.exec_command({ cmd: ' + quote + 'printf dsh' + quote + ', workdir: ' + quote + '/tmp' + quote + ' }),',
+    '  tools.exec_command({ cmd: ' + quote + 'for f in /tmp/a; do echo; echo ' + quote + '===== $f =====' + quote + '; nl -ba ' + quote + '$f' + quote + '; done' + quote + ', workdir: ' + quote + '/tmp' + quote + ' }),',
+    '  tools.exec_command({ cmd: ' + quote + 'for g in /tmp/b; do echo ' + quote + '----- $g -----' + quote + '; done' + quote + ', workdir: ' + quote + '/tmp' + quote + ' }),',
+    '  tools.exec_command({ cmd: ' + quote + 'printf dsh && readlink -f ' + quote + '$(command -v codex)' + quote + ' && file ' + quote + '$(command -v codex)' + quote + ' && true' + quote + ', workdir: ' + quote + '/tmp' + quote + ' }),',
+    ']);',
+    'return results;',
+  ].join(String.fromCharCode(10))
+  const normalized = normalizeCodeModeSource(source)
+  assert.equal(codeModeSyntaxValid(source), false)
+  assert.equal(codeModeSyntaxValid(normalized), true)
+  const calls = []
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+  const run = new AsyncFunction('tools', normalized)
+  await run({ exec_command: async ({ cmd }) => { calls.push(cmd); return cmd } })
+  assert.equal(calls.length, 4)
+  assert.match(calls[1], /echo "===== \$f ====="/)
+  assert.match(calls[2], /echo "----- \$g -----"/)
+  assert.match(calls[3], /readlink -f "\$\(command -v codex\)"/)
+})
+
+test('Code Mode repairs nested jq and Node single-quote shell commands', async () => {
+  const single = String.fromCharCode(39)
+  const double = String.fromCharCode(34)
+  const shell = [
+    'file=/tmp/session.jsonl.zstd; zstdcat -- ' + double + '$file' + double + ' 2>/dev/null',
+    '| jq -r ' + single + 'select(.type==' + double + 'tool-call' + double + ') | .data.arguments' + single,
+    '| node --input-type=module -e ' + single + 'import fs from ' + double + 'node:fs' + double + '; console.log(fs.readFileSync(0,' + double + 'utf8' + double + '))' + single,
+  ].join(' ')
+  const source = 'const result = await tools.exec_command({ cmd: ' + single + shell + single + ' }); return result'
+  const normalized = normalizeCodeModeSource(source)
+  assert.equal(codeModeSyntaxValid(source), false)
+  assert.equal(codeModeSyntaxValid(normalized), true)
+  let received
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+  const run = new AsyncFunction('tools', normalized)
+  await run({ exec_command: async ({ cmd }) => { received = cmd; return cmd } })
+  assert.equal(received, shell)
+})
+
 test('malformed String.raw patch templates preserve literal backticks', async () => {
   const normalized = normalizeCodeModeSource(rawPatchSource)
   assert.equal(codeModeSyntaxValid(normalized), true)
@@ -238,6 +281,12 @@ test('legacy shell catalog rows retain unified exec and text-only web schemas ar
   const narrowed = patchWebSearchSchema(schema, spark)
   assert.equal(narrowed.parameters.properties.image_query, undefined)
   assert.notEqual(schema.parameters.properties.image_query, undefined)
+})
+
+test('Codex local skill policy keeps the skill loader visible for hosted Code Mode rows', () => {
+  const luna = profileForModel('gpt-5.6-luna')
+  assert.equal(luna.includeSkillsUsageInstructions, true)
+  assert.equal(modelToolAllowed({}, luna, 'skill', {}, true), true)
 })
 
 test('official tool_mode names preserve the combined Code Mode surface', () => {

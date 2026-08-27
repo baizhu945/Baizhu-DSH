@@ -29,6 +29,10 @@ const CODE_MODE_TOOL = 'exec'
 const WAIT_TOOL = 'wait'
 const SKILL = 'skill'
 const WEB_RUN = 'web__run'
+// This preset intentionally exposes DSH's local skill catalog. The upstream
+// Luna rows set this false because hosted Codex does not inject local skills;
+// that metadata cannot describe this preset's scoped filesystem provider.
+const INCLUDE_LOCAL_SKILLS = true
 const V1_PREFIX = 'multi_agent_v1__'
 const V2_NAMES = new Set([
   'spawn_agent',
@@ -305,7 +309,7 @@ function profileForModel(model) {
     shellType: normalizeShellType(typeof row.shell_type === 'string' ? row.shell_type : 'unified_exec'),
     supportsParallelToolCalls: row.supports_parallel_tool_calls !== false,
     useResponsesLite: row.use_responses_lite === true,
-    includeSkillsUsageInstructions: row.include_skills_usage_instructions !== false,
+    includeSkillsUsageInstructions: INCLUDE_LOCAL_SKILLS || row.include_skills_usage_instructions !== false,
     includeAppsUsageInstructions: row.include_apps_usage_instructions !== false,
     includePluginUsageInstructions: row.include_plugin_usage_instructions !== false,
     inputModalities: Array.isArray(row.input_modalities) ? row.input_modalities : ['text'],
@@ -1169,10 +1173,22 @@ function codeModeStringFields(source) {
     fields.push({
       valueStart: match.index + match[0].length,
       quote: match[2],
+      property: !/\b(?:const|let|var)\s+/.test(match[0]),
       rawTemplate: match[1] !== undefined && match[2] === '`',
     })
   }
   return fields
+}
+
+function codeModeFieldBoundary(text, field, end) {
+  let cursor = end + 1
+  while (cursor < text.length && (text[cursor] === ' ' || text[cursor] === '\t')) cursor++
+  const rest = text.slice(cursor)
+  if (field.property) {
+    if (/^,\s*(?:[A-Za-z_$][A-Za-z0-9_$]*|["'][^"']+["'])\s*:/.test(rest)) return true
+    return /^(?:}[)\];,]|\)[;,]|$)/.test(rest)
+  }
+  return rest === '' || /^[;\n\r]/.test(rest)
 }
 
 function codeModeBoundaryScore(text, end) {
@@ -1221,7 +1237,14 @@ function repairCodeModeStringBoundaries(source) {
     for (const field of codeModeStringFields(candidate)) {
       for (const end of codeModeStringCandidates(candidate, field)) {
         const repaired = repairCodeModeStringField(candidate, field, end)
-        if (repaired === candidate) continue
+        // A field whose first candidate is already its closing boundary needs
+        // no repair. Only skip the remaining candidates when the following
+        // token actually looks like a property/statement boundary; a shell
+        // quote followed by a comma is still content and must remain eligible.
+        if (repaired === candidate) {
+          if (codeModeFieldBoundary(candidate, field, end)) break
+          continue
+        }
         attempts++
         const result = search(repaired, depth + 1)
         if (result !== undefined) return result
