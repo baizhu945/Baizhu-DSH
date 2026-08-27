@@ -29,6 +29,74 @@ function effectiveApprovalPolicy(events) {
   return undefined
 }
 
+/** Render authored patch changes into the approval reason without touching the filesystem. */
+function patchApprovalPreview(input) {
+  const source = String(input).replace(/\r\n?/g, '\n')
+  const sourceLines = source.split('\n')
+  const lines = []
+  let added = 0
+  let removed = 0
+  let hasFile = false
+  for (const line of sourceLines) {
+    const header = /^\*\*\* (Update|Add|Delete|Move) File:\s*(.*?)\s*$/.exec(line.trim())
+    if (header !== null) {
+      hasFile = true
+      lines.push('', header[1] + ' file: ' + header[2])
+      continue
+    }
+    const control = line.trim()
+    if (control === '*** Begin Patch' || control === '*** End Patch' || control === '*** End of File') continue
+    if (control.startsWith('*** Environment ID:') || control.startsWith('*** Move to:')) {
+      lines.push(control)
+      continue
+    }
+    if (line.startsWith('@@')) {
+      lines.push(line)
+      continue
+    }
+    if (line.startsWith('+')) {
+      added++
+      lines.push('+ ' + line.slice(1))
+      continue
+    }
+    if (line.startsWith('-')) {
+      removed++
+      lines.push('- ' + line.slice(1))
+      continue
+    }
+    if (line.startsWith(' ')) {
+      lines.push('  ' + line.slice(1))
+      continue
+    }
+    if (line === '') {
+      lines.push('  ')
+      continue
+    }
+    lines.push(line)
+  }
+  if (!hasFile) return undefined
+  const maxLines = 180
+  const visible = lines.slice(0, maxLines)
+  if (lines.length > maxLines) visible.push('… (' + String(lines.length - maxLines) + ' more patch lines)')
+  return ['Patch preview: +' + String(added) + '/-' + String(removed), ...visible].join('\n')
+}
+
+function approvalReason(ctx, exec) {
+  const base = 'Codex tool "' + exec.name + '" requires your approval'
+  if (exec.name !== 'apply_patch' || typeof exec.arguments?.input !== 'string') return base
+  const preview = patchApprovalPreview(exec.arguments.input)
+  if (preview === undefined) return base
+  let title
+  try {
+    const definition = ctx.tools.get(exec.name, exec.agent)
+    const presentation = definition?.presentCall?.(exec.arguments)
+    if (typeof presentation?.title === 'string' && presentation.title.trim() !== '') title = presentation.title.trim()
+  } catch {
+    title = undefined
+  }
+  return [base, title ?? 'Patch changes', preview].join('\n')
+}
+
 export function apply(ctx) {
   ctx.on('tools/pre-execute', async (exec, next) => {
     if (!ASK_TOOLS.has(exec.name)) return next()
@@ -46,7 +114,7 @@ export function apply(ctx) {
       if (policy === 'ask') {
         const sandbox = ctx.sandboxPolicy.resolve({ session: exec.agent.session })
         if (sandbox.mode === 'danger-full-access') {
-          return { kind: 'ask', reason: `Codex tool "${exec.name}" requires your approval` }
+          return { kind: 'ask', reason: approvalReason(ctx, exec) }
         }
       }
       return next()
@@ -56,7 +124,7 @@ export function apply(ctx) {
     // named preset table when it declares the deployment's confirm preset.
     try {
       if (ctx.permissionPresets.current(events) === 'confirm') {
-        return { kind: 'ask', reason: `Codex tool "${exec.name}" requires your approval` }
+        return { kind: 'ask', reason: approvalReason(ctx, exec) }
       }
     } catch {
       // No permission-preset service in this scope: leave the decision to the host.
@@ -64,3 +132,5 @@ export function apply(ctx) {
     return next()
   })
 }
+
+export { approvalReason, patchApprovalPreview }

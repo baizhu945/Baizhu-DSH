@@ -168,6 +168,9 @@ function buildProfile() {
     provider: PROVIDER,
     displayName: DISPLAY_NAME,
     streamIdleTimeoutMs: STREAM_IDLE_TIMEOUT_MS,
+    // Codex 的 WebSocket 在已输出部分事件后异常断开时不会安全地回退到 SSE；
+    // 固定使用 SSE，避免把上游的 1006 连接中断直接暴露为本轮失败。
+    transport: 'sse',
     retryPolicy: resolveRetryPolicy(undefined, `openai-codex-account: ${PROVIDER} retryPolicy`),
     configuredMaxTokens: new Map(),
     piProvider: buildCodexProvider(),

@@ -7,7 +7,9 @@
  * actual execution services. This adapter projects the same facts at prompt
  * assembly time and enforces the projection with a scoped tool guard.
  */
-const createRequire = process.getBuiltinModule('node:module').createRequire
+const nodeModule = process.getBuiltinModule('node:module')
+const createRequire = nodeModule.createRequire
+const stripTypeScriptTypes = nodeModule.stripTypeScriptTypes
 const fs = process.getBuiltinModule('node:fs/promises')
 const nodePath = process.getBuiltinModule('node:path')
 const dshHome = process.env.DSH_HOME || ((process.env.HOME || '/home/baizhu945') + '/.dsh')
@@ -42,6 +44,9 @@ const V2_NAMES = new Set([
 // run_code directly.
 const INTERNAL_RUN_CODE_CALLS = new Set()
 const SERIAL_ROOT_TAILS = new WeakMap()
+const CODE_MODE_STRIP_PREFIX = 'async function __dsh_program__() {\n'
+const CODE_MODE_STRIP_SUFFIX = '\n}'
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
 function humanLabel(key) {
   return String(key)
@@ -411,10 +416,10 @@ function codeModeDescription(input) {
 
 // Code Mode is a model-facing adapter, but its source is an implementation
 // detail for people looking at a Codex run. These small, deliberately static
-// readers extract the common literal argument shapes emitted by the model so
-// the outer exec card can show the same kind of summary as a native tool card.
-// They never evaluate source code: unresolved expressions are reported as
-// computed values instead of being executed during presentation.
+// readers extract the common argument shapes emitted by the model so the
+// outer exec card can show the same kind of summary as a native tool card.
+// They never execute source code: unresolved expressions are shown verbatim
+// as Code Mode expressions instead of being hidden behind a vague placeholder.
 function previewQuotedToken(text, start) {
   const quote = text[start]
   if (quote !== '"' && quote !== String.fromCharCode(39) && quote !== String.fromCharCode(96)) return undefined
@@ -434,7 +439,7 @@ function previewQuotedToken(text, start) {
   return undefined
 }
 
-function previewDecodeString(token) {
+function previewDecodeString(token, bindings = new Map(), resolving = new Set()) {
   const text = String(token).trim()
   const quote = text[0]
   if ((quote !== '"' && quote !== String.fromCharCode(39) && quote !== String.fromCharCode(96)) || text.at(-1) !== quote) return undefined
@@ -487,7 +492,18 @@ function previewDecodeString(token) {
       default: output += escaped
     }
   }
-  if (quote === String.fromCharCode(96)) return output.replace(/\$\{[^}]*\}/g, '…')
+  if (quote === String.fromCharCode(96)) {
+    let unresolved = false
+    const expanded = output.replace(/\$\{([^{}]*)\}/g, (_match, expression) => {
+      const value = previewLiteral(expression, bindings, resolving)
+      if (value === undefined) {
+        unresolved = true
+        return '…'
+      }
+      return previewValueText(value)
+    })
+    return unresolved ? undefined : expanded
+  }
   return output
 }
 
@@ -549,56 +565,355 @@ function previewExpressionEnd(text, start) {
   return text.slice(start).trim()
 }
 
+function previewStatementExpression(text, start) {
+  let depth = 0
+  let quote
+  let escaped = false
+  let end = text.length
+  for (let index = start; index < text.length; index++) {
+    const character = text[index]
+    if (quote !== undefined) {
+      if (escaped) escaped = false
+      else if (character === String.fromCharCode(92)) escaped = true
+      else if (character === quote) quote = undefined
+      continue
+    }
+    if (character === '"' || character === String.fromCharCode(39) || character === String.fromCharCode(96)) {
+      quote = character
+      continue
+    }
+    if (character === '(' || character === '[' || character === '{') {
+      depth++
+      continue
+    }
+    if (character === ')' || character === ']' || character === '}') {
+      if (depth > 0) depth--
+      continue
+    }
+    if (depth === 0 && (character === ';' || character === ',' || character === '\n' || character === '\r')) {
+      end = index
+      break
+    }
+  }
+  return { expression: text.slice(start, end).trim(), end }
+}
+
+function previewTopLevelIndex(text, wanted) {
+  let depth = 0
+  let quote
+  let escaped = false
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index]
+    if (quote !== undefined) {
+      if (escaped) escaped = false
+      else if (character === String.fromCharCode(92)) escaped = true
+      else if (character === quote) quote = undefined
+      continue
+    }
+    if (character === '"' || character === String.fromCharCode(39) || character === String.fromCharCode(96)) {
+      quote = character
+      continue
+    }
+    if (character === '(' || character === '[' || character === '{') {
+      depth++
+      continue
+    }
+    if (character === ')' || character === ']' || character === '}') {
+      if (depth > 0) depth--
+      continue
+    }
+    if (depth === 0 && character === wanted) return index
+  }
+  return -1
+}
+
+function previewSplitTopLevel(text, separator) {
+  const parts = []
+  let start = 0
+  let depth = 0
+  let quote
+  let escaped = false
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index]
+    if (quote !== undefined) {
+      if (escaped) escaped = false
+      else if (character === String.fromCharCode(92)) escaped = true
+      else if (character === quote) quote = undefined
+      continue
+    }
+    if (character === '"' || character === String.fromCharCode(39) || character === String.fromCharCode(96)) {
+      quote = character
+      continue
+    }
+    if (character === '(' || character === '[' || character === '{') {
+      depth++
+      continue
+    }
+    if (character === ')' || character === ']' || character === '}') {
+      if (depth > 0) depth--
+      continue
+    }
+    if (depth === 0 && character === separator) {
+      parts.push(text.slice(start, index).trim())
+      start = index + 1
+    }
+  }
+  parts.push(text.slice(start).trim())
+  return parts
+}
+
 function previewKeyEscape(key) {
   return String(key).replace(/[^A-Za-z0-9_]/g, character => String.fromCharCode(92) + character)
 }
 
 function previewPropertyExpression(source, key) {
-  const match = new RegExp('(?:^|[,{]\\s*)' + previewKeyEscape(key) + '\\s*:').exec(String(source))
-  if (match === null) return undefined
-  const colon = String(source).indexOf(':', match.index)
-  return previewExpressionEnd(String(source), colon + 1)
+  const text = String(source)
+  const escapedKey = previewKeyEscape(key)
+  const keyPattern = '(?:' + escapedKey + '|["' + String.fromCharCode(39) + ']' + escapedKey + '["' + String.fromCharCode(39) + '])'
+  const match = new RegExp('(?:^\\s*|[,{]\\s*)' + keyPattern + '\\s*:').exec(text)
+  if (match !== null) {
+    const colon = text.indexOf(':', match.index)
+    return previewExpressionEnd(text, colon + 1)
+  }
+  const shorthand = new RegExp('(?:^\\s*|[,{]\\s*)' + escapedKey + '(?=\\s*(?:[,}]))').exec(text)
+  return shorthand === null ? undefined : key
 }
 
-function previewLiteral(expression) {
+function previewPropertyExpressions(source, key) {
+  const text = String(source)
+  const escapedKey = previewKeyEscape(key)
+  const keyPattern = '(?:' + escapedKey + '|["' + String.fromCharCode(39) + ']' + escapedKey + '["' + String.fromCharCode(39) + '])'
+  const pattern = new RegExp('(?:^|[,{]\\s*)' + keyPattern + '\\s*:', 'g')
+  const expressions = []
+  let match
+  while ((match = pattern.exec(text)) !== null) {
+    const start = match.index + match[0].length
+    const expression = previewExpressionEnd(text, start)
+    if (expression.length > 0) expressions.push(expression)
+    pattern.lastIndex = Math.max(pattern.lastIndex, start + Math.max(expression.length, 1))
+  }
+  return expressions
+}
+
+function previewObjectLiteral(text, bindings, resolving) {
+  const end = previewBalancedEnd(text, 0)
+  if (end !== text.length - 1) return undefined
+  const inner = text.slice(1, -1).trim()
+  if (inner === '') return {}
+  const value = {}
+  for (const part of previewSplitTopLevel(inner, ',')) {
+    if (part === '') continue
+    const colon = previewTopLevelIndex(part, ':')
+    const keyText = colon < 0 ? part : part.slice(0, colon).trim()
+    const keyToken = previewQuotedToken(keyText, 0)
+    const key = keyToken !== undefined && keyToken.end === keyText.length
+      ? previewDecodeString(keyToken.token, bindings, resolving)
+      : /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(keyText) ? keyText : undefined
+    if (key === undefined) return undefined
+    const expression = colon < 0 ? keyText : part.slice(colon + 1)
+    const item = previewLiteral(expression, bindings, resolving)
+    if (item === undefined) return undefined
+    value[key] = item
+  }
+  return value
+}
+
+function previewLiteral(expression, bindings = new Map(), resolving = new Set()) {
   if (expression === undefined) return undefined
-  const text = String(expression).trim().replace(/;$/, '')
+  let text = String(expression).trim().replace(/;$/, '').trim()
+  while (text.startsWith('await ')) text = text.slice(6).trim()
+  if (text.startsWith('(')) {
+    const end = previewBalancedEnd(text, 0)
+    if (end === text.length - 1) return previewLiteral(text.slice(1, -1), bindings, resolving)
+  }
   const quoted = previewQuotedToken(text, 0)
-  if (quoted !== undefined && quoted.end === text.length) return previewDecodeString(quoted.token)
+  if (quoted !== undefined && quoted.end === text.length) return previewDecodeString(quoted.token, bindings, resolving)
+  if (text === 'true') return true
+  if (text === 'false') return false
+  if (text === 'null') return null
+  if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) return Number(text)
+  const identifier = /^([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(text)
+  if (identifier !== null && bindings.has(identifier[1])) {
+    if (resolving.has(identifier[1])) return undefined
+    const next = new Set(resolving)
+    next.add(identifier[1])
+    return previewLiteral(bindings.get(identifier[1]), bindings, next)
+  }
+  const member = /^([A-Za-z_$][A-Za-z0-9_$]*)(?:\.([A-Za-z_$][A-Za-z0-9_$]*))+$/.exec(text)
+  if (member !== null && bindings.has(member[1])) {
+    const base = previewLiteral(member[1], bindings, resolving)
+    if (base === undefined || base === null || typeof base !== 'object') return undefined
+    let value = base
+    for (const property of text.slice(member[1].length + 1).split('.')) {
+      if (!Object.prototype.hasOwnProperty.call(value, property)) return undefined
+      value = value[property]
+    }
+    return value
+  }
+  const stringFunction = /^(String|Number)\(([\s\S]*)\)$/.exec(text)
+  if (stringFunction !== null) {
+    const end = previewBalancedEnd(text, text.indexOf('('))
+    if (end === text.length - 1) {
+      const item = previewLiteral(stringFunction[2], bindings, resolving)
+      if (item !== undefined) return stringFunction[1] === 'String' ? String(item) : Number(item)
+    }
+  }
   if (text.startsWith('[')) {
     const arrayEnd = previewBalancedEnd(text, 0)
+    if (arrayEnd === text.length - 1) {
+      const inner = text.slice(1, -1).trim()
+      if (inner === '') return []
+      const values = previewSplitTopLevel(inner, ',').map(item => previewLiteral(item, bindings, resolving))
+      return values.some(item => item === undefined) ? undefined : values
+    }
     if (arrayEnd !== undefined && text.slice(arrayEnd + 1).trim().startsWith('.join')) {
       const tail = text.slice(arrayEnd + 1).trim()
       const open = tail.indexOf('(')
       const close = open < 0 ? -1 : previewBalancedEnd(tail, open)
-      const separator = open < 0 || close === undefined ? undefined : previewLiteral(tail.slice(open + 1, close))
-      const values = []
-      const arrayText = text.slice(1, arrayEnd)
-      for (let index = 0; index < arrayText.length;) {
-        const token = previewQuotedToken(arrayText, index)
-        if (token === undefined) { index++; continue }
-        const value = previewDecodeString(token.token)
-        if (value !== undefined) values.push(value)
-        index = token.end
+      if (open >= 0 && close === tail.length - 1) {
+        const joinArguments = tail.slice(open + 1, close).trim()
+        const separator = joinArguments === '' ? ',' : previewLiteral(joinArguments, bindings, resolving)
+        const arrayText = text.slice(1, arrayEnd).trim()
+        const values = arrayText === '' ? [] : previewSplitTopLevel(arrayText, ',').map(item => previewLiteral(item, bindings, resolving))
+        if (separator !== undefined && !values.some(item => item === undefined)) return values.join(String(separator))
       }
-      if (values.length > 0) return values.join(separator ?? '')
     }
+  }
+  if (text.startsWith('{')) {
+    const object = previewObjectLiteral(text, bindings, resolving)
+    if (object !== undefined) return object
+  }
+  const concatenated = previewSplitTopLevel(text, '+')
+  if (concatenated.length > 1) {
+    let value = previewLiteral(concatenated[0], bindings, resolving)
+    if (value === undefined) return undefined
+    for (const part of concatenated.slice(1)) {
+      const next = previewLiteral(part, bindings, resolving)
+      if (next === undefined) return undefined
+      if (typeof value === 'string' || typeof next === 'string') value = String(value) + String(next)
+      else if (typeof value === 'number' && typeof next === 'number') value += next
+      else return undefined
+    }
+    return value
   }
   return undefined
 }
 
-function previewStringProperties(source, key) {
-  const pattern = new RegExp('\\b' + previewKeyEscape(key) + '\\s*:\\s*', 'g')
-  const values = []
+function previewBindings(source) {
+  const text = String(source)
+  const bindings = new Map()
+  const pattern = /\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=/g
   let match
-  while ((match = pattern.exec(String(source))) !== null) {
-    const token = previewQuotedToken(String(source), match.index + match[0].length)
-    if (token === undefined) continue
-    const value = previewDecodeString(token.token)
-    if (value !== undefined) values.push(value)
-    pattern.lastIndex = token.end
+  while ((match = pattern.exec(text)) !== null) {
+    const parsed = previewStatementExpression(text, pattern.lastIndex)
+    if (parsed.expression !== '') bindings.set(match[1], parsed.expression)
+    pattern.lastIndex = parsed.end < text.length ? parsed.end + 1 : text.length
   }
-  return values
+  return bindings
+}
+
+function previewValueText(value) {
+  if (value !== null && typeof value === 'object') {
+    try { return JSON.stringify(value) } catch { return String(value) }
+  }
+  return humanScalar(value)
+}
+
+function previewExpressionLabel(expression, fallback = '(not provided)') {
+  if (expression === undefined) return fallback
+  const compact = String(expression).replace(/\s+/g, ' ').trim()
+  if (compact === '') return '(empty expression)'
+  return compact.length > 180 ? compact.slice(0, 177) + '…' : compact
+}
+
+function previewExpressionSource(expression, bindings, resolving = new Set()) {
+  if (expression === undefined) return undefined
+  const text = String(expression).trim()
+  const identifier = /^([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(text)
+  if (identifier === null || !bindings.has(identifier[1]) || resolving.has(identifier[1])) return text
+  const next = new Set(resolving)
+  next.add(identifier[1])
+  return previewExpressionSource(bindings.get(identifier[1]), bindings, next) ?? text
+}
+
+function previewArgument(source, key, bindings) {
+  const expression = previewPropertyExpression(source, key)
+  if (expression !== undefined) return { expression: previewExpressionSource(expression, bindings), value: previewLiteral(expression, bindings) }
+  const object = previewLiteral(source, bindings)
+  if (object !== null && typeof object === 'object' && Object.prototype.hasOwnProperty.call(object, key)) {
+    return { expression: previewExpressionLabel(source) + '.' + key, value: object[key] }
+  }
+  const sourceExpression = previewExpressionSource(source, bindings)
+  if (sourceExpression !== undefined && /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(sourceExpression)) {
+    return { expression: sourceExpression + '.' + key, value: undefined }
+  }
+  return { expression: undefined, value: undefined }
+}
+
+function previewArgumentText(label, argument, missing = '(not provided)') {
+  if (argument.value !== undefined) return label + ': ' + previewValueText(argument.value)
+  if (argument.expression !== undefined) return label + ': ' + previewExpressionLabel(argument.expression) + ' (Code Mode expression)'
+  return label + ': ' + missing
+}
+
+function previewPatchContent(value) {
+  const source = String(value).replace(/\r\n?/g, '\n')
+  const sourceLines = source.split('\n')
+  const lines = []
+  let added = 0
+  let removed = 0
+  let hasFile = false
+  for (const line of sourceLines) {
+    const header = /^\*\*\* (Update|Add|Delete|Move) File:\s*(.*?)\s*$/.exec(line.trim())
+    if (header !== null) {
+      hasFile = true
+      lines.push('', header[1] + ' file: ' + header[2])
+      continue
+    }
+    if (line.trim() === '*** Begin Patch' || line.trim() === '*** End Patch' || line.trim() === '*** End of File') continue
+    if (line.trim().startsWith('*** Environment ID:') || line.trim().startsWith('*** Move to:')) {
+      lines.push(line.trim())
+      continue
+    }
+    if (line.startsWith('@@')) {
+      lines.push(line)
+      continue
+    }
+    if (line.startsWith('+')) {
+      added++
+      lines.push('+ ' + line.slice(1))
+      continue
+    }
+    if (line.startsWith('-')) {
+      removed++
+      lines.push('- ' + line.slice(1))
+      continue
+    }
+    if (line.startsWith(' ')) {
+      lines.push('  ' + line.slice(1))
+      continue
+    }
+    if (line === '') {
+      lines.push('  ')
+      continue
+    }
+    lines.push(line)
+  }
+  if (!hasFile) return undefined
+  const maxLines = 180
+  const visible = lines.slice(0, maxLines)
+  if (lines.length > maxLines) visible.push('… (' + String(lines.length - maxLines) + ' more patch lines)')
+  const summary = 'Patch preview: +' + String(added) + '/-' + String(removed)
+  return { text: [summary, ...visible].join(String.fromCharCode(10)), added, removed }
+}
+
+function previewStringProperties(source, key, bindings) {
+  return previewPropertyExpressions(source, key).flatMap(expression => {
+    const value = previewLiteral(expression, bindings)
+    if (typeof value === 'string') return [value]
+    if (Array.isArray(value)) return value.filter(item => typeof item === 'string')
+    return []
+  })
 }
 
 function previewShortTitle(value, fallback) {
@@ -622,61 +937,97 @@ function previewCodeCalls(source) {
   return calls
 }
 
-function previewCodeToolCall(name, source) {
+function previewCodeToolCall(name, source, bindings) {
   const label = name === WEB_RUN ? 'web.run' : humanLabel(name)
   if (name === 'exec_command') {
-    const command = previewLiteral(previewPropertyExpression(source, 'cmd'))
-    const workdir = previewLiteral(previewPropertyExpression(source, 'workdir'))
-    const tty = previewLiteral(previewPropertyExpression(source, 'tty'))
-    const lines = ['Command: ' + (command ?? '(computed at runtime)')]
-    if (workdir !== undefined) lines.push('Working directory: ' + workdir)
-    if (tty === 'true' || tty === true) lines.push('Interactive PTY: yes')
-    return { title: previewShortTitle(command, 'exec_command'), text: lines.join(String.fromCharCode(10)), kind: 'execute' }
+    const command = previewArgument(source, 'cmd', bindings)
+    const workdir = previewArgument(source, 'workdir', bindings)
+    const tty = previewArgument(source, 'tty', bindings)
+    const lines = [
+      previewArgumentText('Command', command),
+      previewArgumentText('Working directory', workdir, '(session working directory)'),
+    ]
+    if (tty.value === true) lines.push('Execution mode: PTY')
+    else if (tty.value === false) lines.push('Execution mode: pipe')
+    else if (tty.expression !== undefined) lines.push('Execution mode: ' + previewExpressionLabel(tty.expression) + ' (Code Mode expression)')
+    else lines.push('Execution mode: pipe (default)')
+    const titleValue = typeof command.value === 'string' ? command.value : command.expression
+    return { title: previewShortTitle(titleValue, 'exec_command'), text: lines.join(String.fromCharCode(10)), kind: 'execute' }
   }
   if (name === WEB_RUN) {
-    const queries = previewStringProperties(source, 'q')
-    const refs = previewStringProperties(source, 'ref_id')
-    const urls = previewStringProperties(source, 'url')
+    const queryExpressions = previewPropertyExpressions(source, 'q')
+    const refExpressions = previewPropertyExpressions(source, 'ref_id')
+    const urlExpressions = previewPropertyExpressions(source, 'url')
+    const queries = previewStringProperties(source, 'q', bindings)
+    const refs = previewStringProperties(source, 'ref_id', bindings)
+    const urls = previewStringProperties(source, 'url', bindings)
     const lines = []
     if (queries.length > 0) lines.push('Search: ' + queries.join('; '))
+    else if (queryExpressions.length > 0) lines.push('Search: ' + queryExpressions.map(previewExpressionLabel).join('; ') + ' (Code Mode expressions)')
     if (refs.length > 0) lines.push('Open: ' + refs.join('; '))
+    else if (refExpressions.length > 0) lines.push('Open: ' + refExpressions.map(previewExpressionLabel).join('; ') + ' (Code Mode expressions)')
     if (urls.length > 0) lines.push('URL: ' + urls.join('; '))
-    if (lines.length === 0) lines.push('Search request (arguments assembled at runtime)')
-    return { title: previewShortTitle(queries[0] ?? refs[0] ?? urls[0], 'Search web'), text: lines.join(String.fromCharCode(10)), kind: 'search' }
+    else if (urlExpressions.length > 0) lines.push('URL: ' + urlExpressions.map(previewExpressionLabel).join('; ') + ' (Code Mode expressions)')
+    if (lines.length === 0) lines.push('Search arguments: ' + previewExpressionLabel(source, '(none)') + (String(source).trim() === '' ? '' : ' (Code Mode expression)'))
+    const titleValue = queries[0] ?? refs[0] ?? urls[0] ?? queryExpressions[0] ?? refExpressions[0] ?? urlExpressions[0]
+    return { title: previewShortTitle(titleValue, 'Search web'), text: lines.join(String.fromCharCode(10)), kind: 'search' }
   }
   if (name === 'apply_patch') {
-    const input = previewLiteral(previewPropertyExpression(source, 'input'))
-    const paths = typeof input === 'string'
-      ? [...input.matchAll(/^\*\*\* (?:Update|Add|Delete|Move) File: (.+)$/gm)].map(item => item[1].trim())
+    const input = previewArgument(source, 'input', bindings)
+    const paths = typeof input.value === 'string'
+      ? [...input.value.matchAll(/^\*\*\* (?:Update|Add|Delete|Move) File: (.+)$/gm)].map(item => item[1].trim())
       : []
-    const text = paths.length > 0 ? 'Patch files:\n' + paths.map(path => '- ' + path).join(String.fromCharCode(10)) : 'Patch content (computed at runtime)'
+    const patchPreview = typeof input.value === 'string' ? previewPatchContent(input.value) : undefined
+    const text = patchPreview !== undefined
+      ? patchPreview.text
+      : input.value === ''
+        ? 'Patch content: (empty)'
+        : typeof input.value === 'string'
+          ? 'Patch content: ' + previewShortTitle(input.value, '(provided)')
+          : previewArgumentText('Patch input', input)
     return { title: paths.length === 1 ? 'Apply patch — ' + paths[0] : 'Apply patch', text, kind: 'edit' }
   }
   if (name === 'view_image') {
-    const path = previewLiteral(previewPropertyExpression(source, 'path'))
-    return { title: previewShortTitle(path, 'View image'), text: 'Image: ' + (path ?? '(computed at runtime)'), kind: 'read' }
+    const path = previewArgument(source, 'path', bindings)
+    const titleValue = typeof path.value === 'string' ? path.value : path.expression
+    return { title: previewShortTitle(titleValue, 'View image'), text: previewArgumentText('Image path', path), kind: 'read' }
   }
   if (name === 'write_stdin') {
-    const session = previewLiteral(previewPropertyExpression(source, 'session_id'))
-    const chars = previewLiteral(previewPropertyExpression(source, 'chars'))
-    const text = 'Session: ' + (session ?? '(computed at runtime)') + (chars === undefined ? '' : String.fromCharCode(10) + 'Input: ' + chars)
-    return { title: previewShortTitle(chars, 'Poll exec session'), text, kind: 'execute' }
+    const session = previewArgument(source, 'session_id', bindings)
+    const chars = previewArgument(source, 'chars', bindings)
+    const lines = [previewArgumentText('Session', session)]
+    lines.push(chars.value !== undefined || chars.expression !== undefined
+      ? previewArgumentText('Input', chars)
+      : 'Input: (empty by default)')
+    const titleValue = typeof chars.value === 'string' ? chars.value : chars.expression
+    return { title: previewShortTitle(titleValue, 'Poll exec session'), text: lines.join(String.fromCharCode(10)), kind: 'execute' }
   }
   if (name === 'wait') {
-    const cell = previewLiteral(previewPropertyExpression(source, 'cell_id'))
-    return { title: 'Wait on exec cell ' + (cell ?? '(computed at runtime)'), text: 'Wait for the yielded exec cell to produce more output.', kind: 'other' }
+    const cell = previewArgument(source, 'cell_id', bindings)
+    const cellText = cell.value !== undefined ? previewValueText(cell.value) : previewExpressionLabel(cell.expression)
+    return { title: 'Wait on exec cell ' + cellText, text: previewArgumentText('Cell ID', cell) + '\nWait for the yielded exec cell to produce more output.', kind: 'other' }
   }
   if (name === 'update_plan') return { title: 'Update plan', text: 'Update the current execution plan.', kind: 'other' }
   if (name === 'request_user_input') return { title: 'Ask user', text: 'Request user input.', kind: 'other' }
   if (name.includes('spawn_agent')) {
-    const message = previewLiteral(previewPropertyExpression(source, 'message'))
-    return { title: 'Spawn sub-agent', text: 'Task: ' + (message ?? '(computed at runtime)'), kind: 'execute' }
+    const message = previewArgument(source, 'message', bindings)
+    return { title: 'Spawn sub-agent', text: previewArgumentText('Task', message), kind: 'execute' }
   }
-  return { title: label, text: label + ' (arguments assembled at runtime)', kind: 'other' }
+  return { title: label, text: label + '\nArguments: ' + previewExpressionLabel(source, '(none)'), kind: 'other' }
 }
 
 function codeModePreview(source) {
-  const calls = previewCodeCalls(source).map(call => previewCodeToolCall(call.name, call.arguments))
+  const directPatch = directPatchContent(source)
+  if (directPatch !== undefined) {
+    const patchPreview = previewPatchContent(directPatch)
+    if (patchPreview !== undefined) {
+      const paths = [...directPatch.matchAll(/^\*\*\* (?:Update|Add|Delete|Move) File:\s*(.+)$/gm)].map(item => item[1].trim())
+      return { title: paths.length === 1 ? 'Apply patch — ' + paths[0] : 'Apply patch', text: patchPreview.text, kind: 'edit' }
+    }
+    return { title: 'Apply patch', text: 'Patch preview unavailable', kind: 'edit' }
+  }
+  const bindings = previewBindings(source)
+  const calls = previewCodeCalls(source).map(call => previewCodeToolCall(call.name, call.arguments, bindings))
   if (calls.length === 0) return { title: codeModeDescription(source), text: 'Code Mode program (no direct tool call detected)', kind: 'execute' }
   if (calls.length === 1) return calls[0]
   const text = calls.map((call, index) => String(index + 1) + '. ' + call.text.replace(/^/gm, '  ')).join(String.fromCharCode(10) + String.fromCharCode(10))
@@ -689,7 +1040,7 @@ function codeModePreview(source) {
  * single/double-quoted strings and treats Bash `${name:-fallback}` as a JS
  * interpolation. A valid program is left byte-for-byte unchanged.
  */
-function normalizeCodeModeSource(source) {
+function normalizeLegacyCodeModeSource(source) {
   const text = String(source)
   let output = ''
   let quote
@@ -738,6 +1089,134 @@ function normalizeCodeModeSource(source) {
     output += character
   }
   return output
+}
+
+function directPatchContent(source) {
+  const text = String(source).trim()
+  if (!text.startsWith('*** Begin Patch') || !text.endsWith('*** End Patch')) return undefined
+  return text
+}
+
+/** Compile with the same wrapper and type-strip stage used by dsh's worker. */
+function codeModeSyntaxError(source) {
+  try {
+    const wrapped = CODE_MODE_STRIP_PREFIX + String(source) + CODE_MODE_STRIP_SUFFIX
+    const stripped = typeof stripTypeScriptTypes === 'function' ? stripTypeScriptTypes(wrapped) : wrapped
+    const body = stripped.slice(CODE_MODE_STRIP_PREFIX.length, stripped.length - CODE_MODE_STRIP_SUFFIX.length)
+    new AsyncFunction("'use strict';\n" + body)
+    return undefined
+  } catch (error) {
+    return error
+  }
+}
+
+function codeModeSyntaxValid(source) {
+  return codeModeSyntaxError(source) === undefined
+}
+
+function codeModeQuoteIsEscaped(text, index) {
+  let slashCount = 0
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === String.fromCharCode(92); cursor--) slashCount++
+  return slashCount % 2 === 1
+}
+
+function codeModeStringFields(source) {
+  const pattern = /(?:\b(?:cmd|input)\s*:\s*|["'](?:cmd|input)["']\s*:\s*|\b(?:const|let|var)\s+[A-Za-z_$][A-Za-z0-9_$]*\s*=\s*(String\.raw\s*)?)(["'`])/g
+  const fields = []
+  let match
+  while ((match = pattern.exec(String(source))) !== null) {
+    fields.push({
+      valueStart: match.index + match[0].length,
+      quote: match[2],
+      rawTemplate: match[1] !== undefined && match[2] === '`',
+    })
+  }
+  return fields
+}
+
+function codeModeBoundaryScore(text, end) {
+  let cursor = end + 1
+  while (cursor < text.length && (text[cursor] === ' ' || text[cursor] === '\t')) cursor++
+  const next = text[cursor]
+  if (next === undefined || ',)}];'.includes(next)) return 0
+  if (next === '\n' || next === '\r' || '.;:'.includes(next)) return 1
+  return 2
+}
+
+function codeModeStringCandidates(text, field) {
+  const candidates = []
+  for (let index = field.valueStart + 1; index < text.length; index++) {
+    if (text[index] === field.quote && !codeModeQuoteIsEscaped(text, index)) candidates.push(index)
+  }
+  candidates.sort((left, right) => codeModeBoundaryScore(text, left) - codeModeBoundaryScore(text, right) || left - right)
+  return candidates.slice(0, 96)
+}
+
+function repairCodeModeStringField(text, field, end) {
+  let output = text.slice(0, field.valueStart)
+  for (let index = field.valueStart; index <= end; index++) {
+    const character = text[index]
+    if (index !== end && character === field.quote && !codeModeQuoteIsEscaped(text, index)) {
+      output += field.rawTemplate ? '${String.fromCharCode(96)}' : String.fromCharCode(92) + character
+    } else {
+      output += character
+    }
+  }
+  return output + text.slice(end + 1)
+}
+
+/**
+ * Repair only a bounded set of malformed string boundaries. Every
+ * candidate must compile before it can reach the runtime; valid source never
+ * enters this path and is therefore never rewritten.
+ */
+function repairCodeModeStringBoundaries(source) {
+  const visited = new Set()
+  let attempts = 0
+  function search(candidate, depth) {
+    if (codeModeSyntaxValid(candidate)) return candidate
+    if (depth >= 6 || attempts >= 1200 || visited.has(candidate)) return undefined
+    visited.add(candidate)
+    for (const field of codeModeStringFields(candidate)) {
+      for (const end of codeModeStringCandidates(candidate, field)) {
+        const repaired = repairCodeModeStringField(candidate, field, end)
+        if (repaired === candidate) continue
+        attempts++
+        const result = search(repaired, depth + 1)
+        if (result !== undefined) return result
+      }
+    }
+    return undefined
+  }
+  return search(String(source), 0)
+}
+
+/**
+ * Keep common shell snippets usable after a parser failure. The official
+ * Code Mode contract remains raw JavaScript/TypeScript; this is a local
+ * compatibility fallback for malformed model-authored strings.
+ */
+function normalizeCodeModeSource(source) {
+  const text = String(source)
+  if (codeModeSyntaxValid(text)) return text
+  const legacy = normalizeLegacyCodeModeSource(text)
+  if (codeModeSyntaxValid(legacy)) return legacy
+  return repairCodeModeStringBoundaries(legacy) ?? legacy
+}
+
+async function executeNestedCodeModeTool(ctx, execution, name, toolArguments) {
+  const result = await ctx.tools.execute({
+    callId: execution.callId + ':' + name,
+    rootCallId: execution.rootCallId ?? execution.callId,
+    name,
+    arguments: toolArguments,
+    agent: execution.agent,
+    parent: execution.token,
+    signal: execution.signal,
+  })
+  if (result.isError) throw new Error(codeModeErrorText(result) || name + ' execution failed')
+  if (result.value === undefined) throw new Error(name + ' returned no result')
+  return result.value
 }
 
 /**
@@ -789,6 +1268,11 @@ function registerCodeModeAlias(ctx) {
     async execute(args, execution) {
       const description = args.description?.trim() || codeModeDescription(args.input)
       if (description.length === 0) throw new Error('invalid input: expected non-empty JavaScript source')
+      const directPatch = directPatchContent(args.input)
+      if (directPatch !== undefined) {
+        const result = await executeNestedCodeModeTool(ctx, execution, 'apply_patch', { input: directPatch })
+        return { logs: [], result }
+      }
       const program = normalizeCodeModeSource(args.input)
       const callId = execution.callId + ':run_code'
       INTERNAL_RUN_CODE_CALLS.add(callId)
@@ -1074,3 +1558,5 @@ export function apply(ctx) {
   registerV2Agents(ctx)
   registerModelParity(ctx)
 }
+
+export { codeModePreview, codeModeSyntaxValid, directPatchContent, normalizeCodeModeSource, registerCodeModeAlias }
