@@ -2,7 +2,8 @@
  * Standalone Codex-compatible web.run extension for the Codex preset.
  *
  * This deliberately does not use dsh's ctx.web or @deepseek-ai/dsh-tool-web.
- * It calls the same `/v1/alpha/search` backend used by current Luna Code Mode,
+ * It calls the same `/backend-api/codex/alpha/search` backend used by current
+ * Luna Code Mode,
  * using the preset's existing OpenAI Codex OAuth credential. Responses Lite
  * does not accept the hosted `web_search` tool declaration.
  */
@@ -25,6 +26,7 @@ const { openaiCodexOAuth } = await import(new URL('dist/auth/oauth/openai-codex.
 
 const CODEX_SEARCH_URL = 'https://chatgpt.com/backend-api/codex/alpha/search'
 const SEARCH_TIMEOUT_MS = 60_000
+const SEARCH_RETRY_BACKOFF_MS = [250, 1_000]
 const REFRESH_SKEW_MS = 60_000
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 const credentialFile = nodePath.join(dshHome, 'openai-codex-credentials.json')
@@ -347,13 +349,40 @@ function searchCommands(args) {
   return commands
 }
 
+function retryableSearchNetworkError(error) {
+  const code = typeof error?.code === 'string' ? error.code : ''
+  if (['ECONNRESET', 'ECONNABORTED', 'EPIPE', 'ETIMEDOUT', 'ENETRESET', 'EAI_AGAIN'].includes(code)) return true
+  return /socket hang up|unexpected eof|network connection lost/i.test(String(error?.message ?? error))
+}
+
+function waitForSearchRetry(delayMs, signal) {
+  if (delayMs <= 0) return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    let timer
+    let onAbort
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer)
+      if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
+    }
+    const finish = (error) => {
+      cleanup()
+      if (error === undefined) resolve()
+      else reject(error)
+    }
+    timer = setTimeout(() => finish(), delayMs)
+    onAbort = () => finish(signal.reason ?? new Error('web.run was aborted'))
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 /**
  * POST with a preset-local IPv4 lookup. Node's undici fetch may select the
  * unroutable IPv6 address on this host even though the same endpoint is
  * reachable over IPv4; using https.request keeps the workaround local to this
  * Codex web tool and does not mutate the dsh process-wide DNS policy.
  */
-function requestCodexSearch(body, headers, signal, requestFactory = nodeHttps.request) {
+function requestCodexSearchAttempt(body, headers, signal, requestFactory, timeoutMs) {
   return new Promise((resolve, reject) => {
     let settled = false
     let timer
@@ -371,7 +400,15 @@ function requestCodexSearch(body, headers, signal, requestFactory = nodeHttps.re
     }
     const request = requestFactory(CODEX_SEARCH_URL, {
       method: 'POST',
-      headers,
+      // Some gateways reset authenticated chunked POSTs. Make the body
+      // length explicit and force a fresh connection so a stale keep-alive
+      // socket cannot turn a transient reset into a tool failure.
+      headers: {
+        ...headers,
+        'Content-Length': Buffer.byteLength(body),
+        Connection: 'close',
+      },
+      agent: false,
       lookup(hostname, options, callback) {
         nodeDns.lookup(hostname, { ...options, family: 4 }, callback)
       },
@@ -408,7 +445,7 @@ function requestCodexSearch(body, headers, signal, requestFactory = nodeHttps.re
         // callback was racing its error event. `finish` owns the rejection.
       }
     }
-    timer = setTimeout(abort, SEARCH_TIMEOUT_MS)
+    timer = setTimeout(abort, timeoutMs)
     if (signal.aborted) {
       abort()
       return
@@ -423,6 +460,32 @@ function requestCodexSearch(body, headers, signal, requestFactory = nodeHttps.re
       }
     }
   })
+}
+
+async function requestCodexSearch(body, headers, signal, requestFactory = nodeHttps.request) {
+  const deadline = Date.now() + SEARCH_TIMEOUT_MS
+  let attempt = 0
+  const scheduleRetry = async () => {
+    if (attempt >= SEARCH_RETRY_BACKOFF_MS.length) return false
+    const remaining = deadline - Date.now()
+    if (remaining <= 1) return false
+    const delay = Math.min(SEARCH_RETRY_BACKOFF_MS[attempt], remaining - 1)
+    attempt++
+    await waitForSearchRetry(delay, signal)
+    return true
+  }
+  while (true) {
+    if (signal.aborted) throw signal.reason ?? new Error('web.run was aborted')
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) throw new Error('OpenAI Codex web search timed out')
+    try {
+      const response = await requestCodexSearchAttempt(body, headers, signal, requestFactory, remaining)
+      if (response.statusCode >= 500 && response.statusCode <= 599 && await scheduleRetry()) continue
+      return response
+    } catch (error) {
+      if (!retryableSearchNetworkError(error) || !(await scheduleRetry())) throw error
+    }
+  }
 }
 
 async function searchCodex(commands, exec) {

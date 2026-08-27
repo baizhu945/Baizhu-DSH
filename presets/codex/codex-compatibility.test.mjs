@@ -659,3 +659,86 @@ test('web request cleans timer and abort listener when request.end throws synchr
   assert.equal(removed, 1)
   assert.equal(destroyed, true)
 })
+
+test('web request retries transient socket resets with a bounded fresh POST', async () => {
+  let attempts = 0
+  const optionsSeen = []
+  const requestFactory = (_url, options, onResponse) => {
+    attempts++
+    optionsSeen.push(options)
+    if (attempts === 1) {
+      const requestHandlers = new Map()
+      const request = {
+        on(name, listener) { requestHandlers.set(name, listener); return request },
+        end() {
+          const error = new Error('socket hang up')
+          error.code = 'ECONNRESET'
+          queueMicrotask(() => requestHandlers.get('error')?.(error))
+        },
+        destroy() {},
+      }
+      return request
+    }
+    const requestHandlers = new Map()
+    const response = {
+      statusCode: 200,
+      on(name, listener) {
+        if (name === 'data') queueMicrotask(() => listener(Buffer.from('{}')))
+        if (name === 'end') queueMicrotask(() => listener())
+        return response
+      },
+    }
+    const request = {
+      on(name, listener) { requestHandlers.set(name, listener); return request },
+      end() { queueMicrotask(() => onResponse(response)) },
+      destroy() {},
+    }
+    return request
+  }
+  const body = JSON.stringify({ query: 'transient reset' })
+  const result = await requestCodexSearchForTest(body, { Authorization: 'Bearer test' }, new AbortController().signal, requestFactory)
+  assert.equal(result.statusCode, 200)
+  assert.equal(attempts, 2)
+  assert.equal(optionsSeen[1].agent, false)
+  assert.equal(optionsSeen[1].headers['Content-Length'], Buffer.byteLength(body))
+  assert.equal(optionsSeen[1].headers.Connection, 'close')
+})
+
+test('web request retries transient 5xx responses but leaves 4xx responses to the caller', async () => {
+  let attempts = 0
+  const requestFactory = (_url, _options, onResponse) => {
+    attempts++
+    const statusCode = attempts === 1 ? 503 : 200
+    const response = {
+      statusCode,
+      on(name, listener) {
+        if (name === 'data') queueMicrotask(() => listener(Buffer.from('{}')))
+        if (name === 'end') queueMicrotask(() => listener())
+        return response
+      },
+    }
+    return {
+      on: () => {},
+      end: () => queueMicrotask(() => onResponse(response)),
+      destroy: () => {},
+    }
+  }
+  const result = await requestCodexSearchForTest('{}', {}, new AbortController().signal, requestFactory)
+  assert.equal(result.statusCode, 200)
+  assert.equal(attempts, 2)
+  let clientAttempts = 0
+  const clientError = await requestCodexSearchForTest('{}', {}, new AbortController().signal, (_url, _options, onResponse) => {
+    clientAttempts++
+    const response = {
+      statusCode: 401,
+      on(name, listener) {
+        if (name === 'data') queueMicrotask(() => listener(Buffer.from('unauthorized')))
+        if (name === 'end') queueMicrotask(() => listener())
+        return response
+      },
+    }
+    return { on: () => {}, end: () => queueMicrotask(() => onResponse(response)), destroy: () => {} }
+  })
+  assert.equal(clientError.statusCode, 401)
+  assert.equal(clientAttempts, 1)
+})
