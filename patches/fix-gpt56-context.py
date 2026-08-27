@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""修复 pi-ai 内置 OpenAI API GPT-5.6 目录的上下文长度。
+"""修复 dsh 内置 pi-ai GPT-5.6 目录的上下文长度。
 
-OpenAI API / OpenRouter 的 GPT-5.6 目录使用 1050000；OpenAI Codex
-不是同一目录语义，官方 Codex CLI 当前模型目录明确使用 272000（并以
-max_context_window 单独表示可扩展上限）。因此 Codex 目录不在这里改写，
-由其上游值保持官方 Codex 语义。
+pi-ai 同时维护 OpenAI API 和 OpenAI Codex（ChatGPT OAuth）两套目录。
+两套目录都把 GPT-5.6 价格分层的 272000 阈值误当成了 contextWindow；
+DSH 的 OpenAI 账号默认走 openai-codex，因此只修改 openai.json 不会生效。
+这里统一把 dsh 内置 GPT-5.6 系列的上下文窗口恢复为 1050000。
+
+Codex preset 使用的官方 snake_case 模型目录由其自己的 patch 处理。
 """
 
 import json
@@ -13,27 +15,68 @@ import os
 
 CATALOGS = (
     "node_modules/@earendil-works/pi-ai/dist/providers/data/openai.json",
+    "node_modules/@earendil-works/pi-ai/dist/providers/data/openai-codex.json",
     "node_modules/@earendil-works/pi-ai/src/providers/data/openai.json",
+    "node_modules/@earendil-works/pi-ai/src/providers/data/openai-codex.json",
 )
 TARGET_CONTEXT_WINDOW = 1_050_000
+BROKEN_CONTEXT_WINDOW = 272_000
+
+
+def is_gpt56(model_id: str) -> bool:
+    return model_id == "gpt-5.6" or model_id.startswith("gpt-5.6-")
+
+
+def model_entries(doc: object):
+    # pi-ai catalogs are grouped dictionaries.
+    if isinstance(doc, dict):
+        for models in doc.values():
+            if not isinstance(models, dict):
+                continue
+            for model_id, model in models.items():
+                if isinstance(model_id, str):
+                    yield model_id, model
+
+
+def fix_catalog(catalog: str) -> int:
+    if not os.path.exists(catalog):
+        return 0
+
+    with open(catalog, "r", encoding="utf-8") as fp:
+        doc = json.load(fp)
+
+    changed = 0
+    for model_id, model in model_entries(doc):
+        if not isinstance(model, dict) or not is_gpt56(model_id):
+            continue
+
+        if model.get("contextWindow") == BROKEN_CONTEXT_WINDOW:
+            model["contextWindow"] = TARGET_CONTEXT_WINDOW
+            changed += 1
+
+    if changed:
+        with open(catalog, "w", encoding="utf-8") as fp:
+            json.dump(doc, fp, ensure_ascii=False)
+    return changed
 
 
 def main() -> None:
+    seen = set()
+    existing = 0
+    total = 0
     for catalog in CATALOGS:
-        if not os.path.exists(catalog):
+        if os.path.abspath(catalog) in seen:
             continue
-        with open(catalog, "r", encoding="utf-8") as fp:
-            doc = json.load(fp)
-        changed = []
-        for models in doc.values():
-            for model_id, model in models.items():
-                if model_id.startswith("gpt-5.6-") and model.get("contextWindow") == 272_000:
-                    model["contextWindow"] = TARGET_CONTEXT_WINDOW
-                    changed.append(model_id)
-        if changed:
-            with open(catalog, "w", encoding="utf-8") as fp:
-                json.dump(doc, fp, ensure_ascii=False)
-        print(f"dsh: fixed GPT-5.6 contextWindow in {catalog}: {len(changed)} entries")
+        seen.add(os.path.abspath(catalog))
+        if os.path.exists(catalog):
+            existing += 1
+        changed = fix_catalog(catalog)
+        total += changed
+        print(f"dsh: fixed GPT-5.6 context metadata in {catalog}: {changed} fields")
+
+    if existing == 0:
+        raise SystemExit("dsh: no GPT model catalogs found to patch")
+    print(f"dsh: fixed GPT-5.6 context metadata: {total} fields in {existing} catalogs")
 
 
 if __name__ == "__main__":

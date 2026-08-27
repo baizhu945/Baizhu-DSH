@@ -47,9 +47,19 @@ async function readCredential() {
 
 async function writeCredential(value) {
   await fs.mkdir(nodePath.dirname(credentialFile), { recursive: true, mode: 0o700 })
-  const temporary = `${credentialFile}.web-search.tmp`
-  await fs.writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600 })
-  await fs.rename(temporary, credentialFile)
+  const temporary = `${credentialFile}.web-search.${process.pid}.${randomUUID()}.tmp`
+  let installed = false
+  try {
+    await fs.writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600 })
+    await fs.rename(temporary, credentialFile)
+    installed = true
+  } finally {
+    if (!installed) {
+      try { await fs.unlink(temporary) } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+      }
+    }
+  }
 }
 
 function decodeJwtPayload(token) {
@@ -121,22 +131,41 @@ async function accessToken(signal) {
   return currentRefresh
 }
 
-function parseResponseBody(body) {
-  const trimmed = body.trim()
+function parseResponseEnvelope(body) {
+  const trimmed = String(body).trim()
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     const parsed = JSON.parse(trimmed)
-    return Array.isArray(parsed) ? parsed : parsed.output ?? []
+    if (Array.isArray(parsed)) {
+      return { output: parsed, answer: extractAnswer(parsed), sources: extractStructuredSources(parsed) }
+    }
+    const output = Array.isArray(parsed?.output) ? parsed.output : []
+    const answer = typeof parsed?.output === 'string'
+      ? parsed.output.trim()
+      : typeof parsed?.output_text === 'string'
+        ? parsed.output_text.trim()
+        : typeof parsed?.answer === 'string'
+          ? parsed.answer.trim()
+          : extractAnswer(output)
+    return {
+      output,
+      answer,
+      sources: extractStructuredSources(parsed?.results ?? parsed?.sources ?? parsed?.citations),
+    }
   }
 
   const output = []
+  const textParts = []
   let completedResponse
-  for (const line of body.split('\n')) {
+  let completedAnswer = ''
+  for (const line of String(body).split('\n')) {
     if (!line.startsWith('data:')) continue
     const payload = line.slice(5).trim()
     if (payload === '' || payload === '[DONE]') continue
     try {
       const event = JSON.parse(payload)
       if (event.type === 'response.output_item.done' && event.item !== undefined) output.push(event.item)
+      if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') textParts.push(event.delta)
+      if (event.type === 'response.output_text.done' && typeof event.text === 'string') completedAnswer = event.text
       if ((event.type === 'response.done' || event.type === 'response.completed') && event.response !== undefined) {
         completedResponse = event.response
       }
@@ -144,7 +173,40 @@ function parseResponseBody(body) {
       // Ignore non-JSON SSE comments and partial provider diagnostics.
     }
   }
-  if (Array.isArray(completedResponse?.output) && completedResponse.output.length > 0) return completedResponse.output
+  const completedOutput = mergeOutputItems(
+    output,
+    Array.isArray(completedResponse?.output) ? completedResponse.output : [],
+  )
+  const answer = typeof completedResponse?.output === 'string'
+    ? completedResponse.output.trim()
+    : extractAnswer(completedOutput) || completedAnswer.trim() || textParts.join('').trim()
+  return {
+    output: completedOutput,
+    answer,
+    sources: extractStructuredSources(completedResponse?.results ?? completedResponse?.sources ?? completedResponse?.citations),
+  }
+}
+
+function parseResponseBody(body) {
+  return parseResponseEnvelope(body).output
+}
+
+function mergeOutputItems(...groups) {
+  const output = []
+  const seen = new Set()
+  for (const group of groups) {
+    if (!Array.isArray(group)) continue
+    for (const item of group) {
+      let key
+      if (item !== null && typeof item === 'object' && typeof item.id === 'string') key = 'id:' + item.id
+      else {
+        try { key = JSON.stringify(item) } catch { key = undefined }
+      }
+      if (key !== undefined && seen.has(key)) continue
+      if (key !== undefined) seen.add(key)
+      output.push(item)
+    }
+  }
   return output
 }
 
@@ -250,6 +312,16 @@ function extractStructuredSources(results) {
   return sources
 }
 
+function mergeSources(...groups) {
+  const sources = []
+  const byUrl = new Map()
+  for (const group of groups) {
+    if (!Array.isArray(group)) continue
+    for (const source of group) addSource(sources, byUrl, source?.url, source?.title, source?.snippet ?? '')
+  }
+  return sources
+}
+
 function searchCommands(args) {
   const commands = {}
   for (const key of [
@@ -267,6 +339,11 @@ function searchCommands(args) {
   ]) {
     if (args[key] !== undefined) commands[key] = args[key]
   }
+  for (const key of ['search_query', 'image_query']) {
+    if (Array.isArray(commands[key]) && commands[key].length > 4) {
+      throw new Error(key + ' accepts at most four queries')
+    }
+  }
   return commands
 }
 
@@ -276,22 +353,23 @@ function searchCommands(args) {
  * reachable over IPv4; using https.request keeps the workaround local to this
  * Codex web tool and does not mutate the dsh process-wide DNS policy.
  */
-function requestCodexSearch(body, headers, signal) {
+function requestCodexSearch(body, headers, signal, requestFactory = nodeHttps.request) {
   return new Promise((resolve, reject) => {
     let settled = false
-    const timer = setTimeout(() => {
-      request.destroy(new Error('OpenAI Codex web search timed out'))
-    }, SEARCH_TIMEOUT_MS)
+    let timer
+    let abort
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer)
+      if (abort !== undefined) signal.removeEventListener('abort', abort)
+    }
     const finish = (error, value) => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
-      signal.removeEventListener('abort', abort)
+      cleanup()
       if (error !== undefined) reject(error)
       else resolve(value)
     }
-    const abort = () => request.destroy(new Error('web.run was aborted'))
-    const request = nodeHttps.request(CODEX_SEARCH_URL, {
+    const request = requestFactory(CODEX_SEARCH_URL, {
       method: 'POST',
       headers,
       lookup(hostname, options, callback) {
@@ -299,21 +377,51 @@ function requestCodexSearch(body, headers, signal) {
       },
     }, response => {
       const chunks = []
-      response.on('data', chunk => chunks.push(Buffer.from(chunk)))
+      let responseBytes = 0
+      response.on('data', chunk => {
+        const value = Buffer.from(chunk)
+        responseBytes += value.byteLength
+        if (responseBytes > MAX_RESPONSE_BYTES) {
+          const error = new Error('OpenAI Codex web search response exceeded the size limit')
+          response.destroy(error)
+          finish(error)
+          return
+        }
+        chunks.push(value)
+      })
       response.on('error', error => finish(error))
+      response.on('aborted', () => finish(new Error('OpenAI Codex web search response was aborted')))
       response.on('end', () => finish(undefined, {
         statusCode: response.statusCode ?? 0,
         body: Buffer.concat(chunks).toString('utf8'),
       }))
     })
     request.on('error', error => finish(error))
-    request.setTimeout(SEARCH_TIMEOUT_MS, () => request.destroy(new Error('OpenAI Codex web search timed out')))
+    abort = () => {
+      const reason = signal.reason
+      const error = signal.aborted
+        ? (reason instanceof Error ? reason : new Error(reason === undefined ? 'web.run was aborted' : String(reason)))
+        : new Error('OpenAI Codex web search timed out')
+      finish(error)
+      try { request.destroy(error) } catch {
+        // The request may already have synchronously closed while the abort
+        // callback was racing its error event. `finish` owns the rejection.
+      }
+    }
+    timer = setTimeout(abort, SEARCH_TIMEOUT_MS)
     if (signal.aborted) {
       abort()
       return
     }
     signal.addEventListener('abort', abort, { once: true })
-    request.end(body)
+    try {
+      request.end(body)
+    } catch (error) {
+      finish(error)
+      try { request.destroy(error) } catch {
+        // Synchronous request implementations may throw before destroy.
+      }
+    }
   })
 }
 
@@ -339,18 +447,17 @@ async function searchCodex(commands, exec) {
       max_output_tokens: 10_000,
     }), headers, exec.signal)
   const body = response.body
-  if (body.length > MAX_RESPONSE_BYTES) throw new Error('OpenAI Codex web search response exceeded the size limit')
   if (response.statusCode < 200 || response.statusCode >= 300) {
     throw new Error(`OpenAI Codex web.run failed (HTTP ${response.statusCode}): ${redact(body.slice(0, 400), auth.token)}`)
   }
   let parsed
   try {
-    parsed = JSON.parse(body)
+    parsed = parseResponseEnvelope(body)
   } catch (error) {
     throw new Error(`OpenAI Codex web.run returned invalid JSON: ${String(error)}`)
   }
-  const answer = typeof parsed?.output === 'string' ? parsed.output.trim() : ''
-  const allSources = extractStructuredSources(parsed?.results)
+  const answer = parsed.answer
+  const allSources = mergeSources(extractSources(parsed.output), parsed.sources)
   if (answer === '' && allSources.length === 0) throw new Error('OpenAI Codex web search returned no answer or sources')
   if (answer !== '') return answer
   return allSources.map(source => `- [${sourceLabel(source)}](${source.url})`).join('\n')
@@ -525,3 +632,5 @@ export const inject = ['tools']
 export function apply(ctx) {
   registerWebSearch(ctx)
 }
+
+export { parseResponseBody, parseResponseEnvelope, searchCommands, requestCodexSearch as requestCodexSearchForTest }

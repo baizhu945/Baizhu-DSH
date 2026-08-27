@@ -86,10 +86,10 @@ let
       # 所以列表永远无法自愈。这里在构建期把正式版补进内置目录数据,
       # 重启 dsh 后 4 个版本(flash/pro × 预览/正式)都会出现在模型列表。
       python3 ${./patches/inject-openrouter-models.py} ${./patches/openrouter-extra-models.json}
-      # pi-ai 0.82.1 的 OpenAI API 目录把 GPT-5.6 的 272000 价格分层阈值
-      # 误当成上下文上限，修正 OpenAI API 目录；OpenAI Codex 目录保留
-      # 官方 Codex CLI 的 272000 值，由 Codex preset 的官方 catalog 驱动
-      # max_context_window 等模型能力。
+      # pi-ai 0.82.1 的 OpenAI API 与 OpenAI Codex 目录都把 GPT-5.6 的
+      # 272000 价格分层阈值误当成上下文上限。fix-gpt56-context.py 会同时
+      # 修正两个 provider 的目录；OpenAI 账号默认走 openai-codex，不能只
+      # 修改 openai.json，否则 Web 中仍会显示/记录 272K。
       python3 ${./patches/fix-gpt56-context.py}
     '';
 

@@ -6,10 +6,22 @@ let
   # and capability fields are read by codex-model-parity.mjs per request, so a
   # model switch changes the model-facing contract without touching other
   # agent presets or the host model registry.
-  codexModels = pkgs.fetchurl {
+  codexModelsSource = pkgs.fetchurl {
     url = "https://raw.githubusercontent.com/openai/codex/70b5cfc73b25458a7af225d24b16ef4794f8f380/codex-rs/models-manager/models.json";
     hash = "sha256-6w17ml3K8QOJXF+KFMFrJp30bgObN1pVupf2I4VC0u0=";
   };
+
+  # The upstream catalog exposes GPT-5.6 with a 272K base window and an
+  # 872K extension cap.  DSH's pi-ai provider is configured for the full 1M
+  # context, so patch the preset-owned copy too; editing ~/.dsh directly would
+  # be overwritten by Home Manager on the next activation.
+  codexModels = pkgs.runCommand "dsh-codex-models-gpt56-context" {
+    nativeBuildInputs = [ pkgs.python3 ];
+  } ''
+    cp ${codexModelsSource} $out
+    chmod u+w $out
+    python3 ${./patches/fix-gpt56-context.py} "$out"
+  '';
 
   # Keep the Luna prompt as a local fallback for model ids not present in the
   # pinned official catalog (for example a provider-local preview model).

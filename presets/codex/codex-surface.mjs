@@ -332,8 +332,8 @@ function shellOutput(result) {
 function renderShellResult(value) {
   const markers = []
   if (value.timed_out) markers.push(`[timed out after ${value.timeout_ms}ms]`)
-  if (value.signal !== null) markers.push(`[killed by signal: ${value.signal}]`)
-  if (value.exit_code !== null) markers.push(`[exit code: ${value.exit_code}]`)
+  if (value.signal !== null && value.signal !== undefined) markers.push(`[killed by signal: ${value.signal}]`)
+  if (value.exit_code !== null && value.exit_code !== undefined) markers.push(`[exit code: ${value.exit_code}]`)
   return `${value.output}${markers.length > 0 ? `\n${markers.join('\n')}` : ''}`
 }
 
@@ -377,17 +377,70 @@ const PTY_BACKEND = 'shell'
 const execSessions = new Map()
 let nextExecSessionId = 0
 
-function outputFromOperation(operation, echoedInput, marker) {
-  try {
-    const cleaned = cleanTerminalOutput(operation.readOutput().delta, echoedInput)
-    if (typeof marker !== 'string') return { output: cleaned }
-    const markerPattern = new RegExp(`(?:^|\\n)${marker}(-?\\d+)(?:\\n|$)`)
-    const match = markerPattern.exec(cleaned)
-    if (match === null) return { output: cleaned }
-    return {
-      output: cleaned.replace(match[0], ''),
-      exitCode: Number(match[1]),
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^$()|[\]\\]/g, '\\$&')
+}
+
+function terminalProtocolSuffix(text, marker) {
+  const candidates = []
+  const prompt = 'dsh> '
+  for (const prefix of [prompt, typeof marker === 'string' ? '\n' + marker : undefined]) {
+    if (prefix === undefined) continue
+    for (let length = 1; length < prefix.length && length <= text.length; length++) {
+      if (text.endsWith(prefix.slice(0, length))) candidates.push(prefix.slice(0, length))
     }
+  }
+  if (typeof marker === 'string') {
+    const partialMarker = new RegExp('(?:^|\\n)' + escapeRegExp(marker) + '-?\\d*$')
+    const match = partialMarker.exec(text)
+    if (match !== null && match[0].length > 0) candidates.push(match[0])
+  }
+  return candidates.sort((left, right) => right.length - left.length)[0] ?? ''
+}
+
+function outputFromOperation(record, operation, final = false) {
+  try {
+    const read = operation.readOutput()
+    record.truncated ||= read.truncated
+    const raw = String(read.delta).replaceAll('\r', '')
+    let outputChunk = raw
+    if (typeof record.echoedInput === 'string') {
+      const echoPrefix = record.echoedInput.endsWith('\n') ? record.echoedInput : record.echoedInput + '\n'
+      const echoCandidate = (record.echoTail ?? '') + raw
+      if (echoCandidate.startsWith(echoPrefix)) {
+        outputChunk = echoCandidate.slice(echoPrefix.length)
+        record.echoTail = ''
+        record.echoedInput = undefined
+      } else if (echoPrefix.startsWith(echoCandidate)) {
+        record.echoTail = echoCandidate
+        outputChunk = ''
+      } else {
+        outputChunk = echoCandidate
+        record.echoTail = ''
+        record.echoedInput = undefined
+      }
+    }
+    const cleaned = cleanTerminalOutput(outputChunk, undefined)
+    const combined = record.protocolTail + cleaned
+    record.protocolTail = ''
+    if (typeof record.marker !== 'string') return { output: combined }
+    const normalized = cleanTerminalOutput(combined, undefined)
+    const markerPattern = new RegExp('(?:^|\\n)' + escapeRegExp(record.marker) + '(-?\\d+)(?:\\n|$)')
+    const match = markerPattern.exec(normalized)
+    if (match !== null) {
+      return {
+        output: normalized.slice(0, match.index) + normalized.slice(match.index + match[0].length),
+        exitCode: Number(match[1]),
+      }
+    }
+    if (!final) {
+      const suffix = terminalProtocolSuffix(normalized, record.marker)
+      if (suffix !== '') {
+        record.protocolTail = suffix
+        return { output: normalized.slice(0, normalized.length - suffix.length) }
+      }
+    }
+    return { output: normalized }
   } catch {
     return { output: '' }
   }
@@ -401,7 +454,7 @@ function cleanTerminalOutput(text, echoedInput) {
     const echoPrefix = echoedInput.endsWith('\n') ? echoedInput : `${echoedInput}\n`
     if (cleaned.startsWith(echoPrefix)) cleaned = cleaned.slice(echoPrefix.length)
   }
-  return cleaned.replace(/dsh> ?$/, '')
+  return cleaned.replace(/(?:\n)?dsh> ?$/, '')
 }
 
 function boundedOutput(output, maxOutputTokens) {
@@ -416,26 +469,59 @@ function approximateTokens(output) {
 
 async function waitForTerminalOperation(operation, yieldTimeMs, signal) {
   let timer
-  const timeout = new Promise(resolve => {
-    timer = setTimeout(() => resolve({ kind: 'yield' }), yieldTimeMs)
-  })
+  let onAbort
   try {
+    signal.throwIfAborted()
+    const timeout = new Promise(resolve => {
+      timer = setTimeout(() => resolve({ kind: 'yield' }), yieldTimeMs)
+    })
+    const aborted = new Promise((_, reject) => {
+      onAbort = () => reject(signal.reason ?? new Error('tool call aborted'))
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
     return await Promise.race([
-      operation.done.then(result => ({ kind: 'done', result })),
+      operation.done.then(result => ({ kind: 'done', result }), error => { throw error }),
       timeout,
+      aborted,
     ])
   } finally {
     if (timer !== undefined) clearTimeout(timer)
-    signal.throwIfAborted()
+    if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
   }
 }
 
+function terminalOutputText(value) {
+  const output = typeof value?.output === 'string' ? value.output : ''
+  const markers = []
+  if (typeof value?.exit_code === 'number') markers.push('[exit code: ' + String(value.exit_code) + ']')
+  if (value?.session_id !== undefined) markers.push('[session ID: ' + String(value.session_id) + ']')
+  const body = output.length > 0 ? output : markers.length > 0 ? '(no output)' : ''
+  return markers.length === 0 ? body : body + String.fromCharCode(10) + markers.join(String.fromCharCode(10))
+}
+
+function prependTerminalOutput(value, prefix, maxOutputTokens) {
+  if (prefix.length === 0) return value
+  const output = prefix + (value.output.length === 0 ? '' : String.fromCharCode(10) + value.output)
+  return { ...value, output: boundedOutput(output, maxOutputTokens), original_token_count: approximateTokens(output) }
+}
+
 function terminalOutputValue(record, output, elapsedMs, settled, maxOutputTokens, exitCode) {
+  const facts = []
+  const result = settled.kind === 'done' ? settled.result : undefined
+  if (record.truncated || result?.truncated === true) facts.push('[output truncated by host PTY bound]')
+  if (result?.waitReason === 'timeout') facts.push('[timed out waiting for terminal readiness]')
+  if (result?.sessionStatus.kind === 'exited' && result.sessionStatus.signal !== null) {
+    facts.push('[killed by signal: ' + String(result.sessionStatus.signal) + ']')
+  }
+  if (result?.sessionStatus.kind === 'exited' && result.sessionStatus.signal === null && result.sessionStatus.exitCode === null) {
+    facts.push('[process exited without an exit code]')
+  }
+  const outputWithFacts = facts.length === 0 ? output : output + (output.length === 0 ? '' : String.fromCharCode(10)) + facts.join(String.fromCharCode(10))
   const value = {
-    chunk_id: `${record.id}-${++record.chunk}`,
+    chunk_id: String(record.id) + '-' + String(++record.chunk),
     wall_time_seconds: elapsedMs / 1000,
     original_token_count: approximateTokens(output),
-    output: boundedOutput(output, maxOutputTokens),
+    output: boundedOutput(outputWithFacts, maxOutputTokens),
   }
   if (typeof exitCode === 'number') return { ...value, exit_code: exitCode }
   if (settled.kind === 'yield') return { ...value, session_id: record.id }
@@ -462,9 +548,17 @@ async function closeExecSession(ctx, record) {
 }
 
 async function finishTerminalOperation(ctx, record, operation, startedAt, settled, maxOutputTokens) {
-  const extracted = outputFromOperation(operation, record.echoedInput, record.marker)
+  const extracted = outputFromOperation(
+    record,
+    operation,
+    settled.kind === 'done' && settled.result.sessionStatus.kind === 'exited',
+  )
   const output = extracted.output
   const exitCode = extracted.exitCode
+  if (settled.kind === 'done') {
+    record.echoedInput = undefined
+    record.echoTail = ''
+  }
   if (typeof exitCode === 'number') {
     record.echoedInput = undefined
     record.marker = undefined
@@ -527,7 +621,9 @@ async function waitForPipeProcess(process, yieldTimeMs, signal) {
       onAbort = () => reject(signal.reason ?? new Error('tool call aborted'))
       signal.addEventListener('abort', onAbort, { once: true })
     })
-    return await Promise.race([process.done.then(() => 'done'), timeout, aborted])
+    const result = await Promise.race([process.done.then(() => 'done'), timeout, aborted])
+    signal.throwIfAborted()
+    return result
   } finally {
     if (timer !== undefined) clearTimeout(timer)
     if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
@@ -537,7 +633,13 @@ async function waitForPipeProcess(process, yieldTimeMs, signal) {
 function pipeOutput(record, elapsedMs, maxOutputTokens) {
   const read = record.process.readOutput()
   const markers = []
-  if (read.lossy) markers.push('[output truncated by host collection bound]')
+  if (read.lossy) {
+    const spill = [read.stdoutSpillPath, read.stderrSpillPath].filter(Boolean).join(', ')
+    markers.push('[output truncated by host collection bound' + (spill.length > 0 ? '; full output: ' + spill : '') + ']')
+  }
+  if (record.process.signal !== null && record.process.signal !== undefined) {
+    markers.push('[killed by signal: ' + String(record.process.signal) + ']')
+  }
   if (record.process.sandbox?.denied === true) {
     markers.push(`[sandbox: file access denied under ${record.process.sandbox.mode} mode]`)
   }
@@ -561,9 +663,9 @@ async function startPipeExec(ctx, args, exec, policy) {
     dshEnv: ctx.shellEnv.collect(exec),
     sandboxPolicy: policy,
   }))
-  const record = { kind: 'pipe', id, chunk: 0, owner: agent, process }
+  const record = { kind: 'pipe', id, chunk: 0, owner: agent, process, startedAt: Date.now() }
   execSessions.set(id, record)
-  const startedAt = Date.now()
+  const startedAt = record.startedAt
   try {
     await waitForPipeProcess(process, execYieldTime(args), exec.signal)
     const value = pipeOutput(record, Date.now() - startedAt, args.max_output_tokens)
@@ -576,6 +678,12 @@ async function startPipeExec(ctx, args, exec, policy) {
 }
 
 function registerExecCommand(ctx) {
+  ctx.on('agent/disposed', ({ agent }) => {
+    for (const record of execSessions.values()) {
+      if (record.owner !== agent) continue
+      void closeExecSession(ctx, record).catch(() => undefined)
+    }
+  })
   ctx.systemPrompt.section({
     name: 'tool:exec',
     order: 105,
@@ -618,7 +726,7 @@ function registerExecCommand(ctx) {
           original_token_count: { type: 'number' },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: value.output }],
+      render: (_args, value) => [{ type: 'text', text: terminalOutputText(value) }],
       presentationMeta: (_args, value) => ({
         ...(typeof value.exit_code === 'number' ? { exitCode: value.exit_code } : {}),
         ...(value.session_id !== undefined ? { sessionId: value.session_id } : {}),
@@ -660,9 +768,22 @@ function registerExecCommand(ctx) {
         await ctx.terminals.kill(agent, spawned.sessionId, 'Codex exec setup failed')
         throw error
       }
-      const record = { kind: 'pty', id, chunk: 0, owner: agent, ptyId: spawned.sessionId, operation, echoedInput: command, marker }
+      const record = {
+        kind: 'pty',
+        id,
+        chunk: 0,
+        owner: agent,
+        ptyId: spawned.sessionId,
+        operation,
+        echoedInput: command,
+        echoTail: '',
+        marker,
+        protocolTail: '',
+        truncated: false,
+        startedAt: Date.now(),
+      }
       execSessions.set(id, record)
-      const startedAt = Date.now()
+      const startedAt = record.startedAt
       try {
         const settled = await waitForTerminalOperation(operation, execYieldTime(args), exec.signal)
         return finishTerminalOperation(ctx, record, operation, startedAt, settled, args.max_output_tokens)
@@ -708,7 +829,7 @@ function registerWriteStdin(ctx) {
           original_token_count: { type: 'number' },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: value.output }],
+      render: (_args, value) => [{ type: 'text', text: terminalOutputText(value) }],
     },
     async execute(args, exec) {
       const agent = agentOf(exec)
@@ -720,7 +841,7 @@ function registerWriteStdin(ctx) {
       if (record === undefined || record.owner !== agent) throw new Error(`unknown exec session ${String(args.session_id)}`)
       const chars = args.chars ?? ''
       if (typeof chars !== 'string') throw new Error('chars must be a string')
-      const startedAt = Date.now()
+      const startedAt = record.startedAt
       if (record.kind === 'pipe') {
         if (chars !== '') {
           if (chars === '\u0003') record.process.kill()
@@ -731,11 +852,15 @@ function registerWriteStdin(ctx) {
         if (record.process.status !== 'running') execSessions.delete(record.id)
         return value
       }
+      let carriedOutput = ''
       if (record.operation !== undefined) {
         const operation = record.operation
+        const interrupt = chars === String.fromCharCode(3)
+        if (interrupt) operation.cancel()
         const settled = await waitForTerminalOperation(operation, stdinYieldTime(chars, args.yield_time_ms), exec.signal)
         const value = await finishTerminalOperation(ctx, record, operation, startedAt, settled, args.max_output_tokens)
-        if (!execSessions.has(args.session_id) || settled.kind === 'yield' || chars === '' || record.operation !== undefined) return value
+        if (!execSessions.has(args.session_id) || settled.kind === 'yield' || chars === '' || interrupt || record.operation !== undefined) return value
+        carriedOutput = value.output
       }
       const operation = ctx.terminals.startSend(agent, record.ptyId, {
         text: chars,
@@ -745,7 +870,8 @@ function registerWriteStdin(ctx) {
       record.operation = operation
       record.echoedInput = chars
       const settled = await waitForTerminalOperation(operation, stdinYieldTime(chars, args.yield_time_ms), exec.signal)
-      return finishTerminalOperation(ctx, record, operation, startedAt, settled, args.max_output_tokens)
+      const value = await finishTerminalOperation(ctx, record, operation, startedAt, settled, args.max_output_tokens)
+      return prependTerminalOutput(value, carriedOutput, args.max_output_tokens)
     },
     presentCall(args) {
       return { card: 'terminal', title: args.chars || '(poll session)', description: `Session ${args.session_id}` }
@@ -848,12 +974,29 @@ function patchPath(header) {
 }
 
 function patchControlLine(line) {
-  return String(line).trim()
+  const value = String(line)
+  // A leading diff marker is content, even when the content happens to look
+  // like an apply_patch control line. Only unprefixed lines are controls.
+  return value !== '' && [' ', '+', '-'].includes(value[0]) ? value : value.trim()
 }
 
 function isHunkHeader(line) {
   const normalized = patchControlLine(line)
   return normalized === '@@' || normalized.startsWith('@@ ')
+}
+
+function hunkContext(line) {
+  if (!isHunkHeader(line)) return undefined
+  const normalized = patchControlLine(line)
+  const suffix = normalized.slice(2).trim()
+  if (suffix === '') return undefined
+  // Accept both Codex's compact `@@ function` form and standard unified
+  // headers such as `@@ -10,2 +10,3 @@ function`; only the trailing
+  // function/class context is an anchor, not the numeric range itself.
+  const unified = /^-[0-9][^+]*\+[0-9][^@]*@@(?:\s+(.*))?$/.exec(suffix)
+  if (unified !== null) return unified[1]?.trim() || undefined
+  if (/^-[0-9].*\+[0-9]/.test(suffix)) return undefined
+  return suffix
 }
 
 function isPatchLine(line) {
@@ -933,13 +1076,10 @@ function applyHunks(original, patchLines, path) {
     }
     let context
     if (isHunkHeader(first)) {
-      const normalized = patchControlLine(first)
-      const suffix = normalized.slice(2).trim()
-      if (suffix !== '' && !/^-[0-9].*\+[0-9]/.test(suffix)) context = suffix
+      context = hunkContext(first)
       cursor++
     } else if (!isPatchLine(first)) {
-      cursor++
-      continue
+      throw new Error('invalid apply_patch hunk for ' + path)
     }
     const hunk = []
     let endOfFile = false
@@ -959,6 +1099,7 @@ function applyHunks(original, patchLines, path) {
         cursor++
         continue
       }
+      if (endOfFile) throw new Error('apply_patch expected a new @@ hunk after an end-of-file marker for ' + path)
       if (!isPatchLine(line)) throw new Error('invalid apply_patch hunk for ' + path)
       hunk.push(line)
       cursor++
@@ -1141,6 +1282,7 @@ function patchBody(patch) {
 function parsePatchOperations(patch) {
   const lines = patchBody(patch).split('\n')
   const operations = []
+  let environmentIdSeen = false
   let cursor = 0
   while (cursor < lines.length) {
     const header = lines[cursor]
@@ -1151,6 +1293,8 @@ function parsePatchOperations(patch) {
     }
     if (normalizedHeader.startsWith('*** Environment ID:')) {
       if (normalizedHeader.slice('*** Environment ID:'.length).trim() === '') throw new Error('apply_patch environment_id cannot be empty')
+      if (environmentIdSeen) throw new Error('apply_patch environment_id can only be specified once')
+      environmentIdSeen = true
       cursor++
       continue
     }
@@ -1227,88 +1371,231 @@ function previewPatchDiffs(patch) {
   return diffs
 }
 
-async function writePatchedFile(ctx, exec, target, content, expectedVersion, sandboxPolicy, explicitIntent) {
+async function writePatchedFile(ctx, exec, target, content, expectedVersion, sandboxPolicy, explicitIntent, signal = exec.signal) {
   const intent = await ctx.waterfall('fs/write-intent', target, exec, () => (
     explicitIntent ?? (expectedVersion === undefined
       ? undefined
       : { kind: 'replaceIfVersion', version: expectedVersion })
   ))
-  const outcome = await ctx.fs.writeText(target, content, intent, exec.signal, sandboxPolicy)
-  ctx.emit('fs/observed', target, { kind: 'present', version: outcome.version }, exec)
+  const outcome = await ctx.fs.writeText(target, content, intent, signal, sandboxPolicy)
   return outcome
 }
 
 async function preflightPatch(ctx, exec, patch) {
   const agent = agentOf(exec)
   const operations = parsePatchOperations(patch)
-  const prepared = []
+  if (operations.length === 0) throw new Error('apply_patch contains no file operations')
+  const resolved = []
   for (const operation of operations) {
     const target = await ctx.fs.resolve(operation.path, { cwd: cwdOf(agent), signal: exec.signal })
+    let destination
+    if (operation.moveTo !== undefined) {
+      destination = await ctx.fs.resolve(operation.moveTo, { cwd: cwdOf(agent), signal: exec.signal })
+      if (destination.targetKey === target.targetKey) throw new Error('apply_patch cannot move a file onto itself: ' + operation.path)
+    }
+    resolved.push({ operation, target, destination })
+  }
+
+  // Official apply_patch permits ordered operations on the same path (for
+  // example Add -> Update -> Move). Resolve and transform a virtual file
+  // state without writing anything; the execution pass below replaces the
+  // virtual version with each real version returned by dsh-tool-fs.
+  const virtual = new Map()
+  const stateFor = async target => {
+    const key = String(target.targetKey ?? target.displayPath)
+    const existing = virtual.get(key)
+    if (existing !== undefined) return existing
+    const info = await ctx.fs.stat(target, exec.signal)
+    if (info === undefined) {
+      const state = { exists: false, type: undefined, version: undefined, content: undefined, info: undefined, virtual: false }
+      virtual.set(key, state)
+      ctx.emit('fs/observed', target, { kind: 'absent' }, exec)
+      return state
+    }
+    let content
+    if (info.type === 'file') {
+      content = await ctx.fs.readText(target, exec.signal)
+      if (typeof content !== 'string') throw new Error('apply_patch could not read regular file: ' + target.displayPath)
+      ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec)
+    }
+    const state = { exists: true, type: info.type, version: info.version, content, info, virtual: false }
+    virtual.set(key, state)
+    return state
+  }
+  const publish = (target, content) => {
+    const key = String(target.targetKey ?? target.displayPath)
+    virtual.set(key, { exists: true, type: 'file', version: undefined, content, info: undefined, virtual: true })
+  }
+  const remove = target => {
+    const key = String(target.targetKey ?? target.displayPath)
+    virtual.set(key, { exists: false, type: undefined, version: undefined, content: undefined, info: undefined, virtual: true })
+  }
+  const prepared = []
+  for (const { operation, target, destination } of resolved) {
+    const source = await stateFor(target)
     if (operation.kind === 'add') {
       if (operation.body.length === 0 || operation.body.some(line => patchControlLine(line) === '*** End of File' || !line.startsWith('+'))) {
         throw new Error('invalid apply_patch Add File body for ' + operation.path)
       }
-      const existing = await ctx.fs.stat(target, exec.signal)
-      if (existing !== undefined) throw new Error('apply_patch Add File target already exists: ' + operation.path)
-      ctx.emit('fs/observed', target, { kind: 'absent' }, exec)
+      if (source.exists) throw new Error('apply_patch Add File target already exists: ' + operation.path)
       const content = operation.body.map(line => line.slice(1)).join('\n') + '\n'
       prepared.push({ ...operation, target, content })
+      publish(target, content)
       continue
     }
-    const info = await ctx.fs.stat(target, exec.signal)
-    if (info === undefined || info.type !== 'file') {
+    if (!source.exists || source.type !== 'file') {
       throw new Error(`apply_patch target is not a regular file: ${operation.path}`)
     }
-    const original = await ctx.fs.readText(target, exec.signal)
-    ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec)
+    const original = source.content
     if (operation.kind === 'delete') {
       if (operation.body.some(line => line.trim() !== '' && patchControlLine(line) !== '*** End of File')) {
         throw new Error('invalid apply_patch Delete File body for ' + operation.path)
       }
-      prepared.push({ ...operation, target, info, original })
+      prepared.push({ ...operation, target, info: source.info, original })
+      remove(target)
       continue
     }
     const content = applyHunks(original, operation.body, target.displayPath)
-    const destination = operation.moveTo === undefined
-      ? undefined
-      : await ctx.fs.resolve(operation.moveTo, { cwd: cwdOf(agent), signal: exec.signal })
     if (destination !== undefined && destination.targetKey === target.targetKey) {
       throw new Error('apply_patch cannot move a file onto itself: ' + operation.path)
     }
     let destinationInfo
     let destinationOriginal
+    let destinationWasPresent = false
     if (destination !== undefined) {
-      destinationInfo = await ctx.fs.stat(destination, exec.signal)
-      if (destinationInfo !== undefined && destinationInfo.type !== 'file') {
+      const destinationState = await stateFor(destination)
+      destinationWasPresent = destinationState.exists
+      if (destinationState.exists && destinationState.type !== 'file') {
         throw new Error('apply_patch move destination is not a regular file: ' + operation.moveTo)
       }
-      if (destinationInfo !== undefined) {
-        destinationOriginal = await ctx.fs.readText(destination, exec.signal)
-        ctx.emit('fs/observed', destination, { kind: 'present', version: destinationInfo.version }, exec)
-      } else {
-        ctx.emit('fs/observed', destination, { kind: 'absent' }, exec)
-      }
+      destinationInfo = destinationState.info
+      destinationOriginal = destinationState.content
     }
-    prepared.push({ ...operation, target, destination, destinationInfo, destinationOriginal, info, original, content })
+    prepared.push({ ...operation, target, destination, destinationInfo, destinationOriginal, destinationWasPresent, info: source.info, original, content })
+    if (destination === undefined) publish(target, content)
+    else {
+      publish(destination, content)
+      remove(target)
+    }
   }
   return prepared
 }
 
-async function rollbackMoveDestination(ctx, exec, operation, written, sandboxPolicy) {
-  if (operation.destinationInfo === undefined) {
-    await ctx.fs.deleteFile(operation.destination, { version: written.version }, exec.signal, sandboxPolicy)
-    ctx.emit('fs/observed', operation.destination, { kind: 'absent' }, exec)
+async function rollbackPatchMutation(ctx, exec, mutation, sandboxPolicy, state) {
+  // Rollback deliberately does not reuse the tool-call signal. Cancellation
+  // must stop new forward mutations, but must not strand files already changed
+  // by this patch. Every undo remains version-guarded, so an unrelated writer
+  // wins safely instead of being overwritten by recovery.
+  const rollbackSignal = undefined
+  const keyFor = target => String(target.targetKey ?? target.displayPath)
+  const currentVersion = (target, fallback) => {
+    const current = state.get(keyFor(target))
+    return current?.exists ? current.version : fallback
+  }
+  if (mutation.kind === 'add') {
+    await ctx.fs.deleteFile(mutation.target, { version: currentVersion(mutation.target, mutation.written.version) }, rollbackSignal, sandboxPolicy)
+    state.set(keyFor(mutation.target), { exists: false, version: undefined })
+    ctx.emit('fs/observed', mutation.target, { kind: 'absent' }, exec)
     return
   }
-  const restored = await writePatchedFile(
-    ctx,
-    exec,
-    operation.destination,
-    operation.destinationOriginal,
-    written.version,
-    sandboxPolicy,
-  )
-  ctx.emit('fs/observed', operation.destination, { kind: 'present', version: restored.version }, exec)
+  if (mutation.kind === 'update') {
+    const expectedVersion = currentVersion(mutation.target, mutation.written.version)
+    const written = await writePatchedFile(
+      ctx,
+      exec,
+      mutation.target,
+      mutation.operation.original,
+      expectedVersion,
+      sandboxPolicy,
+      { kind: 'replaceIfVersion', version: expectedVersion },
+      rollbackSignal,
+    )
+    state.set(keyFor(mutation.target), { exists: true, version: written.version })
+    ctx.emit('fs/observed', mutation.target, { kind: 'present', version: written.version }, exec)
+    return
+  }
+  if (mutation.kind === 'delete') {
+    const written = await writePatchedFile(
+      ctx,
+      exec,
+      mutation.target,
+      mutation.operation.original,
+      undefined,
+      sandboxPolicy,
+      { kind: 'createIfAbsent' },
+      rollbackSignal,
+    )
+    state.set(keyFor(mutation.target), { exists: true, version: written.version })
+    ctx.emit('fs/observed', mutation.target, { kind: 'present', version: written.version }, exec)
+    return
+  }
+  if (mutation.kind !== 'move') throw new Error('unknown apply_patch rollback mutation: ' + String(mutation.kind))
+
+  const errors = []
+  if (mutation.sourceDeleted) {
+    try {
+      const written = await writePatchedFile(
+        ctx,
+        exec,
+        mutation.operation.target,
+        mutation.operation.original,
+        undefined,
+        sandboxPolicy,
+        { kind: 'createIfAbsent' },
+        rollbackSignal,
+      )
+      state.set(keyFor(mutation.operation.target), { exists: true, version: written.version })
+      ctx.emit('fs/observed', mutation.operation.target, { kind: 'present', version: written.version }, exec)
+    } catch (error) {
+      errors.push(error)
+    }
+  }
+  try {
+    if (mutation.operation.destinationWasPresent !== true) {
+      const expectedVersion = currentVersion(mutation.operation.destination, mutation.destinationWritten.version)
+      await ctx.fs.deleteFile(
+        mutation.operation.destination,
+        { version: expectedVersion },
+        rollbackSignal,
+        sandboxPolicy,
+      )
+      state.set(keyFor(mutation.operation.destination), { exists: false, version: undefined })
+      ctx.emit('fs/observed', mutation.operation.destination, { kind: 'absent' }, exec)
+    } else {
+      const expectedVersion = currentVersion(mutation.operation.destination, mutation.destinationWritten.version)
+      const written = await writePatchedFile(
+        ctx,
+        exec,
+        mutation.operation.destination,
+        mutation.operation.destinationOriginal,
+        expectedVersion,
+        sandboxPolicy,
+        { kind: 'replaceIfVersion', version: expectedVersion },
+        rollbackSignal,
+      )
+      state.set(keyFor(mutation.operation.destination), { exists: true, version: written.version })
+      ctx.emit('fs/observed', mutation.operation.destination, { kind: 'present', version: written.version }, exec)
+    }
+  } catch (error) {
+    errors.push(error)
+  }
+  if (errors.length > 0) throw new AggregateError(errors, 'move rollback failed')
+}
+
+async function rollbackPatchMutations(ctx, exec, mutations, sandboxPolicy, state = new Map()) {
+  const errors = []
+  // Recovery is a new filesystem transaction. Keep attribution/call metadata
+  // for observers, but detach the forward call's aborted signal so a
+  // cancellation-aware waterfall cannot veto the undo itself.
+  const rollbackExec = { ...exec, signal: new AbortController().signal }
+  for (let index = mutations.length - 1; index >= 0; index -= 1) {
+    try {
+      await rollbackPatchMutation(ctx, rollbackExec, mutations[index], sandboxPolicy, state)
+    } catch (error) {
+      errors.push(error)
+    }
+  }
+  return errors
 }
 
 async function applyPatch(ctx, exec, patch) {
@@ -1321,93 +1608,127 @@ async function applyPatch(ctx, exec, patch) {
   const sandboxPolicy = await patchSandboxPolicy(ctx, exec, policyTargets)
   const results = []
   const diffs = []
-  for (const operation of operations) {
-    if (operation.kind === 'add') {
-      const written = await writePatchedFile(
-        ctx, exec, operation.target, operation.content, undefined, sandboxPolicy,
-        { kind: 'createIfAbsent' },
+  const mutations = []
+  const runtime = new Map()
+  const keyFor = target => String(target.targetKey ?? target.displayPath)
+  const stateFor = (target, fallbackInfo) => {
+    const key = keyFor(target)
+    const state = runtime.get(key)
+    if (state !== undefined) return state
+    return { exists: fallbackInfo !== undefined, version: fallbackInfo?.version }
+  }
+  const versionFor = (target, fallbackInfo) => {
+    const state = stateFor(target, fallbackInfo)
+    return state.exists ? state.version : undefined
+  }
+  try {
+    for (const operation of operations) {
+      if (operation.kind === 'add') {
+        const written = await writePatchedFile(
+          ctx, exec, operation.target, operation.content, undefined, sandboxPolicy,
+          { kind: 'createIfAbsent' },
+        )
+        mutations.push({ kind: 'add', operation, target: operation.target, written })
+        runtime.set(keyFor(operation.target), { exists: true, version: written.version })
+        ctx.emit('fs/observed', operation.target, { kind: 'present', version: written.version }, exec)
+        results.push({ path: operation.target.displayPath, operation: written.operation })
+        diffs.push({
+          path: operation.target.displayPath,
+          oldText: null,
+          newText: operation.content,
+          oldStart: 0,
+          oldLines: 0,
+          newStart: 1,
+          newLines: lineCount(operation.content),
+          lines: (operation.content === '' ? [] : operation.content.split('\n'))
+            .filter((line, index, all) => !(index === all.length - 1 && line === ''))
+            .map(line => '+ ' + line),
+        })
+        continue
+      }
+      if (operation.kind === 'delete') {
+        const expectedVersion = versionFor(operation.target, operation.info)
+        await ctx.fs.deleteFile(operation.target, { version: expectedVersion }, exec.signal, sandboxPolicy)
+        mutations.push({ kind: 'delete', operation, target: operation.target })
+        runtime.set(keyFor(operation.target), { exists: false, version: undefined })
+        ctx.emit('fs/observed', operation.target, { kind: 'absent' }, exec)
+        results.push({ path: operation.target.displayPath, operation: 'delete' })
+        diffs.push({
+          path: operation.target.displayPath,
+          oldText: operation.original,
+          newText: '',
+          oldStart: 1,
+          oldLines: lineCount(operation.original),
+          newStart: 0,
+          newLines: 0,
+          lines: (operation.original === '' ? [] : operation.original.split('\n'))
+            .filter((line, index, all) => !(index === all.length - 1 && line === ''))
+            .map(line => '- ' + line),
+        })
+        continue
+      }
+      diffs.push(...computeHunkDiffs(
+        operation.destination?.displayPath ?? operation.target.displayPath,
+        operation.original,
+        operation.content,
+      ))
+      if (operation.destination === undefined) {
+        const expectedVersion = versionFor(operation.target, operation.info)
+        const written = await writePatchedFile(
+          ctx, exec, operation.target, operation.content, expectedVersion, sandboxPolicy,
+        )
+        mutations.push({ kind: 'update', operation, target: operation.target, written })
+        runtime.set(keyFor(operation.target), { exists: true, version: written.version })
+        ctx.emit('fs/observed', operation.target, { kind: 'present', version: written.version }, exec)
+        results.push({ path: operation.target.displayPath, operation: written.operation })
+        continue
+      }
+      // Match Codex's move ordering: publish the updated destination first,
+      // then remove the source. The mutation is recorded immediately after
+      // destination publication so an abort during source deletion can still
+      // undo the partial move.
+      const destinationState = stateFor(operation.destination, operation.destinationInfo)
+      const destinationVersion = destinationState.exists ? destinationState.version : undefined
+      const destinationIntent = destinationState.exists
+        ? { kind: 'replaceIfVersion', version: destinationVersion }
+        : { kind: 'createIfAbsent' }
+      const destinationWritten = await writePatchedFile(
+        ctx,
+        exec,
+        operation.destination,
+        operation.content,
+        destinationVersion,
+        sandboxPolicy,
+        destinationIntent,
       )
-      results.push({ path: operation.target.displayPath, operation: written.operation })
-      diffs.push({
-        path: operation.target.displayPath,
-        oldText: null,
-        newText: operation.content,
-        oldStart: 0,
-        oldLines: 0,
-        newStart: 1,
-        newLines: lineCount(operation.content),
-        lines: (operation.content === '' ? [] : operation.content.split('\n'))
-          .filter((line, index, all) => !(index === all.length - 1 && line === ''))
-          .map(line => '+ ' + line),
-      })
-      continue
-    }
-    if (operation.kind === 'delete') {
-      await ctx.fs.deleteFile(operation.target, { version: operation.info.version }, exec.signal, sandboxPolicy)
-      ctx.emit('fs/observed', operation.target, { kind: 'absent' }, exec)
-      results.push({ path: operation.target.displayPath, operation: 'delete' })
-      diffs.push({
-        path: operation.target.displayPath,
-        oldText: operation.original,
-        newText: '',
-        oldStart: 1,
-        oldLines: lineCount(operation.original),
-        newStart: 0,
-        newLines: 0,
-        lines: (operation.original === '' ? [] : operation.original.split('\n'))
-          .filter((line, index, all) => !(index === all.length - 1 && line === ''))
-          .map(line => '- ' + line),
-      })
-      continue
-    }
-    diffs.push(...computeHunkDiffs(
-      operation.destination?.displayPath ?? operation.target.displayPath,
-      operation.original,
-      operation.content,
-    ))
-    if (operation.destination === undefined) {
-      const written = await writePatchedFile(
-        ctx, exec, operation.target, operation.content, operation.info.version, sandboxPolicy,
-      )
-      results.push({ path: operation.target.displayPath, operation: written.operation })
-      continue
-    }
-    // Match Codex's move ordering: publish the updated destination first,
-    // then remove the source. This leaves the source untouched when the
-    // destination write fails. If source deletion fails, restore the prior
-    // destination content (or remove a newly created destination).
-    const written = await writePatchedFile(
-      ctx,
-      exec,
-      operation.destination,
-      operation.content,
-      operation.destinationInfo?.version,
-      sandboxPolicy,
-      operation.destinationInfo === undefined ? { kind: 'createIfAbsent' } : undefined,
-    )
-    try {
+      const mutation = {
+        kind: 'move',
+        operation,
+        destinationWritten,
+        sourceDeleted: false,
+      }
+      mutations.push(mutation)
+      runtime.set(keyFor(operation.destination), { exists: true, version: destinationWritten.version })
+      ctx.emit('fs/observed', operation.destination, { kind: 'present', version: destinationWritten.version }, exec)
+      const sourceVersion = versionFor(operation.target, operation.info)
       await ctx.fs.deleteFile(
         operation.target,
-        { version: operation.info.version },
+        { version: sourceVersion },
         exec.signal,
         sandboxPolicy,
       )
-    } catch (error) {
-      try {
-        await rollbackMoveDestination(ctx, exec, operation, written, sandboxPolicy)
-      } catch (rollbackError) {
-        throw new Error(
-          'apply_patch move failed for ' + operation.path
-            + '; destination rollback also failed: ' + String(rollbackError),
-          { cause: error },
-        )
-      }
-      throw error
+      mutation.sourceDeleted = true
+      runtime.set(keyFor(operation.target), { exists: false, version: undefined })
+      ctx.emit('fs/observed', operation.target, { kind: 'absent' }, exec)
+      results.push({ path: operation.destination.displayPath, operation: 'move' })
     }
-    ctx.emit('fs/observed', operation.target, { kind: 'absent' }, exec)
-    results.push({ path: operation.destination.displayPath, operation: 'move' })
+    return { files: results, diffs }
+  } catch (error) {
+    const rollbackErrors = await rollbackPatchMutations(ctx, exec, mutations, sandboxPolicy, runtime)
+    if (rollbackErrors.length === 0) throw error
+    const details = rollbackErrors.map(item => String(item)).join('; ')
+    throw new Error('apply_patch failed: ' + String(error) + '; rollback failed: ' + details, { cause: error })
   }
-  return { files: results, diffs }
 }
 
 function registerApplyPatch(ctx) {
@@ -1733,6 +2054,55 @@ function registerQuestions(ctx) {
   }))
 }
 
+const COLLAB_INPUT_ITEM = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    type: { type: 'string', required: true, description: 'Input item type: text, image, local_image, audio, local_audio, skill, or mention.' },
+    text: { type: 'string', description: 'Text content when type is text.' },
+    image_url: { type: 'string', description: 'Image URL when type is image.' },
+    audio_url: { type: 'string', description: 'Audio data URL when type is audio.' },
+    path: { type: 'string', description: 'Path for local media or skill, or a structured mention target.' },
+    name: { type: 'string', description: 'Display name for a skill or mention.' },
+  },
+}
+
+const COLLAB_INPUT_ITEMS = {
+  type: 'array',
+  items: COLLAB_INPUT_ITEM,
+  description: 'Structured input items. This DSH adapter currently accepts text items; media and mention items require host attachment/reference support.',
+}
+
+function collabInputContent(message, items) {
+  if (message !== undefined && items !== undefined) throw new Error('Provide either message or items, but not both')
+  if (message === undefined && items === undefined) throw new Error('Provide one of: message or items')
+  if (message !== undefined) {
+    if (typeof message !== 'string' || message.trim() === '') throw new Error('Empty message cannot be sent to an agent')
+    return [{ type: 'text', text: message }]
+  }
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Items cannot be empty')
+  const content = []
+  for (const item of items) {
+    if (item?.type !== 'text' || typeof item.text !== 'string') {
+      throw new Error('DSH collaboration currently supports only text items; use message for plain text')
+    }
+    content.push({ type: 'text', text: item.text })
+  }
+  return content
+}
+
+function rejectUnsupportedSpawnOptions(args) {
+  if (typeof args.agent_type === 'string' && args.agent_type.trim() !== '') {
+    throw new Error('agent_type overrides are not supported by the DSH subagent runtime')
+  }
+  if (args.reasoning_effort !== undefined) {
+    throw new Error('reasoning_effort overrides are not supported by the DSH subagent runtime')
+  }
+  if (args.service_tier !== undefined) {
+    throw new Error('service_tier overrides are not supported by the DSH subagent runtime')
+  }
+}
+
 function agentStatusSchema() {
   return {
     oneOf: [
@@ -1773,20 +2143,44 @@ function renderJsonOutput(title) {
 }
 
 async function waitForIdle(ctx, target, signal) {
+  signal.throwIfAborted()
   const child = ctx.agents.get(target)
   if (child === undefined || child.status === 'idle') return target
-  await child.whenIdle()
-  if (signal.aborted) throw new Error('tool call aborted')
+  await awaitWithAbort(child.whenIdle(), signal)
   return target
+}
+
+async function awaitWithAbort(promise, signal) {
+  signal.throwIfAborted()
+  let onAbort
+  try {
+    const aborted = new Promise((_, reject) => {
+      onAbort = () => reject(signal.reason ?? new Error('tool call aborted'))
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    await Promise.race([promise, aborted])
+  } finally {
+    if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
+  }
 }
 
 function timeoutPromise(timeoutMs, signal) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => resolve(undefined), timeoutMs)
-    const abort = () => {
-      clearTimeout(timer)
-      reject(new Error('tool call aborted'))
+    let timer
+    let settled = false
+    let abort
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer)
+      if (abort !== undefined) signal.removeEventListener('abort', abort)
     }
+    const finish = callback => {
+      if (settled) return
+      settled = true
+      cleanup()
+      callback()
+    }
+    timer = setTimeout(() => finish(() => resolve(undefined)), timeoutMs)
+    abort = () => finish(() => reject(signal.reason ?? new Error('tool call aborted')))
     if (signal.aborted) abort()
     else signal.addEventListener('abort', abort, { once: true })
   })
@@ -1822,8 +2216,8 @@ function registerReportDelivery(ctx) {
   // its explicit final report, remove that redundant pending notice. A child
   // that crashed or never reported keeps the automatic fallback.
   ctx.on('agent/inbox/inserted', ({ agent, message }) => {
-    const source = message.source
-    if (source.kind !== 'subagent-settled') return
+    const source = message?.source
+    if (source?.kind !== 'subagent-settled') return
     if (!reportedChildren.delete(source.senderSessionId)) return
     agent.inbox.remove(message.id)
   })
@@ -1860,7 +2254,7 @@ function registerAgents(ctx) {
 
   const finalStatus = info => {
     const text = info?.lastAssistantMessage
-      ?.filter(block => block.type === 'text')
+      ?.filter(block => block?.type === 'text' && typeof block.text === 'string')
       .map(block => block.text)
       .join('\n')
       .trim() || null
@@ -1882,8 +2276,7 @@ function registerAgents(ctx) {
     const settlement = settlements.get(id)
     if (settlement?.end !== undefined) return id
     if (settlement !== undefined) {
-      await settlement.promise
-      signal.throwIfAborted()
+      await awaitWithAbort(settlement.promise, signal)
       return id
     }
     return waitForIdle(ctx, id, signal)
@@ -1893,10 +2286,13 @@ function registerAgents(ctx) {
     name: 'multi_agent_v1__spawn_agent',
     description: SPAWN_AGENT_DESCRIPTION,
     parameters: {
-      message: { type: 'string', required: true, description: 'Initial plain-text task for the new agent.' },
+      message: { type: 'string', description: 'Initial plain-text task for the new agent. Use either message or items.' },
+      items: COLLAB_INPUT_ITEMS,
+      agent_type: { type: 'string', description: 'Agent type override. DSH does not expose Codex role configuration; non-empty overrides are rejected.' },
       fork_context: { type: 'boolean', description: 'True forks completed parent history; false or omitted starts from only the task.' },
       model: { type: 'string', description: 'Optional model override for the new agent.' },
-      reasoning_effort: { type: 'string', description: 'Reasoning effort override for the new agent. Omit to inherit the parent effort.' },
+      reasoning_effort: { type: 'string', description: 'Reasoning effort override is not exposed by DSH; omit this field.' },
+      service_tier: { type: 'string', description: 'Service tier override is not exposed by DSH; omit this field.' },
     },
     output: {
       schema: {
@@ -1917,18 +2313,20 @@ function registerAgents(ctx) {
     },
     async execute(args, exec) {
       const parent = agentOf(exec)
+      rejectUnsupportedSpawnOptions(args)
+      const content = collabInputContent(args.message, args.items)
       const provider = args.fork_context === true ? 'fork' : 'spawn'
       if (!ctx.subagents.list().includes(provider)) throw new Error(`subagent provider is unavailable: ${provider}`)
       const agentOptions = {
         ...(args.model !== undefined ? { model: args.model } : {}),
-        ...(args.reasoning_effort !== undefined ? { reasoningEffort: args.reasoning_effort } : {}),
       }
+      const label = content.filter(item => item.type === 'text').map(item => item.text).join(' ').trim().slice(0, 80) || 'subagent'
       const child = await ctx.subagents.startContinuable({
         provider,
-        label: args.message.trim().slice(0, 80) || 'subagent',
+        label,
         request: {
           parent,
-          prompt: [{ type: 'text', text: args.message }],
+          prompt: content,
           ...(Object.keys(agentOptions).length > 0 ? { agentOptions } : {}),
         },
         signal: exec.signal,
@@ -1944,7 +2342,8 @@ function registerAgents(ctx) {
     description: 'Send a message to an existing agent. Use interrupt=true to redirect work immediately. You should reuse the agent by send_input if you believe your assigned task is highly dependent on the context of a previous task.',
     parameters: {
       target: { type: 'string', required: true, description: 'Exact agent_id returned by spawn_agent. Never invent a placeholder id.' },
-      message: { type: 'string', required: true, description: 'Plain-text message to send to the agent.' },
+      message: { type: 'string', description: 'Plain-text message to send to the agent. Use either message or items.' },
+      items: COLLAB_INPUT_ITEMS,
       interrupt: { type: 'boolean', description: 'True interrupts the current turn before queueing this message.' },
     },
     output: {
@@ -1970,13 +2369,14 @@ function registerAgents(ctx) {
       if (closedAgents.has(args.target)) {
         throw new Error(`subagent "${args.target}" is closed; call resume_agent before send_input`)
       }
+      const content = collabInputContent(args.message, args.items)
       if (args.interrupt === true) {
         ctx.subagents.interrupt(args.target, { kind: 'ancestor', agent: parent })
       }
       const submissionId = await ctx.subagents.followup(
         parent,
         args.target,
-        [{ type: 'text', text: args.message }],
+        content,
         { source: sourceFor(parent), signal: exec.signal },
       )
       return { submission_id: submissionId }
@@ -2044,8 +2444,12 @@ function registerAgents(ctx) {
     },
     async execute(args, exec) {
       const parent = agentOf(exec)
-      if (args.targets.length === 0) throw new Error('wait_agent requires at least one target')
-      const timeoutMs = Math.min(3_600_000, Math.max(0, args.timeout_ms ?? 30_000))
+      if (!Array.isArray(args.targets) || args.targets.length === 0) throw new Error('wait_agent requires at least one target')
+      const requestedTimeout = args.timeout_ms ?? 30_000
+      if (!Number.isFinite(requestedTimeout) || requestedTimeout < 0) {
+        throw new Error('invalid timeout_ms: expected a non-negative number, got ' + String(requestedTimeout))
+      }
+      const timeoutMs = Math.min(3_600_000, requestedTimeout)
       const rows = await directChildren(ctx, parent, exec.signal)
       const known = new Set(rows.map(row => row.id))
       const unknown = args.targets.filter(target => !known.has(target))
@@ -2056,10 +2460,16 @@ function registerAgents(ctx) {
       if (alreadyClosed !== undefined) {
         return { status: { [alreadyClosed]: 'shutdown' }, timed_out: false }
       }
-      const winner = await Promise.race([
-        ...args.targets.map(target => waitForFinal(target, exec.signal)),
-        timeoutPromise(timeoutMs, exec.signal),
-      ])
+      const timeoutController = new AbortController()
+      let winner
+      try {
+        winner = await Promise.race([
+          ...args.targets.map(target => waitForFinal(target, exec.signal)),
+          timeoutPromise(timeoutMs, timeoutController.signal),
+        ])
+      } finally {
+        timeoutController.abort()
+      }
       if (winner === undefined) return { status: {}, timed_out: true }
       return { status: { [winner]: visibleStatus(winner, true) }, timed_out: false }
     },
@@ -2127,4 +2537,17 @@ export function apply(ctx) {
   registerQuestions(ctx)
   registerReportDelivery(ctx)
   registerAgents(ctx)
+}
+
+export {
+  boundedOutput,
+  collabInputContent,
+  parsePatchOperations,
+  preflightPatch,
+  outputFromOperation,
+  applyPatch,
+  pipeOutput,
+  terminalOutputText,
+  timeoutPromise,
+  waitForTerminalOperation,
 }

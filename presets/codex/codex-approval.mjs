@@ -38,19 +38,19 @@ function patchApprovalPreview(input) {
   let removed = 0
   let hasFile = false
   for (const line of sourceLines) {
-    const header = /^\*\*\* (Update|Add|Delete|Move) File:\s*(.*?)\s*$/.exec(line.trim())
+    const control = line !== '' && [' ', '+', '-'].includes(line[0]) ? line : line.trim()
+    const header = /^\*\*\* (Update|Add|Delete|Move) File:\s*(.*?)\s*$/.exec(control)
     if (header !== null) {
       hasFile = true
       lines.push('', header[1] + ' file: ' + header[2])
       continue
     }
-    const control = line.trim()
     if (control === '*** Begin Patch' || control === '*** End Patch' || control === '*** End of File') continue
     if (control.startsWith('*** Environment ID:') || control.startsWith('*** Move to:')) {
       lines.push(control)
       continue
     }
-    if (line.startsWith('@@')) {
+    if (control === '@@' || control.startsWith('@@ ')) {
       lines.push(line)
       continue
     }

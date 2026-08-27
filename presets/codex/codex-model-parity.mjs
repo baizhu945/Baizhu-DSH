@@ -40,10 +40,13 @@ const V2_NAMES = new Set([
 ])
 
 // Only the preset-owned exec facade may dispatch the reserved transport. The
-// set is intentionally short-lived so ordinary nested SDK calls cannot name
-// run_code directly.
-const INTERNAL_RUN_CODE_CALLS = new Set()
+// map is intentionally short-lived so ordinary nested SDK calls cannot name
+// run_code directly, and a call-id collision cannot cross agent/token scope.
+const INTERNAL_RUN_CODE_CALLS = new Map()
 const SERIAL_ROOT_TAILS = new WeakMap()
+const V2_PATH_CACHES = new WeakMap()
+const V2_PATH_RESERVATIONS = new WeakMap()
+const V2_STEERED = Object.freeze({ kind: 'steered' })
 const CODE_MODE_STRIP_PREFIX = 'async function __dsh_program__() {\n'
 const CODE_MODE_STRIP_SUFFIX = '\n}'
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
@@ -250,10 +253,10 @@ function modelTail(model) {
 function heuristicRow(model) {
   const id = modelTail(model)
   if (id === 'gpt-5.6-luna') {
-    return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v1', use_responses_lite: true, include_skills_usage_instructions: false, include_apps_usage_instructions: true, include_plugin_usage_instructions: true, web_search_tool_type: 'text_and_image', context_window: 272000, max_context_window: 872000, default_reasoning_level: 'medium', input_modalities: ['text', 'image'], supports_image_detail_original: true, supports_search_tool: true }
+    return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v1', use_responses_lite: true, include_skills_usage_instructions: false, include_apps_usage_instructions: true, include_plugin_usage_instructions: true, web_search_tool_type: 'text_and_image', context_window: 1050000, max_context_window: 1050000, default_reasoning_level: 'medium', input_modalities: ['text', 'image'], supports_image_detail_original: true, supports_search_tool: true }
   }
   if (id === 'gpt-5.6-sol' || id === 'gpt-5.6-terra') {
-    return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v2', use_responses_lite: true, include_skills_usage_instructions: false, include_apps_usage_instructions: true, include_plugin_usage_instructions: true, web_search_tool_type: 'text_and_image', context_window: 272000, max_context_window: 872000, default_reasoning_level: id.endsWith('sol') ? 'low' : 'medium', input_modalities: ['text', 'image'], supports_image_detail_original: true, supports_search_tool: true }
+    return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v2', use_responses_lite: true, include_skills_usage_instructions: false, include_apps_usage_instructions: true, include_plugin_usage_instructions: true, web_search_tool_type: 'text_and_image', context_window: 1050000, max_context_window: 1050000, default_reasoning_level: id.endsWith('sol') ? 'low' : 'medium', input_modalities: ['text', 'image'], supports_image_detail_original: true, supports_search_tool: true }
   }
   if (id === 'gpt-5.3-codex-spark') {
     return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v1', use_responses_lite: true, include_skills_usage_instructions: false, include_apps_usage_instructions: true, include_plugin_usage_instructions: true, web_search_tool_type: 'text', context_window: 128000, max_context_window: 128000, default_reasoning_level: 'medium', input_modalities: ['text'], supports_image_detail_original: false, supports_search_tool: true }
@@ -261,13 +264,34 @@ function heuristicRow(model) {
   return undefined
 }
 
+function normalizeShellType(value) {
+  if (value === 'shell_command' || value === 'default' || value === 'local' || value === 'unified_exec') {
+    return 'unified_exec'
+  }
+  if (value === 'disabled') return 'disabled'
+  return value
+}
+
+function normalizeToolMode(value) {
+  switch (value) {
+    // Official Codex names this combined surface `code_mode`; `both` is kept
+    // for older pinned catalogs that used the pre-release spelling.
+    case 'code_mode':
+    case 'both':
+      return 'both'
+    case 'code_mode_only':
+      return 'code_mode_only'
+    case 'direct':
+    default:
+      return 'native'
+  }
+}
+
 function profileForModel(model) {
   const id = modelTail(model)
   const row = catalogById.get(String(model || '').trim()) || catalogById.get(id) || heuristicRow(id)
   if (row === undefined) return { ...DEFAULT_PROFILE, model: id, instructions: FALLBACK_INSTRUCTIONS }
-  const toolMode = row.tool_mode === 'code_mode_only'
-    ? 'code_mode_only'
-    : row.tool_mode === 'both' ? 'both' : 'native'
+  const toolMode = normalizeToolMode(row.tool_mode)
   const multiAgentVersion = row.multi_agent_version === 'v1' || row.multi_agent_version === 'v2'
     ? row.multi_agent_version
     : 'none'
@@ -278,7 +302,7 @@ function profileForModel(model) {
     toolMode,
     multiAgentVersion,
     applyPatchToolType: typeof row.apply_patch_tool_type === 'string' ? row.apply_patch_tool_type : 'freeform',
-    shellType: typeof row.shell_type === 'string' ? row.shell_type : 'unified_exec',
+    shellType: normalizeShellType(typeof row.shell_type === 'string' ? row.shell_type : 'unified_exec'),
     supportsParallelToolCalls: row.supports_parallel_tool_calls !== false,
     useResponsesLite: row.use_responses_lite === true,
     includeSkillsUsageInstructions: row.include_skills_usage_instructions !== false,
@@ -337,14 +361,16 @@ function isV1Tool(name) {
   return name.startsWith(V1_PREFIX)
 }
 
-function modelToolAllowed(ctx, profile, name, agent, nested) {
+function modelToolAllowed(ctx, profile, name, agent, nested, toolArguments) {
   if (!nested && name === RUN_CODE) return false
   if (!nested && profile.toolMode === 'code_mode_only' && name !== CODE_MODE_TOOL && name !== WAIT_TOOL) return false
   if (!nested && profile.toolMode === 'native' && (name === CODE_MODE_TOOL || name === WAIT_TOOL)) return false
   if (nested && (name === RUN_CODE || name === CODE_MODE_TOOL || name === WAIT_TOOL)) return false
-  if ((name === 'exec_command' || name === 'write_stdin') && profile.shellType !== 'unified_exec') return false
+  if ((name === 'exec_command' || name === 'write_stdin') && normalizeShellType(profile.shellType) !== 'unified_exec') return false
   if (name === 'apply_patch' && profile.applyPatchToolType === 'none') return false
   if (name === WEB_RUN && (!profile.useResponsesLite || !profile.supportsSearchTool)) return false
+  if (name === WEB_RUN && profile.webSearchToolType === 'text' && toolArguments !== undefined
+    && toolArguments !== null && typeof toolArguments === 'object' && toolArguments.image_query !== undefined) return false
   if (name === SKILL && !profile.includeSkillsUsageInstructions) return false
   if (name === 'view_image' && !isImageCapable(profile)) return false
   if (name === 'request_user_input' && profile.toolMode !== 'code_mode_only' && !planModeActive(ctx, agent)) return false
@@ -363,10 +389,24 @@ function patchImageSchema(schema, profile) {
   return { ...schema, parameters }
 }
 
+function patchWebSearchSchema(schema, profile) {
+  if (schema.name !== WEB_RUN || profile.webSearchToolType !== 'text') return schema
+  const parameters = structuredClone(schema.parameters)
+  if (parameters !== null && typeof parameters === 'object') {
+    const properties = parameters.properties
+    if (properties !== null && typeof properties === 'object') delete properties.image_query
+  }
+  return { ...schema, parameters }
+}
+
+function patchToolSchema(schema, profile) {
+  return patchWebSearchSchema(patchImageSchema(schema, profile), profile)
+}
+
 function nativeSchemas(ctx, agent, profile) {
   return ctx.tools.schemas(agent)
     .filter(schema => modelToolAllowed(ctx, profile, schema.name, agent, false))
-    .map(schema => patchImageSchema(schema, profile))
+    .map(schema => patchToolSchema(schema, profile))
 }
 
 function sdkSchemas(ctx, agent, profile) {
@@ -375,7 +415,7 @@ function sdkSchemas(ctx, agent, profile) {
     .map(schema => {
       const definition = ctx.tools.get(schema.name, agent)
       return {
-        ...patchImageSchema(schema, profile),
+        ...patchToolSchema(schema, profile),
         output: definition?.output?.schema ?? { type: 'string' },
       }
     })
@@ -864,18 +904,19 @@ function previewPatchContent(value) {
   let removed = 0
   let hasFile = false
   for (const line of sourceLines) {
-    const header = /^\*\*\* (Update|Add|Delete|Move) File:\s*(.*?)\s*$/.exec(line.trim())
+    const control = line !== '' && [' ', '+', '-'].includes(line[0]) ? line : line.trim()
+    const header = /^\*\*\* (Update|Add|Delete|Move) File:\s*(.*?)\s*$/.exec(control)
     if (header !== null) {
       hasFile = true
       lines.push('', header[1] + ' file: ' + header[2])
       continue
     }
-    if (line.trim() === '*** Begin Patch' || line.trim() === '*** End Patch' || line.trim() === '*** End of File') continue
-    if (line.trim().startsWith('*** Environment ID:') || line.trim().startsWith('*** Move to:')) {
-      lines.push(line.trim())
+    if (control === '*** Begin Patch' || control === '*** End Patch' || control === '*** End of File') continue
+    if (control.startsWith('*** Environment ID:') || control.startsWith('*** Move to:')) {
+      lines.push(control)
       continue
     }
-    if (line.startsWith('@@')) {
+    if (control === '@@' || control.startsWith('@@ ')) {
       lines.push(line)
       continue
     }
@@ -1275,7 +1316,7 @@ function registerCodeModeAlias(ctx) {
       }
       const program = normalizeCodeModeSource(args.input)
       const callId = execution.callId + ':run_code'
-      INTERNAL_RUN_CODE_CALLS.add(callId)
+      INTERNAL_RUN_CODE_CALLS.set(callId, { agent: execution.agent, parent: execution.token })
       try {
         const result = await ctx.tools.execute({
           callId,
@@ -1307,19 +1348,293 @@ function v2AgentOf(execution) {
   return execution.agent
 }
 
+function v2Id(value) {
+  return value === undefined || value === null ? undefined : String(value)
+}
+
+function isV2TaskName(value) {
+  return typeof value === 'string'
+    && value.length > 0
+    && value !== 'root'
+    && value !== '.'
+    && value !== '..'
+    && /^[a-z0-9_]+$/.test(value)
+}
+
+function validateV2TaskName(value) {
+  if (typeof value !== 'string' || value.length === 0) throw new Error('task_name must not be empty')
+  if (value === 'root' || value === '.' || value === '..') throw new Error('task_name ' + JSON.stringify(value) + ' is reserved')
+  if (!/^[a-z0-9_]+$/.test(value)) throw new Error('task_name must use only lowercase letters, digits, and underscores')
+  return value
+}
+
+function v2PathCache(ctx) {
+  let cache = V2_PATH_CACHES.get(ctx)
+  if (cache === undefined) {
+    cache = new Map()
+    V2_PATH_CACHES.set(ctx, cache)
+  }
+  return cache
+}
+
+function v2PathReservations(ctx) {
+  let reservations = V2_PATH_RESERVATIONS.get(ctx)
+  if (reservations === undefined) {
+    reservations = new Set()
+    V2_PATH_RESERVATIONS.set(ctx, reservations)
+  }
+  return reservations
+}
+
+function v2RootAgent(ctx, agent) {
+  let current = agent
+  const seen = new Set()
+  while (current !== undefined && !seen.has(v2Id(current.id))) {
+    seen.add(v2Id(current.id))
+    const parentId = current.session?.header?.parentSession
+    if (parentId === undefined) return current
+    const parent = ctx.agents.get(parentId)
+    if (parent === undefined) return current
+    current = parent
+  }
+  return current ?? agent
+}
+
+function v2PathSegment(row) {
+  if (isV2TaskName(row?.label)) return row.label
+  const id = v2Id(row?.id) ?? 'agent'
+  const suffix = id.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '')
+  return 'agent_' + (suffix || 'unknown')
+}
+
+function v2SetPath(cache, row, parentPath) {
+  const id = v2Id(row?.id)
+  if (id === undefined || parentPath === undefined) return undefined
+  const path = parentPath + '/' + v2PathSegment(row)
+  cache.set(id, path)
+  return path
+}
+
+async function v2Tree(ctx, parent, signal) {
+  const root = v2RootAgent(ctx, parent)
+  const cache = v2PathCache(ctx)
+  const rootId = v2Id(root?.id)
+  if (rootId !== undefined) cache.set(rootId, '/root')
+  let rows
+  if (typeof ctx.subagents.listDescendants === 'function' && rootId !== undefined) {
+    rows = await ctx.subagents.listDescendants(rootId, signal)
+  } else {
+    rows = rootId === undefined ? [] : await ctx.subagents.listChildren(rootId, signal)
+    rows = rows.map(row => ({ ...row, parentId: rootId, depth: 1 }))
+  }
+  for (const row of rows) {
+    const parentId = v2Id(row?.parentId) ?? rootId
+    v2SetPath(cache, row, cache.get(parentId))
+  }
+  return { root, rows, cache }
+}
+
 function v2SourceFor(parent) {
   return { kind: 'coordinator', form: 'relay', senderSessionId: parent.session.id }
 }
 
 async function v2Children(ctx, parent, signal) {
   const rows = await ctx.subagents.listChildren(parent.session.id, signal)
-  return rows.filter(row => row.kind === 'child' && row.mode === 'continuable')
+  const children = rows.filter(row => row.kind === 'child' && row.mode === 'continuable')
+  const cache = v2PathCache(ctx)
+  const parentPath = cache.get(v2Id(parent.id)) ?? '/root'
+  for (const row of children) v2SetPath(cache, row, parentPath)
+  return children
 }
 
-function v2Status(ctx, id) {
+async function v2Roster(ctx, parent, signal) {
+  const tree = await v2Tree(ctx, parent, signal)
+  const direct = typeof ctx.subagents.listDescendants === 'function'
+    ? tree.rows.filter(row => row?.kind === 'child' && row?.mode === 'continuable'
+      && v2Id(row.parentId) === v2Id(parent.id))
+    : await v2Children(ctx, parent, signal)
+  const byId = new Map()
+  for (const row of tree.rows) {
+    if (row?.kind !== 'child' || row?.mode !== 'continuable') continue
+    byId.set(v2Id(row.id), row)
+  }
+  for (const row of direct) {
+    const id = v2Id(row.id)
+    if (id === undefined) continue
+    const existing = byId.get(id)
+    byId.set(id, existing === undefined
+      ? { ...row, parentId: parent.id, depth: 1 }
+      : { ...existing, ...row, parentId: v2Id(row.parentId) ?? v2Id(existing.parentId) ?? parent.id })
+    v2SetPath(tree.cache, row, tree.cache.get(v2Id(parent.id)) ?? '/root')
+  }
+  return { ...tree, direct: direct.map(row => byId.get(v2Id(row.id)) ?? row), all: [...byId.values()] }
+}
+
+async function v2ResolveTarget(ctx, parent, reference, signal) {
+  if (typeof reference !== 'string' || reference.length === 0) throw new Error('target must not be empty')
+  const roster = await v2Roster(ctx, parent, signal)
+  const rootId = v2Id(roster.root?.id)
+  if (reference === '/root' && rootId !== undefined) {
+    return { id: rootId, path: '/root', parentId: undefined, row: { kind: 'root', id: rootId }, roster }
+  }
+  const byId = new Map(roster.all.map(row => [v2Id(row.id), row]))
+  let row = byId.get(reference)
+  let path
+  if (row !== undefined) {
+    path = roster.cache.get(v2Id(row.id))
+  } else {
+    const currentPath = roster.cache.get(v2Id(parent.id)) ?? '/root'
+    path = reference.startsWith('/') ? reference : currentPath + '/' + reference
+    const matches = roster.all.filter(candidate => roster.cache.get(v2Id(candidate.id)) === path)
+    if (matches.length > 1) throw new Error('ambiguous subagent target: ' + reference)
+    row = matches[0]
+    if (row === undefined && !reference.includes('/')) {
+      const labelMatches = roster.direct.filter(candidate => candidate.label === reference)
+      if (labelMatches.length > 1) throw new Error('ambiguous subagent target: ' + reference)
+      row = labelMatches[0]
+      if (row !== undefined) path = roster.cache.get(v2Id(row.id))
+    }
+  }
+  if (row === undefined) throw new Error('unknown subagent: ' + reference)
+  return { id: v2Id(row.id), path: path ?? roster.cache.get(v2Id(row.id)), parentId: v2Id(row.parentId), row, roster }
+}
+
+function v2MessageText(value) {
+  if (typeof value !== 'string' || value.trim() === '') throw new Error('Empty message cannot be sent to an agent')
+  return value
+}
+
+function v2ForkProvider(value) {
+  if (value === undefined || value === 'all') return 'fork'
+  if (value === 'none') return 'spawn'
+  if (/^[0-9]+$/.test(String(value)) && Number(value) > 0) {
+    throw new Error('numeric fork_turns is not supported by DSH; use `none` or `all`')
+  }
+  throw new Error('fork_turns must be `none`, `all`, or a positive integer string')
+}
+
+function v2ResolvedPrefix(roster, parent, prefix) {
+  if (prefix === undefined) return undefined
+  if (typeof prefix !== 'string' || prefix.length === 0) throw new Error('path_prefix must not be empty')
+  if (prefix.endsWith('/')) throw new Error('path_prefix must not end with `/`')
+  const currentPath = roster.cache.get(v2Id(parent.id)) ?? '/root'
+  const path = prefix.startsWith('/') ? prefix : currentPath + '/' + prefix
+  const segments = path.split('/')
+  if (segments.length < 2 || segments[0] !== '' || segments[1] !== 'root'
+    || segments.slice(2).some(segment => !isV2TaskName(segment))) {
+    throw new Error('path_prefix must be a canonical agent path or a relative task path')
+  }
+  return path
+}
+
+function v2PathMatches(path, prefix) {
+  return prefix === undefined || path === prefix || path.startsWith(prefix + '/')
+}
+
+function v2FinalStatus(info) {
+  const text = info?.lastAssistantMessage
+    ?.filter(block => block?.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text)
+    .join(String.fromCharCode(10))
+    .trim() || null
+  switch (info?.stopReason) {
+    case 'completed': return { completed: text }
+    case 'aborted': return 'interrupted'
+    case 'error': return { errored: text ?? 'subagent failed' }
+    case 'max-tokens': return { errored: text ?? 'subagent reached its token limit' }
+    case 'refusal': return { errored: text ?? 'subagent declined the task' }
+    default: return undefined
+  }
+}
+
+function v2Status(ctx, id, settlements, known = false, row) {
+  const settled = v2FinalStatus(settlements.get(id)?.end)
+  if (settled !== undefined) return settled
   const child = ctx.agents.get(id)
-  if (child === undefined) return 'not_found'
-  return child.status === 'running' ? 'running' : { completed: null }
+  if (child !== undefined) return child.status === 'running' ? 'running' : { completed: null }
+  if (row?.activity === 'running') return 'pending_init'
+  return known ? { completed: null } : 'not_found'
+}
+
+function v2FinalMessageId(message, targets) {
+  const source = message?.source
+  if (source?.kind !== 'subagent-settled' && source?.kind !== 'subagent-report') return undefined
+  const id = String(source.senderSessionId)
+  return targets.has(id) ? id : undefined
+}
+
+function v2MailboxMessageId(message, targets) {
+  const id = v2FinalMessageId(message, targets)
+  if (id !== undefined) return id
+  const sender = v2Id(message?.source?.senderSessionId)
+  return sender !== undefined && targets.has(sender) ? sender : undefined
+}
+
+function v2ParentSteeringMessage(parent, message) {
+  if (message === undefined || parent?.inbox?.nextStep?.some(item => item?.id === message.id) !== true) return false
+  return message.source?.kind === 'user'
+}
+
+function v2PendingUpdate(parent, _live, targets) {
+  for (const message of parent.inbox?.nextStep ?? []) {
+    const id = v2MailboxMessageId(message, targets)
+    if (id !== undefined) return { kind: 'mailbox', id }
+    if (v2ParentSteeringMessage(parent, message)) return V2_STEERED
+  }
+  for (const message of parent.inbox?.nextTurn ?? []) {
+    const id = v2MailboxMessageId(message, targets)
+    if (id !== undefined) return { kind: 'mailbox', id }
+  }
+  return undefined
+}
+
+async function waitForV2MailboxUpdate(ctx, parent, live, targets, timeoutMs, signal) {
+  signal.throwIfAborted()
+  const immediate = v2PendingUpdate(parent, live, targets)
+  if (immediate !== undefined) return immediate
+  let timer
+  let onAbort
+  let finished = false
+  let resolveWait
+  let rejectWait
+  const wait = new Promise((resolve, reject) => {
+    resolveWait = resolve
+    rejectWait = reject
+  })
+  const finish = value => {
+    if (finished) return
+    finished = true
+    resolveWait(value)
+  }
+  const disposers = []
+  try {
+    disposers.push(ctx.on('agent/inbox/inserted', payload => {
+      const agentId = v2Id(payload?.agent?.id)
+      if (agentId !== v2Id(parent.id)) return
+      const mailbox = v2MailboxMessageId(payload?.message, targets)
+      if (mailbox !== undefined) finish({ kind: 'mailbox', id: mailbox })
+      else if (v2ParentSteeringMessage(parent, payload?.message)) finish(V2_STEERED)
+    }))
+    disposers.push(ctx.on('subagent/end', info => {
+      const id = info?.id === undefined ? undefined : String(info.id)
+      if (id !== undefined && targets.has(id)) finish({ kind: 'mailbox', id })
+    }))
+    timer = setTimeout(() => finish(undefined), timeoutMs)
+    onAbort = () => {
+      if (finished) return
+      finished = true
+      rejectWait(signal.reason ?? new Error('tool call aborted'))
+    }
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+    const afterRegistration = v2PendingUpdate(parent, live, targets)
+    if (afterRegistration !== undefined) finish(afterRegistration)
+    return await wait
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
+    for (const dispose of disposers) dispose()
+  }
 }
 
 function v2AgentStatusSchema() {
@@ -1341,15 +1656,47 @@ function v2AgentStatusSchema() {
 }
 
 function registerV2Agents(ctx) {
+  const settlements = new Map()
+  const newSettlement = () => {
+    let resolve
+    const promise = new Promise(done => { resolve = done })
+    return { promise, resolve, end: undefined, runId: undefined }
+  }
+  const settlementFor = id => {
+    let settlement = settlements.get(id)
+    if (settlement === undefined) {
+      settlement = newSettlement()
+      settlements.set(id, settlement)
+    }
+    return settlement
+  }
+  ctx.on('subagent/start', info => {
+    const existing = settlements.get(info.id)
+    if (existing === undefined || existing.end !== undefined || existing.runId !== info.runId) {
+      const settlement = newSettlement()
+      settlement.runId = info.runId
+      settlements.set(info.id, settlement)
+    }
+  })
+  ctx.on('subagent/end', info => {
+    const settlement = settlementFor(info.id)
+    settlement.runId = info.runId
+    settlement.end = info
+    settlement.resolve(info)
+  })
+
   ctx.tools.register(defineTool({
     name: 'spawn_agent',
     description: 'Spawns an agent to work on the specified task. Use a lowercase task_name with letters, digits, and underscores. The spawned agent inherits the current model and can spawn its own subagents. Only use this for a concrete, bounded subtask that can run independently alongside useful local work.',
     parameters: {
       task_name: { type: 'string', required: true, description: 'Task name for the new agent. Use lowercase letters, digits, and underscores.' },
       message: { type: 'string', required: true, description: 'Initial plain-text task for the new agent.' },
-      fork_turns: { type: 'string', enum: ['none', 'all'], description: 'Use none for no surrounding context, or all to inherit completed parent history.' },
+      agent_type: { type: 'string', description: 'Agent type override for the new agent. DSH does not expose Codex role configuration; requests using this field are rejected.' },
+      fork_turns: { type: 'string', description: 'Use none for no surrounding context, or all to inherit completed parent history. Numeric last-N forks are not available in DSH.' },
       model: { type: 'string', description: 'Model override for the new agent. Omit unless explicitly requested.' },
-      reasoning_effort: { type: 'string', description: 'Reasoning effort override for the new agent. Omit unless explicitly requested.' },
+      reasoning_effort: { type: 'string', description: 'Reasoning effort override is not exposed by DSH; omit this field.' },
+      service_tier: { type: 'string', description: 'Service tier override is not exposed by DSH; omit this field.' },
+      fork_context: { type: 'boolean', description: 'Legacy V1 option; rejected in MultiAgentV2. Use fork_turns instead.' },
     },
     output: {
       schema: {
@@ -1361,23 +1708,40 @@ function registerV2Agents(ctx) {
     },
     async execute(args, execution) {
       const parent = v2AgentOf(execution)
-      const provider = args.fork_turns === 'none' ? 'spawn' : 'fork'
+      const taskName = validateV2TaskName(args.task_name)
+      const message = v2MessageText(args.message)
+      if (args.fork_context !== undefined) throw new Error('fork_context is not supported in MultiAgentV2; use fork_turns instead')
+      if (typeof args.agent_type === 'string' && args.agent_type.trim() !== '') throw new Error('agent_type overrides are not supported by the DSH subagent runtime')
+      if (args.reasoning_effort !== undefined) throw new Error('reasoning_effort overrides are not supported by the DSH subagent runtime')
+      if (args.service_tier !== undefined) throw new Error('service_tier overrides are not supported by the DSH subagent runtime')
+      const provider = v2ForkProvider(args.fork_turns)
       if (!ctx.subagents.list().includes(provider)) throw new Error('subagent provider is unavailable: ' + provider)
-      const agentOptions = {
-        ...(args.model === undefined ? {} : { model: args.model }),
-        ...(args.reasoning_effort === undefined ? {} : { reasoningEffort: args.reasoning_effort }),
+      const roster = await v2Roster(ctx, parent, execution.signal)
+      const parentPath = roster.cache.get(v2Id(parent.id)) ?? '/root'
+      const canonicalPath = parentPath + '/' + taskName
+      const reservations = v2PathReservations(ctx)
+      if (roster.direct.some(row => row.label === taskName) || reservations.has(canonicalPath)) {
+        throw new Error('task path already exists: ' + canonicalPath)
       }
-      const child = await ctx.subagents.startContinuable({
-        provider,
-        label: args.task_name,
-        request: {
-          parent,
-          prompt: [{ type: 'text', text: args.message }],
-          ...(Object.keys(agentOptions).length === 0 ? {} : { agentOptions }),
-        },
-        signal: execution.signal,
-      })
-      return { task_name: child.childId }
+      reservations.add(canonicalPath)
+      try {
+        const child = await ctx.subagents.startContinuable({
+          provider,
+          label: taskName,
+          request: {
+            parent,
+            prompt: [{ type: 'text', text: message }],
+            ...(args.model === undefined ? {} : { agentOptions: { model: args.model } }),
+          },
+          signal: execution.signal,
+        })
+        const childId = v2Id(child.childId)
+        if (childId === undefined) throw new Error('subagent provider returned no child id')
+        v2PathCache(ctx).set(childId, canonicalPath)
+        return { task_name: canonicalPath }
+      } finally {
+        reservations.delete(canonicalPath)
+      }
     },
   }))
 
@@ -1391,11 +1755,12 @@ function registerV2Agents(ctx) {
     output: { schema: { type: 'object', additionalProperties: false, properties: { submission_id: { type: 'string', required: true } } }, ...v2JsonOutput('Message queued') },
     async execute(args, execution) {
       const parent = v2AgentOf(execution)
-      const rows = await v2Children(ctx, parent, execution.signal)
-      if (!rows.some(row => row.id === args.target)) throw new Error('unknown subagent: ' + args.target)
-      const target = ctx.agents.get(args.target)
+      const targetText = v2MessageText(args.message)
+      const resolved = await v2ResolveTarget(ctx, parent, args.target, execution.signal)
+      const target = ctx.agents.get(resolved.id)
       if (target === undefined) throw new Error('subagent is not live; use followup_task to cold-resume it')
-      const message = createUserMessage({ content: [{ type: 'text', text: args.message }], source: v2SourceFor(parent) })
+      if (resolved.id === v2Id(parent.id)) throw new Error('an agent cannot send a message to itself')
+      const message = createUserMessage({ content: [{ type: 'text', text: targetText }], source: v2SourceFor(parent) })
       target.inject(message)
       return { submission_id: message.id }
     },
@@ -1411,9 +1776,12 @@ function registerV2Agents(ctx) {
     output: { schema: { type: 'object', additionalProperties: false, properties: { submission_id: { type: 'string', required: true } } }, ...v2JsonOutput('Follow-up queued') },
     async execute(args, execution) {
       const parent = v2AgentOf(execution)
-      const rows = await v2Children(ctx, parent, execution.signal)
-      if (!rows.some(row => row.id === args.target)) throw new Error('unknown subagent: ' + args.target)
-      const submissionId = await ctx.subagents.followup(parent, args.target, [{ type: 'text', text: args.message }], { source: v2SourceFor(parent), signal: execution.signal })
+      const targetText = v2MessageText(args.message)
+      const resolved = await v2ResolveTarget(ctx, parent, args.target, execution.signal)
+      if (resolved.id === v2Id(resolved.roster.root?.id)) throw new Error("Follow-up tasks can't target the root agent")
+      const authority = resolved.parentId === undefined ? undefined : ctx.agents.get(resolved.parentId)
+      if (authority === undefined) throw new Error('subagent direct parent is not live; cannot deliver follow-up')
+      const submissionId = await ctx.subagents.followup(authority, resolved.id, [{ type: 'text', text: targetText }], { source: v2SourceFor(parent), signal: execution.signal })
       return { submission_id: submissionId }
     },
   }))
@@ -1425,16 +1793,23 @@ function registerV2Agents(ctx) {
     output: { schema: { type: 'object', additionalProperties: false, properties: { message: { type: 'string', required: true }, timed_out: { type: 'boolean', required: true } } }, ...v2JsonOutput('Agent wait') },
     async execute(args, execution) {
       const parent = v2AgentOf(execution)
+      const requestedTimeout = args.timeout_ms ?? 30_000
+      if (!Number.isFinite(requestedTimeout) || requestedTimeout < 0) {
+        throw new Error('invalid timeout_ms: expected a non-negative number, got ' + String(requestedTimeout))
+      }
+      const timeoutMs = Math.min(3_600_000, requestedTimeout)
       const rows = await v2Children(ctx, parent, execution.signal)
-      const timeoutMs = Math.min(3_600_000, Math.max(0, args.timeout_ms ?? 30_000))
+      const targets = new Set(rows.map(row => String(row.id)))
       const live = rows.map(row => ctx.agents.get(row.id)).filter(agent => agent !== undefined)
-      if (live.length === 0) return { message: 'No live agents have a mailbox update.', timed_out: false }
-      const timeout = new Promise(resolve => setTimeout(() => resolve(undefined), timeoutMs))
-      const update = Promise.race(live.map(agent => agent.whenIdle().then(() => agent.id)))
-      const winner = await Promise.race([update, timeout])
-      execution.signal.throwIfAborted()
-      if (winner === undefined) return { message: 'Timed out waiting for a mailbox update.', timed_out: true }
-      return { message: 'Agent ' + winner + ' has a mailbox update or final-status notification.', timed_out: false }
+      const pending = v2PendingUpdate(parent, live, targets)
+      if (pending === V2_STEERED) return { message: 'Wait interrupted by new input.', timed_out: false }
+      if (pending !== undefined) return { message: 'Wait completed.', timed_out: false }
+      const settled = rows.find(row => v2FinalStatus(settlements.get(row.id)?.end) !== undefined)
+      if (settled !== undefined) return { message: 'Wait completed.', timed_out: false }
+      const winner = await waitForV2MailboxUpdate(ctx, parent, live, targets, timeoutMs, execution.signal)
+      if (winner === undefined) return { message: 'Wait timed out.', timed_out: true }
+      if (winner === V2_STEERED) return { message: 'Wait interrupted by new input.', timed_out: false }
+      return { message: 'Wait completed.', timed_out: false }
     },
   }))
 
@@ -1445,10 +1820,12 @@ function registerV2Agents(ctx) {
     output: { schema: { type: 'object', additionalProperties: false, properties: { previous_status: { ...v2AgentStatusSchema(), required: true } } }, ...v2JsonOutput('Agent interrupted') },
     async execute(args, execution) {
       const parent = v2AgentOf(execution)
-      const rows = await v2Children(ctx, parent, execution.signal)
-      if (!rows.some(row => row.id === args.target)) throw new Error('unknown subagent: ' + args.target)
-      const previousStatus = v2Status(ctx, args.target)
-      ctx.subagents.interrupt(args.target, { kind: 'ancestor', agent: parent })
+      const resolved = await v2ResolveTarget(ctx, parent, args.target, execution.signal)
+      if (resolved.id === v2Id(resolved.roster.root?.id)) throw new Error('root is not a spawned agent')
+      if (resolved.id === v2Id(parent.id)) throw new Error('an agent cannot interrupt itself')
+      const previousStatus = v2Status(ctx, resolved.id, settlements, true, resolved.row)
+      const authority = resolved.parentId === undefined ? parent : (ctx.agents.get(resolved.parentId) ?? parent)
+      ctx.subagents.interrupt(resolved.id, { kind: 'ancestor', agent: authority })
       return { previous_status: previousStatus }
     },
   }))
@@ -1480,21 +1857,52 @@ function registerV2Agents(ctx) {
     },
     async execute(args, execution) {
       const parent = v2AgentOf(execution)
-      const rows = await v2Children(ctx, parent, execution.signal)
-      const prefix = typeof args.path_prefix === 'string' ? args.path_prefix : undefined
-      return { agents: rows.filter(row => prefix === undefined || String(row.id).startsWith(prefix)).map(row => ({ agent_name: row.id, agent_status: v2Status(ctx, row.id) })) }
+      const roster = await v2Roster(ctx, parent, execution.signal)
+      const prefix = v2ResolvedPrefix(roster, parent, args.path_prefix)
+      const entries = []
+      const root = roster.root
+      const rootId = v2Id(root?.id)
+      if (root !== undefined && rootId !== undefined && v2PathMatches('/root', prefix)) {
+        entries.push({ agent_name: '/root', agent_status: root.status === 'running' ? 'running' : { completed: null } })
+      }
+      for (const row of roster.all) {
+        const id = v2Id(row.id)
+        const path = roster.cache.get(id)
+        if (id === undefined || path === undefined || !v2PathMatches(path, prefix)) continue
+        const live = ctx.agents.get(id)
+        if (live === undefined) continue
+        entries.push({ agent_name: path, agent_status: v2Status(ctx, id, settlements, true, row) })
+      }
+      entries.sort((left, right) => left.agent_name.localeCompare(right.agent_name))
+      return { agents: entries }
     },
   }))
+}
+
+async function waitForSerialTurn(previous, signal) {
+  signal.throwIfAborted()
+  let onAbort
+  try {
+    const aborted = new Promise((_, reject) => {
+      onAbort = () => reject(signal.reason ?? new Error('tool call aborted'))
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    await Promise.race([previous.catch(() => undefined), aborted])
+    signal.throwIfAborted()
+  } finally {
+    if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
+  }
 }
 
 function registerModelParity(ctx) {
   ctx.tools.guard(execution => {
     const agent = execution.agent
     if (agent === undefined) return undefined
-    if (execution.name === RUN_CODE && INTERNAL_RUN_CODE_CALLS.has(execution.callId)) return undefined
+    const internalRunCode = INTERNAL_RUN_CODE_CALLS.get(execution.callId)
+    if (execution.name === RUN_CODE && internalRunCode?.agent === agent && internalRunCode.parent === execution.parent) return undefined
     const profile = profileForModel(currentModel(agent))
     const nested = execution.parent !== undefined
-    if (modelToolAllowed(ctx, profile, execution.name, agent, nested)) return undefined
+    if (modelToolAllowed(ctx, profile, execution.name, agent, nested, execution.arguments)) return undefined
     return 'Codex model capability policy hides tool ' + JSON.stringify(execution.name)
   })
 
@@ -1519,8 +1927,8 @@ function registerModelParity(ctx) {
     let release
     const current = new Promise(resolve => { release = resolve })
     SERIAL_ROOT_TAILS.set(agent, current)
-    await previous.catch(() => {})
     try {
+      await waitForSerialTurn(previous, execution.signal)
       return await next()
     } finally {
       release()
@@ -1559,4 +1967,21 @@ export function apply(ctx) {
   registerModelParity(ctx)
 }
 
-export { codeModePreview, codeModeSyntaxValid, directPatchContent, normalizeCodeModeSource, registerCodeModeAlias }
+export {
+  codeModePreview,
+  codeModeSyntaxValid,
+  directPatchContent,
+  modelToolAllowed,
+  normalizeCodeModeSource,
+  normalizeShellType,
+  normalizeToolMode,
+  patchWebSearchSchema,
+  profileForModel,
+  registerCodeModeAlias,
+  registerV2Agents,
+  v2FinalMessageId,
+  v2PendingUpdate,
+  v2Status,
+  validateV2TaskName,
+  waitForV2MailboxUpdate,
+}
