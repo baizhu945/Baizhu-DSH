@@ -12,6 +12,7 @@ import {
   profileForModel,
   registerCodeModeAlias,
   registerV2Agents,
+  rewriteCodeModeName,
   v2FinalMessageId,
   v2Status,
   validateV2TaskName,
@@ -94,6 +95,49 @@ test('Code Mode repairs nested jq and Node single-quote shell commands', async (
     '| node --input-type=module -e ' + single + 'import fs from ' + double + 'node:fs' + double + '; console.log(fs.readFileSync(0,' + double + 'utf8' + double + '))' + single,
   ].join(' ')
   const source = 'const result = await tools.exec_command({ cmd: ' + single + shell + single + ' }); return result'
+  const normalized = normalizeCodeModeSource(source)
+  assert.equal(codeModeSyntaxValid(source), false)
+  assert.equal(codeModeSyntaxValid(normalized), true)
+  let received
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+  const run = new AsyncFunction('tools', normalized)
+  await run({ exec_command: async ({ cmd }) => { received = cmd; return cmd } })
+  assert.equal(received, shell)
+})
+
+test('Code Mode repairs repeated shell diagnostics containing parser-error quotes', async () => {
+  const single = String.fromCharCode(39)
+  const double = String.fromCharCode(34)
+  const diagnostics = [
+    'Expected ' + single + ';' + single + ', got ' + single + 'string literal' + single,
+    'Expected ' + single + ',' + single + ' got ' + single + ';' + single,
+  ]
+  const shell = [
+    'file=/tmp/session.jsonl.zstd; zstdcat -- ' + double + '$file' + double + ' 2>/dev/null',
+    '| rg -q -F ' + double + diagnostics[0] + double + ' || rg -q -F ' + double + diagnostics[1] + double + '; then',
+    'zstdcat -- ' + double + '$file' + double + ' 2>/dev/null | rg -n -F ' + double + diagnostics[0] + double + ' -e ' + double + diagnostics[1] + double + ' -B5 -A5 | tail -50;',
+    'fi',
+  ].join(' ')
+  const source = 'const result = await tools.exec_command({ cmd: ' + single + shell + single + ', workdir: ' + single + '/tmp' + single + ' }); return result'
+  const normalized = normalizeCodeModeSource(source)
+  assert.equal(codeModeSyntaxValid(source), false)
+  assert.equal(codeModeSyntaxValid(normalized), true)
+  let received
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+  const run = new AsyncFunction('tools', normalized)
+  await run({ exec_command: async args => { received = args; return args } })
+  assert.deepEqual(received, { cmd: shell, workdir: '/tmp' })
+})
+
+test('Code Mode repairs jq JSON quotes inside a double-quoted command field', async () => {
+  const single = String.fromCharCode(39)
+  const double = String.fromCharCode(34)
+  const shell = [
+    'file=/tmp/session.jsonl.zstd; zstdcat -- ' + double + '$file' + double + ' 2>/dev/null',
+    '| jq -r ' + single + 'select(.type==' + double + 'request/header' + double + ') | .data.header.tools[]',
+    '| jq -r ' + single + '[.name,((.description // ' + double + double + ')|contains(' + double + 'skill' + double + '))] | @tsv' + single,
+  ].join(' ')
+  const source = 'const result = await tools.exec_command({ cmd: ' + double + shell + double + ' }); return result'
   const normalized = normalizeCodeModeSource(source)
   assert.equal(codeModeSyntaxValid(source), false)
   assert.equal(codeModeSyntaxValid(normalized), true)
@@ -289,12 +333,23 @@ test('Codex local skill policy keeps the skill loader visible for hosted Code Mo
   assert.equal(modelToolAllowed({}, luna, 'skill', {}, true), true)
 })
 
+test('DirectModelOnly request_user_input stays out of the nested Code Mode SDK', () => {
+  const luna = profileForModel('gpt-5.6-luna')
+  assert.equal(modelToolAllowed({}, luna, 'request_user_input', {}, true), false)
+})
+
 test('official tool_mode names preserve the combined Code Mode surface', () => {
   assert.equal(normalizeToolMode('direct'), 'native')
   assert.equal(normalizeToolMode('code_mode'), 'both')
   assert.equal(normalizeToolMode('code_mode_only'), 'code_mode_only')
   assert.equal(normalizeToolMode('both'), 'both')
   assert.equal(normalizeToolMode('unknown'), 'native')
+})
+
+test('CodeModeOnly prompt states the direct-tool boundary while combined mode stays quiet', () => {
+  assert.equal(rewriteCodeModeName('', false), '')
+  assert.match(rewriteCodeModeName('', true), /exec` and `wait` are the only tools you can call directly/)
+  assert.match(rewriteCodeModeName('`run_code` is the only tool you can call directly', true), /`exec` and `wait`/)
 })
 
 test('V2 task names and statuses follow the canonical path/runtime boundaries', () => {

@@ -692,9 +692,9 @@ function registerExecCommand(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'exec_command',
-    description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction. `cmd` is a plain shell-command string; the tool-call transport handles JSON quoting, so do not JSON-encode the command a second time.',
+    description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction. `cmd` is a plain shell-command string; the tool-call transport handles JSON quoting, so do not JSON-encode the command a second time. For shell commands containing quotes, prefer an array of JavaScript lines joined with "\\n" or escape the JavaScript string delimiter; do not wrap a command containing single-quoted shell fragments in a single-quoted JavaScript string.',
     parameters: {
-      cmd: { type: 'string', required: true, description: 'Shell command to execute.' },
+      cmd: { type: 'string', required: true, description: 'Shell command to execute. If it contains shell quotes, use a line array or escape the JavaScript string delimiter.' },
       workdir: { type: 'string', description: 'Working directory for the command. Defaults to the turn cwd.' },
       tty: { type: 'boolean', description: 'True allocates a PTY for the command; false or omitted uses plain pipes.' },
       yield_time_ms: { type: 'number', description: 'Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.' },
@@ -2014,6 +2014,9 @@ function registerQuestions(ctx) {
     output: questionOutput,
     async execute(args, exec) {
       const agent = agentOf(exec)
+      if (agent.session?.header?.parentSession !== undefined) {
+        throw new Error('request_user_input can only be used by the root thread')
+      }
       if (ctx.get('planMode')?.get(agent)?.active !== true) {
         throw new Error('request_user_input is unavailable in Default mode')
       }

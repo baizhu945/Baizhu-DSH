@@ -377,6 +377,10 @@ function modelToolAllowed(ctx, profile, name, agent, nested, toolArguments) {
     && toolArguments !== null && typeof toolArguments === 'object' && toolArguments.image_query !== undefined) return false
   if (name === SKILL && !profile.includeSkillsUsageInstructions) return false
   if (name === 'view_image' && !isImageCapable(profile)) return false
+  // The upstream handler is DirectModelOnly: it is callable by the direct
+  // model surface in Plan Mode, but is intentionally absent from the nested
+  // Code Mode SDK even for code_mode_only rows.
+  if (name === 'request_user_input' && nested) return false
   if (name === 'request_user_input' && profile.toolMode !== 'code_mode_only' && !planModeActive(ctx, agent)) return false
   if (isV1Tool(name)) return profile.multiAgentVersion === 'v1'
   if (V2_NAMES.has(name)) return profile.multiAgentVersion === 'v2'
@@ -433,11 +437,13 @@ function dynamicSdk(ctx, agent, profile, fallback) {
   }
 }
 
-function rewriteCodeModeName(text) {
+function rewriteCodeModeName(text, codeModeOnly = false) {
   if (typeof text !== 'string') return text
-  return text
+  const rewritten = text
     .replaceAll(RUN_CODE, CODE_MODE_TOOL)
     .replace('`exec` is the only tool you can call directly', '`exec` and `wait` are the only tools you can call directly')
+  if (!codeModeOnly || rewritten.trim() !== '') return rewritten
+  return '`exec` and `wait` are the only tools you can call directly — a tool call naming any other tool fails. Reach every tool the SDK declares below from inside the program.'
 }
 
 function codeModeErrorText(result) {
@@ -1205,7 +1211,18 @@ function codeModeStringCandidates(text, field) {
   for (let index = field.valueStart + 1; index < text.length; index++) {
     if (text[index] === field.quote && !codeModeQuoteIsEscaped(text, index)) candidates.push(index)
   }
-  candidates.sort((left, right) => codeModeBoundaryScore(text, left) - codeModeBoundaryScore(text, right) || left - right)
+  // Prefer the quote that is followed by a real JavaScript property or
+  // statement boundary. A shell command can contain many quote pairs (jq,
+  // awk, `rg -F "..."`, and nested Node snippets); choosing the first quote
+  // with a punctuation-shaped successor makes the search spend its repair
+  // budget escaping one shell fragment at a time. The actual field boundary
+  // lets one repair escape all inner quotes in one pass, including repeated
+  // diagnostic strings such as `Expected ';', got 'string literal'`.
+  candidates.sort((left, right) => (
+    Number(!codeModeFieldBoundary(text, right)) - Number(!codeModeFieldBoundary(text, left))
+    || codeModeBoundaryScore(text, left) - codeModeBoundaryScore(text, right)
+    || left - right
+  ))
   return candidates.slice(0, 96)
 }
 
@@ -1232,7 +1249,10 @@ function repairCodeModeStringBoundaries(source) {
   let attempts = 0
   function search(candidate, depth) {
     if (codeModeSyntaxValid(candidate)) return candidate
-    if (depth >= 6 || attempts >= 1200 || visited.has(candidate)) return undefined
+    // A single shell field may contain several quoted diagnostics or embedded
+    // scripts. Boundary-first selection normally repairs it in one pass, but
+    // keep enough depth for fallback combinations across several fields.
+    if (depth >= 12 || attempts >= 4000 || visited.has(candidate)) return undefined
     visited.add(candidate)
     for (const field of codeModeStringFields(candidate)) {
       for (const end of codeModeStringCandidates(candidate, field)) {
@@ -1296,12 +1316,13 @@ function registerCodeModeAlias(ctx) {
       'The required input is the body of an async function, not a JSON object or fenced code block; Node parses it with its erasable TypeScript parser.',
       'For multiline shell commands, build cmd with ["line 1", "line 2"].join("\\n") instead of putting a literal newline inside a JavaScript quoted string.',
       'Nested tools.exec_command takes a JavaScript object such as { cmd: "printf hello" }; do not wrap that object in JSON.stringify or double-escape the cmd value.',
+      'For shell commands containing single quotes (for example jq, awk, or parser diagnostics), prefer a double-quoted JavaScript string or an array joined with "\\n"; do not use a single-quoted JavaScript string around the whole command.',
       'Do not put Bash parameter expansions such as ${rc:-0} inside a JavaScript template literal; use an array of shell lines joined with "\\n".',
       'Call tools as await tools.<tool_name>(arguments) and return a JSON-serializable value.',
       'The dsh compatibility transport carries that source in the required input string property.',
     ].join(' '),
     parameters: {
-      input: { type: 'string', required: true, description: 'Raw JavaScript/TypeScript function body. Build multiline shell commands with an array joined by "\\n"; do not wrap it in JSON or markdown fences.' },
+      input: { type: 'string', required: true, description: 'Raw JavaScript/TypeScript function body. Build multiline shell commands with an array joined by "\\n"; for commands containing shell quotes, avoid wrapping the whole command in a JavaScript string with the same quote character.' },
       description: { type: 'string', description: 'Optional short summary of what the program does.' },
     },
     output: {
@@ -1971,7 +1992,9 @@ function registerModelParity(ctx) {
       .filter(section => profile.toolMode !== 'native' || section.name !== 'tools:sdk')
       .map(section => {
         if (section.name === 'deployment:persona') return { ...section, text: profile.instructions }
-        if (section.name === 'tools:code-only') return { ...section, text: rewriteCodeModeName(section.text) }
+        if (section.name === 'tools:code-only') {
+          return { ...section, text: rewriteCodeModeName(section.text, profile.toolMode === 'code_mode_only') }
+        }
         if (profile.toolMode !== 'native' && section.name === 'tools:sdk') {
           return { ...section, text: rewriteCodeModeName(dynamicSdk(ctx, agent, profile, section.text)) }
         }
@@ -2002,6 +2025,7 @@ export {
   profileForModel,
   registerCodeModeAlias,
   registerV2Agents,
+  rewriteCodeModeName,
   v2FinalMessageId,
   v2PendingUpdate,
   v2Status,
