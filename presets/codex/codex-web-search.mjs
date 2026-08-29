@@ -1,11 +1,13 @@
 /**
  * Standalone Codex-compatible web.run extension for the Codex preset.
  *
- * This deliberately does not use dsh's ctx.web or @deepseek-ai/dsh-tool-web.
- * It calls the same `/backend-api/codex/alpha/search` backend used by current
- * Luna Code Mode,
+ * The `web__run` implementation deliberately calls the same
+ * `/backend-api/codex/alpha/search` backend used by current Luna Code Mode,
  * using the preset's existing OpenAI Codex OAuth credential. Responses Lite
- * does not accept the hosted `web_search` tool declaration.
+ * does not accept the hosted `web_search` tool declaration. For non-Lite
+ * catalog rows, this module supplies a small `ctx.web`-backed `web_search`
+ * fallback only when the host has not already registered the standard DSH
+ * tool (the headless profile already provides it).
  */
 const createRequire = process.getBuiltinModule('node:module').createRequire
 const fs = process.getBuiltinModule('node:fs/promises')
@@ -30,6 +32,9 @@ const SEARCH_RETRY_BACKOFF_MS = [250, 1_000]
 const REFRESH_SKEW_MS = 60_000
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 const credentialFile = nodePath.join(dshHome, 'openai-codex-credentials.json')
+const HOSTED_WEB_SEARCH = 'web_search'
+const HOSTED_WEB_SEARCH_MAX_RESULTS = 8
+const HOSTED_WEB_SEARCH_MAX_QUERIES = 4
 const WEB_RUN_DESCRIPTION = (await fs.readFile(
   nodePath.join(dshHome, '.agent-presets/codex/codex-web-run-description.md'),
   'utf8',
@@ -151,7 +156,7 @@ function parseResponseEnvelope(body) {
     return {
       output,
       answer,
-      sources: extractStructuredSources(parsed?.results ?? parsed?.sources ?? parsed?.citations),
+      sources: extractStructuredSources([parsed?.results, parsed?.sources, parsed?.citations]),
     }
   }
 
@@ -185,7 +190,11 @@ function parseResponseEnvelope(body) {
   return {
     output: completedOutput,
     answer,
-    sources: extractStructuredSources(completedResponse?.results ?? completedResponse?.sources ?? completedResponse?.citations),
+    sources: extractStructuredSources([
+      completedResponse?.results,
+      completedResponse?.sources,
+      completedResponse?.citations,
+    ]),
   }
 }
 
@@ -322,6 +331,188 @@ function mergeSources(...groups) {
     for (const source of group) addSource(sources, byUrl, source?.url, source?.title, source?.snippet ?? '')
   }
   return sources
+}
+
+function hostedSearchSource(source) {
+  if (source === null || typeof source !== 'object' || Array.isArray(source) || typeof source.url !== 'string') return undefined
+  return {
+    url: source.url,
+    ...(typeof source.title === 'string' ? { title: source.title } : {}),
+    ...(typeof source.snippet === 'string' ? { snippet: source.snippet } : {}),
+    ...(typeof source.publishedAt === 'string' ? { publishedAt: source.publishedAt } : {}),
+  }
+}
+
+function hostedSearchOutput(result) {
+  const parts = []
+  if (typeof result.content === 'string' && result.content.length > 0) parts.push(result.content)
+  if (result.sources.length > 0) {
+    const lines = result.sources.map(source => {
+      const label = sourceLabel(source)
+      const metadata = []
+      if (source.snippet !== undefined && source.snippet.length > 0) metadata.push(source.snippet)
+      if (source.publishedAt !== undefined && source.publishedAt.length > 0) metadata.push(`(${source.publishedAt})`)
+      return `- [${label}](${source.url})${metadata.length > 0 ? ` — ${metadata.join(' ')}` : ''}`
+    })
+    parts.push(`Sources:\n${lines.join('\n')}`)
+  } else if (result.content === undefined || result.content.length === 0) {
+    parts.push('No results found.')
+  }
+  if (result.truncated) parts.push(`(Showing the first ${result.sources.length} sources. Refine the query for more.)`)
+  parts.push('Cite the relevant URLs above as markdown links in your answer.')
+  return parts.join('\n\n')
+}
+
+function hostedSearchMeta(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const sources = Array.isArray(value.sources) ? value.sources.map(hostedSearchSource) : []
+  if (sources.some(source => source === undefined) || typeof value.truncated !== 'boolean') return undefined
+  if (value.content !== undefined && typeof value.content !== 'string') return undefined
+  return {
+    sources,
+    truncated: value.truncated,
+    ...(typeof value.content === 'string' ? { answer: value.content } : {}),
+  }
+}
+
+function hostedSearchResultMeta(meta) {
+  if (meta === null || typeof meta !== 'object' || Array.isArray(meta)) return undefined
+  const sources = Array.isArray(meta.sources) ? meta.sources.map(hostedSearchSource) : []
+  if (sources.some(source => source === undefined) || typeof meta.truncated !== 'boolean') return undefined
+  if (meta.answer !== undefined && typeof meta.answer !== 'string') return undefined
+  return {
+    sources,
+    truncated: meta.truncated,
+    ...(typeof meta.answer === 'string' ? { answer: meta.answer } : {}),
+  }
+}
+
+function hostedSearchQueries(args) {
+  const queries = args.queries
+  if (!Array.isArray(queries) || queries.length === 0) throw new Error('queries must contain at least one query')
+  if (queries.length > HOSTED_WEB_SEARCH_MAX_QUERIES) throw new Error('queries must contain at most four queries')
+  if (queries.some(query => typeof query !== 'string' || query.trim() === '')) {
+    throw new Error('each query must be a non-empty string')
+  }
+  return [...new Set(queries)]
+}
+
+function mergeHostedSearchResults(queries, results) {
+  const seen = new Set()
+  const sources = []
+  const sourceRanks = Math.max(0, ...results.map(result => result.sources.length))
+  let droppedSource = false
+  merge: for (let rank = 0; rank < sourceRanks; rank++) {
+    for (const result of results) {
+      const source = hostedSearchSource(result.sources[rank])
+      if (source === undefined || seen.has(source.url)) continue
+      seen.add(source.url)
+      if (sources.length === HOSTED_WEB_SEARCH_MAX_RESULTS) {
+        droppedSource = true
+        break merge
+      }
+      sources.push(source)
+    }
+  }
+  const contents = results.flatMap((result, index) => (
+    typeof result.content === 'string' && result.content.length > 0
+      ? [`### ${queries[index]}\n\n${result.content}`]
+      : []
+  ))
+  return {
+    ...(contents.length > 0 ? { content: contents.join('\n\n') } : {}),
+    sources,
+    truncated: results.some(result => result.truncated === true) || droppedSource,
+  }
+}
+
+async function hostedWebSearch(ctx, args, exec) {
+  const web = ctx.get('web')
+  if (web === undefined || typeof web.search !== 'function') throw new Error('web_search provider is unavailable')
+  const queries = hostedSearchQueries(args)
+  const controller = new AbortController()
+  const signal = AbortSignal.any([exec.signal, controller.signal])
+  let firstError
+  const results = []
+  const searches = queries.map(async (query, index) => {
+    try {
+      results[index] = await web.search({ query, maxResults: HOSTED_WEB_SEARCH_MAX_RESULTS }, signal)
+    } catch (error) {
+      firstError ??= error
+      controller.abort(error)
+    }
+  })
+  await Promise.all(searches)
+  if (firstError !== undefined) throw firstError
+  return mergeHostedSearchResults(queries, results)
+}
+
+function registerHostedWebSearch(ctx) {
+  if (ctx.tools.get(HOSTED_WEB_SEARCH) !== undefined || ctx.get('web') === undefined) return
+  ctx.systemPrompt.section({
+    name: 'tool:web_search',
+    order: 110,
+    text: 'Use the web_search tool to discover current information on the web. The required queries array accepts 1–4 non-empty search queries; use a one-item array for a single search. It returns an optional answer plus a list of source URLs. Cite the relevant URLs as markdown links.',
+  })
+  ctx.tools.register(defineTool({
+    name: HOSTED_WEB_SEARCH,
+    description: 'Search the web for current information. Provide 1–4 queries in the required queries array. Returns an optional summary answer and a list of source URLs.',
+    parameters: {
+      queries: {
+        type: 'array',
+        required: true,
+        items: { type: 'string' },
+        description: 'Required search queries; accepts 1–4 items and merges their results.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          content: { type: 'string' },
+          sources: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                url: { type: 'string', required: true },
+                title: { type: 'string' },
+                snippet: { type: 'string' },
+                publishedAt: { type: 'string' },
+              },
+            },
+          },
+          truncated: { type: 'boolean', required: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: hostedSearchOutput(value) }],
+      presentationMeta: (_args, value) => hostedSearchMeta(value),
+    },
+    timeoutMs: SEARCH_TIMEOUT_MS,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      return hostedWebSearch(ctx, args, exec)
+    },
+    presentCall(args) {
+      return { card: 'generic', title: args.queries.join(', '), kind: 'search', rawInput: args.queries.join(', ') }
+    },
+    presentResult(args, result) {
+      if (result.isError) return undefined
+      const meta = hostedSearchResultMeta(result.meta)
+      if (meta === undefined) return undefined
+      return {
+        card: 'web',
+        kind: 'search',
+        title: args.queries.join(', '),
+        sources: meta.sources,
+        truncated: meta.truncated,
+        ...(meta.answer === undefined ? {} : { answer: meta.answer }),
+      }
+    },
+  }))
 }
 
 function searchCommands(args) {
@@ -693,6 +884,7 @@ export const name = 'codex-web-search'
 export const inject = ['tools']
 
 export function apply(ctx) {
+  registerHostedWebSearch(ctx)
   registerWebSearch(ctx)
 }
 

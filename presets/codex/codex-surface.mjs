@@ -374,6 +374,9 @@ function presentTerminalResult(result) {
 }
 
 const PTY_BACKEND = 'shell'
+const AGENT_WAIT_DEFAULT_MS = 30_000
+const AGENT_WAIT_MIN_MS = 10_000
+const AGENT_WAIT_MAX_MS = 3_600_000
 const execSessions = new Map()
 let nextExecSessionId = 0
 
@@ -917,9 +920,9 @@ function registerWait(ctx) {
   }
   ctx.tools.register(defineTool({
     name: 'wait',
-    description: 'Waits on a yielded `exec` cell and returns new output or completion.\n- Use `wait` only after `exec` returns `Script running with cell ID ...`.\n- `cell_id` identifies the running `exec` cell to resume.\n- `yield_time_ms` controls how long to wait for output. Defaults to 10000 ms.\n- `max_tokens` limits how much new output this wait call returns. Defaults to 10000 tokens.\n- `terminate: true` stops the running `exec` cell; false or omitted waits for output.\n- `wait` returns only the new output since the last yield, or the final completion or termination result for that cell.\n- If the cell is still running, `wait` may yield again with the same `cell_id`.\n- If the cell has already finished, the completed result is returned and the cell closes.',
+    description: 'Waits on a yielded `exec` cell and returns new output or completion.\n- Use `wait` only after `exec` returns `Script running with cell ID ...`.\n- `cell_id` identifies the running `exec` cell to resume.\n- `yield_time_ms` controls how long to wait for output. Defaults to 10000 ms.\n- `max_tokens` limits how much new output this wait call returns. Defaults to 10000 tokens.\n- `terminate: true` stops the running `exec` cell; false or omitted waits for output.\n- `wait` returns only the new output since the last yield, or the final completion or termination result for that cell.\n- If the cell is still running, `wait` may yield again with the same `cell_id`.\n- If the cell has already finished, the completed result is returned and the cell closes.\n- DSH compatibility: Code Mode programs complete synchronously and do not yield resumable cells. For a nested shell session, use `tools.write_stdin({ session_id, ... })` inside Code Mode. This adapter accepts a numeric unified-exec session ID as `cell_id` when needed.',
     parameters: {
-      cell_id: { type: 'string', required: true, description: 'Identifier of the running exec cell.' },
+      cell_id: { type: 'string', required: true, description: 'Identifier of the running exec cell. In DSH, pass the numeric unified-exec session ID as a string.' },
       yield_time_ms: { type: 'number', description: 'Wait before yielding more output. Defaults to 10000 ms.' },
       max_tokens: { type: 'number', description: 'Output token budget for this wait call. Defaults to 10000 tokens.' },
       terminate: { type: 'boolean', description: 'True stops the running exec cell; false or omitted waits for output.' },
@@ -2422,7 +2425,7 @@ function registerAgents(ctx) {
     description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status.",
     parameters: {
       targets: { type: 'array', required: true, items: { type: 'string' }, description: 'Exact agent_id values returned by spawn_agent. Multiple ids wait for whichever finishes first.' },
-      timeout_ms: { type: 'number', description: 'Timeout in milliseconds. Defaults to 30000; maximum 3600000.' },
+      timeout_ms: { type: 'number', description: 'Timeout in milliseconds. Defaults to 30000; minimum 10000; maximum 3600000.' },
     },
     output: {
       schema: {
@@ -2448,11 +2451,13 @@ function registerAgents(ctx) {
     async execute(args, exec) {
       const parent = agentOf(exec)
       if (!Array.isArray(args.targets) || args.targets.length === 0) throw new Error('wait_agent requires at least one target')
-      const requestedTimeout = args.timeout_ms ?? 30_000
-      if (!Number.isFinite(requestedTimeout) || requestedTimeout < 0) {
-        throw new Error('invalid timeout_ms: expected a non-negative number, got ' + String(requestedTimeout))
+      const requestedTimeout = args.timeout_ms
+      if (requestedTimeout !== undefined && (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0)) {
+        throw new Error('invalid timeout_ms: expected a positive number, got ' + String(requestedTimeout))
       }
-      const timeoutMs = Math.min(3_600_000, requestedTimeout)
+      const timeoutMs = requestedTimeout === undefined
+        ? AGENT_WAIT_DEFAULT_MS
+        : Math.min(AGENT_WAIT_MAX_MS, Math.max(AGENT_WAIT_MIN_MS, requestedTimeout))
       const rows = await directChildren(ctx, parent, exec.signal)
       const known = new Set(rows.map(row => row.id))
       const unknown = args.targets.filter(target => !known.has(target))
@@ -2464,14 +2469,20 @@ function registerAgents(ctx) {
         return { status: { [alreadyClosed]: 'shutdown' }, timed_out: false }
       }
       const timeoutController = new AbortController()
+      // A timeout must also cancel the losing waiters. Without a per-call
+      // signal, waitForFinal() leaves an abort listener attached to the turn
+      // signal until every other target eventually settles.
+      const waitController = new AbortController()
+      const waitSignal = AbortSignal.any([exec.signal, waitController.signal])
       let winner
       try {
         winner = await Promise.race([
-          ...args.targets.map(target => waitForFinal(target, exec.signal)),
+          ...args.targets.map(target => waitForFinal(target, waitSignal)),
           timeoutPromise(timeoutMs, timeoutController.signal),
         ])
       } finally {
         timeoutController.abort()
+        waitController.abort()
       }
       if (winner === undefined) return { status: {}, timed_out: true }
       return { status: { [winner]: visibleStatus(winner, true) }, timed_out: false }

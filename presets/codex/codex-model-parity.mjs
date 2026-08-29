@@ -29,6 +29,7 @@ const CODE_MODE_TOOL = 'exec'
 const WAIT_TOOL = 'wait'
 const SKILL = 'skill'
 const WEB_RUN = 'web__run'
+const WEB_SEARCH = 'web_search'
 // This preset intentionally exposes DSH's local skill catalog. The upstream
 // Luna rows set this false because hosted Codex does not inject local skills;
 // that metadata cannot describe this preset's scoped filesystem provider.
@@ -51,9 +52,13 @@ const SERIAL_ROOT_TAILS = new WeakMap()
 const V2_PATH_CACHES = new WeakMap()
 const V2_PATH_RESERVATIONS = new WeakMap()
 const V2_STEERED = Object.freeze({ kind: 'steered' })
+const V2_WAIT_DEFAULT_MS = 30_000
+const V2_WAIT_MIN_MS = 10_000
+const V2_WAIT_MAX_MS = 3_600_000
 const CODE_MODE_STRIP_PREFIX = 'async function __dsh_program__() {\n'
 const CODE_MODE_STRIP_SUFFIX = '\n}'
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+const PREVIEW_ESCAPED_TEMPLATE_MARKER = String.fromCharCode(0)
 
 function humanLabel(key) {
   return String(key)
@@ -212,7 +217,9 @@ const DEFAULT_PROFILE = Object.freeze({
   includePluginUsageInstructions: true,
   inputModalities: ['text'],
   supportsImageDetailOriginal: false,
-  supportsSearchTool: true,
+  // Unknown slugs use the official fallback posture: do not advertise a
+  // network search capability until the catalog positively enables it.
+  supportsSearchTool: false,
   webSearchToolType: undefined,
   defaultReasoningLevel: undefined,
   contextWindow: undefined,
@@ -373,6 +380,7 @@ function modelToolAllowed(ctx, profile, name, agent, nested, toolArguments) {
   if ((name === 'exec_command' || name === 'write_stdin') && normalizeShellType(profile.shellType) !== 'unified_exec') return false
   if (name === 'apply_patch' && profile.applyPatchToolType === 'none') return false
   if (name === WEB_RUN && (!profile.useResponsesLite || !profile.supportsSearchTool)) return false
+  if (name === WEB_SEARCH && (profile.useResponsesLite || !profile.supportsSearchTool)) return false
   if (name === WEB_RUN && profile.webSearchToolType === 'text' && toolArguments !== undefined
     && toolArguments !== null && typeof toolArguments === 'object' && toolArguments.image_query !== undefined) return false
   if (name === SKILL && !profile.includeSkillsUsageInstructions) return false
@@ -503,6 +511,13 @@ function previewDecodeString(token, bindings = new Map(), resolving = new Set())
     }
     const escaped = body[++index]
     if (escaped === undefined) break
+    if (quote === String.fromCharCode(96) && escaped === '$' && body[index + 1] === '{') {
+      // Preserve an escaped template opener (`\${...}`), which is commonly
+      // used for a literal shell parameter expansion. The marker prevents the
+      // interpolation pass below from treating it as JavaScript.
+      output += PREVIEW_ESCAPED_TEMPLATE_MARKER + '$'
+      continue
+    }
     switch (escaped) {
       case 'n': output += String.fromCharCode(10); break
       case 'r': output += String.fromCharCode(13); break
@@ -543,16 +558,25 @@ function previewDecodeString(token, bindings = new Map(), resolving = new Set())
     }
   }
   if (quote === String.fromCharCode(96)) {
-    let unresolved = false
-    const expanded = output.replace(/\$\{([^{}]*)\}/g, (_match, expression) => {
+    const expanded = output.replace(/\$\{([^{}]*)\}/g, (match, expression, offset, fullText) => {
+      if (offset > 0 && fullText[offset - 1] === PREVIEW_ESCAPED_TEMPLATE_MARKER) return match
+      // A raw `${name:-fallback}` is shell syntax, not a useful JavaScript
+      // preview expression. The runtime normalizer escapes it before execution;
+      // the card should still show the command the shell will receive.
+      if (/^[A-Za-z_][A-Za-z0-9_]*:[-+?=]/.test(String(expression).trim())) return match
       const value = previewLiteral(expression, bindings, resolving)
-      if (value === undefined) {
-        unresolved = true
-        return '…'
+      // Keep unresolved JavaScript expressions visible. Returning the original
+      // `${...}` text gives the user a useful command preview instead of the
+      // unhelpful `cmd (Code Mode expression)` fallback.
+      if (value === undefined) return match
+      if (value === null) return 'null'
+      if (typeof value === 'string') return value
+      if (typeof value === 'object') {
+        try { return JSON.stringify(value) } catch { return String(value) }
       }
-      return previewValueText(value)
+      return String(value)
     })
-    return unresolved ? undefined : expanded
+    return expanded.replaceAll(PREVIEW_ESCAPED_TEMPLATE_MARKER, '')
   }
   return output
 }
@@ -776,6 +800,8 @@ function previewLiteral(expression, bindings = new Map(), resolving = new Set())
     const end = previewBalancedEnd(text, 0)
     if (end === text.length - 1) return previewLiteral(text.slice(1, -1), bindings, resolving)
   }
+  const assertion = /^([\s\S]+)\s+(?:as|satisfies)\s+(?:const|[A-Za-z_$][A-Za-z0-9_$]*(?:<[^<>]*>)?(?:\[\])?)$/.exec(text)
+  if (assertion !== null) return previewLiteral(assertion[1], bindings, resolving)
   const quoted = previewQuotedToken(text, 0)
   if (quoted !== undefined && quoted.end === text.length) return previewDecodeString(quoted.token, bindings, resolving)
   if (text === 'true') return true
@@ -808,12 +834,32 @@ function previewLiteral(expression, bindings = new Map(), resolving = new Set())
       if (item !== undefined) return stringFunction[1] === 'String' ? String(item) : Number(item)
     }
   }
+  const charFunction = /^String\.(fromCharCode|fromCodePoint)\(([\s\S]*)\)$/.exec(text)
+  if (charFunction !== null) {
+    const open = text.indexOf('(')
+    const end = previewBalancedEnd(text, open)
+    if (end === text.length - 1) {
+      const parts = charFunction[2].trim() === '' ? [] : previewSplitTopLevel(charFunction[2], ',')
+      const values = parts.map(item => previewLiteral(item, bindings, resolving))
+      if (!values.some(item => item === undefined) && values.every(item => typeof item === 'number')) {
+        try {
+          return charFunction[1] === 'fromCharCode'
+            ? String.fromCharCode(...values)
+            : String.fromCodePoint(...values)
+        } catch {
+          return undefined
+        }
+      }
+    }
+  }
   if (text.startsWith('[')) {
     const arrayEnd = previewBalancedEnd(text, 0)
     if (arrayEnd === text.length - 1) {
       const inner = text.slice(1, -1).trim()
       if (inner === '') return []
-      const values = previewSplitTopLevel(inner, ',').map(item => previewLiteral(item, bindings, resolving))
+      const parts = previewSplitTopLevel(inner, ',')
+      if (parts.at(-1) === '') parts.pop()
+      const values = parts.map(item => previewLiteral(item, bindings, resolving))
       return values.some(item => item === undefined) ? undefined : values
     }
     if (arrayEnd !== undefined && text.slice(arrayEnd + 1).trim().startsWith('.join')) {
@@ -824,7 +870,9 @@ function previewLiteral(expression, bindings = new Map(), resolving = new Set())
         const joinArguments = tail.slice(open + 1, close).trim()
         const separator = joinArguments === '' ? ',' : previewLiteral(joinArguments, bindings, resolving)
         const arrayText = text.slice(1, arrayEnd).trim()
-        const values = arrayText === '' ? [] : previewSplitTopLevel(arrayText, ',').map(item => previewLiteral(item, bindings, resolving))
+        const parts = arrayText === '' ? [] : previewSplitTopLevel(arrayText, ',')
+        if (parts.at(-1) === '') parts.pop()
+        const values = parts.map(item => previewLiteral(item, bindings, resolving))
         if (separator !== undefined && !values.some(item => item === undefined)) return values.join(String(separator))
       }
     }
@@ -852,12 +900,24 @@ function previewLiteral(expression, bindings = new Map(), resolving = new Set())
 function previewBindings(source) {
   const text = String(source)
   const bindings = new Map()
-  const pattern = /\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=/g
+  // TypeScript annotations are stripped before execution but remain in the
+  // model-authored source used for the pending-call card.
+  const pattern = /\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::\s*[^=\n;]+)?\s*=/g
   let match
   while ((match = pattern.exec(text)) !== null) {
     const parsed = previewStatementExpression(text, pattern.lastIndex)
     if (parsed.expression !== '') bindings.set(match[1], parsed.expression)
     pattern.lastIndex = parsed.end < text.length ? parsed.end + 1 : text.length
+  }
+  // Also follow the common two-step form (`let cmd; cmd = ...`). Keep the
+  // declaration pass above because it handles multiline initializers; this
+  // narrow statement-boundary matcher avoids treating object properties as
+  // variable assignments.
+  const assignmentPattern = /(?:^|[;\n\r])\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*=/g
+  while ((match = assignmentPattern.exec(text)) !== null) {
+    const parsed = previewStatementExpression(text, assignmentPattern.lastIndex)
+    if (parsed.expression !== '') bindings.set(match[1], parsed.expression)
+    assignmentPattern.lastIndex = parsed.end < text.length ? parsed.end + 1 : text.length
   }
   return bindings
 }
@@ -1430,6 +1490,10 @@ function v2PathReservations(ctx) {
   return reservations
 }
 
+function v2ReservationKey(rootId, path) {
+  return String(rootId ?? '') + '\u0000' + path
+}
+
 function v2RootAgent(ctx, agent) {
   let current = agent
   const seen = new Set()
@@ -1764,10 +1828,11 @@ function registerV2Agents(ctx) {
       const parentPath = roster.cache.get(v2Id(parent.id)) ?? '/root'
       const canonicalPath = parentPath + '/' + taskName
       const reservations = v2PathReservations(ctx)
-      if (roster.direct.some(row => row.label === taskName) || reservations.has(canonicalPath)) {
+      const reservationKey = v2ReservationKey(v2Id(roster.root?.id), canonicalPath)
+      if (roster.direct.some(row => row.label === taskName) || reservations.has(reservationKey)) {
         throw new Error('task path already exists: ' + canonicalPath)
       }
-      reservations.add(canonicalPath)
+      reservations.add(reservationKey)
       try {
         const child = await ctx.subagents.startContinuable({
           provider,
@@ -1784,7 +1849,7 @@ function registerV2Agents(ctx) {
         v2PathCache(ctx).set(childId, canonicalPath)
         return { task_name: canonicalPath }
       } finally {
-        reservations.delete(canonicalPath)
+        reservations.delete(reservationKey)
       }
     },
   }))
@@ -1833,27 +1898,35 @@ function registerV2Agents(ctx) {
   ctx.tools.register(defineTool({
     name: 'wait_agent',
     description: 'Wait for a mailbox update from any live agent, including queued messages and final-status notifications. Returns a summary without the agent final content, or a timeout summary.',
-    parameters: { timeout_ms: { type: 'number', description: 'Timeout in milliseconds. Defaults to 30000; maximum 3600000.' } },
+    parameters: { timeout_ms: { type: 'number', description: 'Timeout in milliseconds. Defaults to 30000; minimum 10000; maximum 3600000. Values below the minimum are clamped; values above the maximum are rejected.' } },
     output: { schema: { type: 'object', additionalProperties: false, properties: { message: { type: 'string', required: true }, timed_out: { type: 'boolean', required: true } } }, ...v2JsonOutput('Agent wait') },
     async execute(args, execution) {
       const parent = v2AgentOf(execution)
-      const requestedTimeout = args.timeout_ms ?? 30_000
-      if (!Number.isFinite(requestedTimeout) || requestedTimeout < 0) {
+      const requestedTimeout = args.timeout_ms
+      if (requestedTimeout !== undefined && (!Number.isFinite(requestedTimeout) || requestedTimeout < 0)) {
         throw new Error('invalid timeout_ms: expected a non-negative number, got ' + String(requestedTimeout))
       }
-      const timeoutMs = Math.min(3_600_000, requestedTimeout)
+      if (requestedTimeout !== undefined && requestedTimeout > V2_WAIT_MAX_MS) {
+        throw new Error('timeout_ms must be at most ' + String(V2_WAIT_MAX_MS))
+      }
+      const timeoutMs = requestedTimeout === undefined
+        ? V2_WAIT_DEFAULT_MS
+        : Math.max(V2_WAIT_MIN_MS, requestedTimeout)
+      const clampNotice = requestedTimeout !== undefined && requestedTimeout < timeoutMs
+        ? '\n\nRequested timeout of ' + String(requestedTimeout) + 'ms was clamped to the minimum of ' + String(timeoutMs) + 'ms.'
+        : ''
       const rows = await v2Children(ctx, parent, execution.signal)
       const targets = new Set(rows.map(row => String(row.id)))
       const live = rows.map(row => ctx.agents.get(row.id)).filter(agent => agent !== undefined)
       const pending = v2PendingUpdate(parent, live, targets)
-      if (pending === V2_STEERED) return { message: 'Wait interrupted by new input.', timed_out: false }
-      if (pending !== undefined) return { message: 'Wait completed.', timed_out: false }
+      if (pending === V2_STEERED) return { message: 'Wait interrupted by new input.' + clampNotice, timed_out: false }
+      if (pending !== undefined) return { message: 'Wait completed.' + clampNotice, timed_out: false }
       const settled = rows.find(row => v2FinalStatus(settlements.get(row.id)?.end) !== undefined)
-      if (settled !== undefined) return { message: 'Wait completed.', timed_out: false }
+      if (settled !== undefined) return { message: 'Wait completed.' + clampNotice, timed_out: false }
       const winner = await waitForV2MailboxUpdate(ctx, parent, live, targets, timeoutMs, execution.signal)
-      if (winner === undefined) return { message: 'Wait timed out.', timed_out: true }
-      if (winner === V2_STEERED) return { message: 'Wait interrupted by new input.', timed_out: false }
-      return { message: 'Wait completed.', timed_out: false }
+      if (winner === undefined) return { message: 'Wait timed out.' + clampNotice, timed_out: true }
+      if (winner === V2_STEERED) return { message: 'Wait interrupted by new input.' + clampNotice, timed_out: false }
+      return { message: 'Wait completed.' + clampNotice, timed_out: false }
     },
   }))
 
@@ -1995,11 +2068,14 @@ function registerModelParity(ctx) {
         if (section.name === 'tools:code-only') {
           return { ...section, text: rewriteCodeModeName(section.text, profile.toolMode === 'code_mode_only') }
         }
+        if (section.name === 'tool:web_search'
+          && (profile.useResponsesLite || !profile.supportsSearchTool)) return undefined
         if (profile.toolMode !== 'native' && section.name === 'tools:sdk') {
           return { ...section, text: rewriteCodeModeName(dynamicSdk(ctx, agent, profile, section.text)) }
         }
         return section
       })
+      .filter(section => section !== undefined)
     return { ...assembled, sections, tools }
   })
 }

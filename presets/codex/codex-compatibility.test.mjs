@@ -29,7 +29,7 @@ import {
   terminalOutputText,
   waitForTerminalOperation,
 } from './codex-surface.mjs'
-import { parseResponseBody, parseResponseEnvelope, requestCodexSearchForTest, searchCommands } from './codex-web-search.mjs'
+import { apply as applyCodexWebSearch, parseResponseBody, parseResponseEnvelope, requestCodexSearchForTest, searchCommands } from './codex-web-search.mjs'
 
 const shellQuoteSplice = String.fromCharCode(39) + String.fromCharCode(34) + String.fromCharCode(39) + String.fromCharCode(34) + String.fromCharCode(39)
 const directPatch = ['*** Begin Patch', '*** Add File: direct.txt', '+direct "quoted" line', '*** End Patch'].join('\n')
@@ -146,6 +146,31 @@ test('Code Mode repairs jq JSON quotes inside a double-quoted command field', as
   const run = new AsyncFunction('tools', normalized)
   await run({ exec_command: async ({ cmd }) => { received = cmd; return cmd } })
   assert.equal(received, shell)
+})
+
+test('Code Mode preview resolves typed command bindings and preserves shell interpolation', () => {
+  const source = [
+    'const cmd: string = [',
+    '  "printf one",',
+    '  `printf "${name:-fallback}"`,',
+    '].join("\\n");',
+    'return await tools.exec_command({ cmd, workdir: "/home/baizhu945" });',
+  ].join('\n')
+  const preview = codeModePreview(source)
+  assert.match(preview.text, /Command: printf one\nprintf "\$\{name:-fallback\}"/)
+  assert.doesNotMatch(preview.text, /Command: cmd \(Code Mode expression\)/)
+})
+
+test('Code Mode preview follows reassigned bindings and simple JavaScript helpers', () => {
+  const cases = [
+    'let cmd; cmd = "printf reassigned"; return await tools.exec_command({ cmd });',
+    'const cmd = ["printf helper"].join(String.fromCharCode(10)) as string; return await tools.exec_command({ cmd });',
+  ]
+  for (const source of cases) {
+    const preview = codeModePreview(source)
+    assert.match(preview.text, /Command: printf (?:reassigned|helper)/)
+    assert.doesNotMatch(preview.text, /Command: cmd \(Code Mode expression\)/)
+  }
 })
 
 test('malformed String.raw patch templates preserve literal backticks', async () => {
@@ -333,6 +358,17 @@ test('Codex local skill policy keeps the skill loader visible for hosted Code Mo
   assert.equal(modelToolAllowed({}, luna, 'skill', {}, true), true)
 })
 
+test('search tool routing matches Responses Lite capability boundaries', () => {
+  const luna = profileForModel('gpt-5.6-luna')
+  const legacy = profileForModel('gpt-5.4')
+  const unknown = profileForModel('codex-unknown-model')
+  assert.equal(modelToolAllowed({}, luna, 'web__run', {}, true), true)
+  assert.equal(modelToolAllowed({}, luna, 'web_search', {}, true), false)
+  assert.equal(modelToolAllowed({}, legacy, 'web__run', {}, true), false)
+  assert.equal(modelToolAllowed({}, legacy, 'web_search', {}, false), true)
+  assert.equal(modelToolAllowed({}, unknown, 'web_search', {}, false), false)
+})
+
 test('DirectModelOnly request_user_input stays out of the nested Code Mode SDK', () => {
   const luna = profileForModel('gpt-5.6-luna')
   assert.equal(modelToolAllowed({}, luna, 'request_user_input', {}, true), false)
@@ -411,8 +447,49 @@ test('V2 collaboration tools resolve task names, return canonical spawn paths, a
   assert.deepEqual(followed[2], [{ type: 'text', text: 'continue' }])
   const listed = await tool('list_agents').execute({}, execution)
   assert.deepEqual(listed.agents.map(agent => agent.agent_name), ['/root', '/root/child_task'])
+  parent.inbox.nextStep.push({ id: 'report', source: { kind: 'subagent-report', senderSessionId: 'child-id' } })
   const waited = await tool('wait_agent').execute({ timeout_ms: 0 }, execution)
-  assert.deepEqual(waited, { message: 'Wait timed out.', timed_out: true })
+  assert.equal(waited.timed_out, false)
+  assert.match(waited.message, /clamped to the minimum of 10000ms/)
+  await assert.rejects(tool('wait_agent').execute({ timeout_ms: -1 }, execution), /non-negative number/)
+})
+
+test('V2 task reservations do not collide across independent root sessions', async () => {
+  const registrations = []
+  const parentA = { id: 'root-a', status: 'running', session: { id: 'root-a', header: {} }, inbox: { nextStep: [], nextTurn: [] } }
+  const parentB = { id: 'root-b', status: 'running', session: { id: 'root-b', header: {} }, inbox: { nextStep: [], nextTurn: [] } }
+  const agents = new Map([['root-a', parentA], ['root-b', parentB]])
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  let firstStarted
+  const firstStartedPromise = new Promise(resolve => { firstStarted = resolve })
+  let starts = 0
+  const ctx = {
+    on: () => () => {},
+    agents: { get: id => agents.get(id) },
+    tools: { register: tool => registrations.push(tool) },
+    subagents: {
+      list: () => ['spawn', 'fork'],
+      listDescendants: async () => [],
+      startContinuable: async () => {
+        starts++
+        if (starts === 1) firstStarted()
+        await gate
+        return { childId: 'child-' + String(starts) }
+      },
+    },
+  }
+  registerV2Agents(ctx)
+  const spawn = registrations.find(item => item.name === 'spawn_agent')
+  const first = spawn.execute({ task_name: 'same_task', message: 'work', fork_turns: 'none' }, { agent: parentA, signal: new AbortController().signal })
+  await firstStartedPromise
+  const second = spawn.execute({ task_name: 'same_task', message: 'work', fork_turns: 'none' }, { agent: parentB, signal: new AbortController().signal })
+  await Promise.resolve()
+  release()
+  assert.deepEqual(await Promise.all([first, second]), [
+    { task_name: '/root/same_task' },
+    { task_name: '/root/same_task' },
+  ])
 })
 
 function fakePatchContext(initial, hooks = {}) {
@@ -728,6 +805,17 @@ test('web response helpers normalize JSON strings, arrays, and SSE output items'
   }))
   assert.equal(json.answer, 'json answer')
   assert.equal(json.sources.length, 1)
+  const mergedSources = parseResponseEnvelope(JSON.stringify({
+    output: 'answer',
+    results: [{ url: 'https://example.com/results' }],
+    sources: [{ url: 'https://example.com/sources' }],
+    citations: [{ url: 'https://example.com/citations' }],
+  }))
+  assert.deepEqual(mergedSources.sources.map(source => source.url), [
+    'https://example.com/results',
+    'https://example.com/sources',
+    'https://example.com/citations',
+  ])
   const array = parseResponseBody(JSON.stringify([{ type: 'message', content: [{ text: 'array answer' }] }]))
   assert.equal(array.length, 1)
   const sse = [
@@ -736,6 +824,49 @@ test('web response helpers normalize JSON strings, arrays, and SSE output items'
   ].join(String.fromCharCode(10))
   assert.equal(parseResponseEnvelope(sse).answer, 'sse answer')
   assert.throws(() => searchCommands({ search_query: [{ q: '1' }, { q: '2' }, { q: '3' }, { q: '4' }, { q: '5' }] }), /at most four/)
+})
+
+test('Codex web-search fallback mirrors the hosted DSH result shape', async () => {
+  const registrations = []
+  const sections = []
+  const calls = []
+  const web = {
+    search: async ({ query, maxResults }, signal) => {
+      signal.throwIfAborted()
+      calls.push({ query, maxResults })
+      return {
+        content: 'Answer for ' + query,
+        sources: [
+          { url: 'https://example.com/' + query, title: query, snippet: 'snippet', publishedAt: '2026-08-29' },
+          { url: 'https://example.com/shared', title: 'Shared' },
+        ],
+        truncated: false,
+      }
+    },
+  }
+  const ctx = {
+    get: name => name === 'web' ? web : undefined,
+    systemPrompt: { section: section => { sections.push(section) } },
+    tools: {
+      get: () => undefined,
+      register: tool => registrations.push(tool),
+    },
+  }
+  applyCodexWebSearch(ctx)
+  const tool = registrations.find(item => item.name === 'web_search')
+  assert.ok(tool)
+  const result = await tool.execute({ queries: ['first', 'second'] }, { signal: new AbortController().signal })
+  assert.deepEqual(calls, [
+    { query: 'first', maxResults: 8 },
+    { query: 'second', maxResults: 8 },
+  ])
+  assert.deepEqual(result.sources.map(source => source.url), [
+    'https://example.com/first',
+    'https://example.com/second',
+    'https://example.com/shared',
+  ])
+  assert.match(tool.output.render({}, result)[0].text, /Cite the relevant URLs above/)
+  assert.equal(sections.some(section => section.name === 'tool:web_search'), true)
 })
 
 test('V1 collaboration input accepts text items and rejects unsupported rich items', () => {

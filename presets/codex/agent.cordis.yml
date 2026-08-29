@@ -71,8 +71,10 @@
 # the host-owned sandbox, fs, attachment, interaction, and subagent services;
 # no authority is recreated or widened in this preset.
 
-# Provide the Luna standalone `web.run` extension shape. Responses Lite does
-# not use the hosted `web_search` tool path.
+# Provide the standalone `web.run` extension used by Responses Lite. The
+# companion module also restores the official `web_search` function shape for
+# non-Lite catalog rows when the selected host profile has disabled DSH's
+# standard web tool; it never exposes both search paths to a Lite model.
 - id: codex-web-search
   name: './codex-web-search.mjs'
 
