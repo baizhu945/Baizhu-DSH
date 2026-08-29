@@ -21,6 +21,17 @@ const SPAWN_AGENT_DESCRIPTION = (await nodeFs.readFile(
   nodePath.join(dshHome, '.agent-presets/codex/codex-subagent-v1-description.md'),
   'utf8',
 )).trimEnd()
+const SURFACE_MODEL_CATALOG = await (async () => {
+  try {
+    const raw = JSON.parse(await nodeFs.readFile(
+      nodePath.join(dshHome, '.agent-presets/codex/codex-models.json'),
+      'utf8',
+    ))
+    return Array.isArray(raw) ? raw : Array.isArray(raw?.models) ? raw.models : []
+  } catch {
+    return []
+  }
+})()
 
 const IMAGE_EXTENSIONS = {
   '.png': 'image/png',
@@ -156,6 +167,35 @@ function filesystemElement(policy) {
 function agentOf(exec) {
   if (exec.agent === undefined) throw new Error('Codex tool requires a live agent')
   return exec.agent
+}
+
+function surfaceModelId(agent) {
+  try {
+    const header = typeof agent?.session?.requestHeader === 'function' ? agent.session.requestHeader() : undefined
+    const config = header?.config ?? header?.header?.config
+    if (typeof config?.model === 'string' && config.model.trim() !== '') return config.model.trim()
+  } catch {
+    // Fall through to the creation-time option when no header is available.
+  }
+  return typeof agent?.options?.model === 'string' ? agent.options.model.trim() : ''
+}
+
+function surfaceModelRow(agent) {
+  const model = surfaceModelId(agent)
+  const tail = model.slice(model.lastIndexOf('/') + 1)
+  return SURFACE_MODEL_CATALOG.find(row => row !== null && typeof row === 'object'
+    && (row.slug === model || row.slug === tail))
+}
+
+function outputTokenBudget(agent, requested) {
+  const policy = surfaceModelRow(agent)?.truncation_policy
+  const limit = Number.isInteger(policy?.limit) && policy.limit > 0 ? policy.limit : 10_000
+  // boundedOutput() uses a conservative four characters per token. For a
+  // byte-based catalog policy, convert the byte ceiling to that same unit so
+  // UTF-8 output cannot exceed the official byte bound by a large margin.
+  const policyTokenLimit = policy?.mode === 'bytes' ? Math.max(1, Math.floor(limit / 4)) : limit
+  const requestedLimit = requested === undefined ? policyTokenLimit : requested
+  return Math.max(1, Math.min(policyTokenLimit, requestedLimit))
 }
 
 function cwdOf(agent) {
@@ -657,7 +697,7 @@ function pipeOutput(record, elapsedMs, maxOutputTokens) {
   return { ...value, ...(typeof record.process.exitCode === 'number' ? { exit_code: record.process.exitCode } : {}) }
 }
 
-async function startPipeExec(ctx, args, exec, policy) {
+async function startPipeExec(ctx, args, exec, policy, maxOutputTokens) {
   const agent = agentOf(exec)
   const id = ++nextExecSessionId
   const process = ctx.shell.start(ctx.shell.resolve({
@@ -671,7 +711,7 @@ async function startPipeExec(ctx, args, exec, policy) {
   const startedAt = record.startedAt
   try {
     await waitForPipeProcess(process, execYieldTime(args), exec.signal)
-    const value = pipeOutput(record, Date.now() - startedAt, args.max_output_tokens)
+    const value = pipeOutput(record, Date.now() - startedAt, maxOutputTokens)
     if (process.status !== 'running') execSessions.delete(id)
     return value
   } catch (error) {
@@ -742,7 +782,8 @@ function registerExecCommand(ctx) {
         throw new Error(`invalid max_output_tokens: expected a positive number, got ${String(args.max_output_tokens)}`)
       }
       const policy = await execSandboxPolicy(ctx, args, exec)
-      if (args.tty !== true) return startPipeExec(ctx, args, exec, policy)
+      const maxOutputTokens = outputTokenBudget(agent, args.max_output_tokens)
+      if (args.tty !== true) return startPipeExec(ctx, args, exec, policy, maxOutputTokens)
       const id = ++nextExecSessionId
       const marker = `__DSH_CODEX_EXIT_${id}_${Date.now()}__`
       const command = wrappedCommand(commandForShell(args), marker)
@@ -789,7 +830,7 @@ function registerExecCommand(ctx) {
       const startedAt = record.startedAt
       try {
         const settled = await waitForTerminalOperation(operation, execYieldTime(args), exec.signal)
-        return finishTerminalOperation(ctx, record, operation, startedAt, settled, args.max_output_tokens)
+        return finishTerminalOperation(ctx, record, operation, startedAt, settled, maxOutputTokens)
       } catch (error) {
         await closeExecSession(ctx, record)
         throw error
@@ -840,6 +881,7 @@ function registerWriteStdin(ctx) {
       if (args.max_output_tokens !== undefined && (!Number.isFinite(args.max_output_tokens) || args.max_output_tokens <= 0)) {
         throw new Error(`invalid max_output_tokens: expected a positive number, got ${String(args.max_output_tokens)}`)
       }
+      const maxOutputTokens = outputTokenBudget(agent, args.max_output_tokens)
       const record = execSessions.get(args.session_id)
       if (record === undefined || record.owner !== agent) throw new Error(`unknown exec session ${String(args.session_id)}`)
       const chars = args.chars ?? ''
@@ -851,7 +893,7 @@ function registerWriteStdin(ctx) {
           else throw new Error('stdin is closed for a non-TTY exec session; use tty=true for interactive input')
         }
         await waitForPipeProcess(record.process, stdinYieldTime(chars, args.yield_time_ms), exec.signal)
-        const value = pipeOutput(record, Date.now() - startedAt, args.max_output_tokens)
+        const value = pipeOutput(record, Date.now() - startedAt, maxOutputTokens)
         if (record.process.status !== 'running') execSessions.delete(record.id)
         return value
       }
@@ -861,7 +903,7 @@ function registerWriteStdin(ctx) {
         const interrupt = chars === String.fromCharCode(3)
         if (interrupt) operation.cancel()
         const settled = await waitForTerminalOperation(operation, stdinYieldTime(chars, args.yield_time_ms), exec.signal)
-        const value = await finishTerminalOperation(ctx, record, operation, startedAt, settled, args.max_output_tokens)
+        const value = await finishTerminalOperation(ctx, record, operation, startedAt, settled, maxOutputTokens)
         if (!execSessions.has(args.session_id) || settled.kind === 'yield' || chars === '' || interrupt || record.operation !== undefined) return value
         carriedOutput = value.output
       }
@@ -873,8 +915,8 @@ function registerWriteStdin(ctx) {
       record.operation = operation
       record.echoedInput = chars
       const settled = await waitForTerminalOperation(operation, stdinYieldTime(chars, args.yield_time_ms), exec.signal)
-      const value = await finishTerminalOperation(ctx, record, operation, startedAt, settled, args.max_output_tokens)
-      return prependTerminalOutput(value, carriedOutput, args.max_output_tokens)
+      const value = await finishTerminalOperation(ctx, record, operation, startedAt, settled, maxOutputTokens)
+      return prependTerminalOutput(value, carriedOutput, maxOutputTokens)
     },
     presentCall(args) {
       return { card: 'terminal', title: args.chars || '(poll session)', description: `Session ${args.session_id}` }
@@ -2559,6 +2601,7 @@ export {
   parsePatchOperations,
   preflightPatch,
   outputFromOperation,
+  outputTokenBudget,
   applyPatch,
   pipeOutput,
   terminalOutputText,

@@ -51,6 +51,7 @@ const INTERNAL_RUN_CODE_CALLS = new Map()
 const SERIAL_ROOT_TAILS = new WeakMap()
 const V2_PATH_CACHES = new WeakMap()
 const V2_PATH_RESERVATIONS = new WeakMap()
+const TOKEN_BUDGET_STATES = new WeakMap()
 const V2_STEERED = Object.freeze({ kind: 'steered' })
 const V2_WAIT_DEFAULT_MS = 30_000
 const V2_WAIT_MIN_MS = 10_000
@@ -224,12 +225,71 @@ const DEFAULT_PROFILE = Object.freeze({
   defaultReasoningLevel: undefined,
   contextWindow: undefined,
   maxContextWindow: undefined,
+  effectiveContextWindowPercent: 95,
+  autoCompactTokenLimit: undefined,
+  tokenBudget: undefined,
+  supportVerbosity: false,
+  defaultVerbosity: undefined,
+  reasoningSummaryFormat: undefined,
+  defaultReasoningSummary: undefined,
+  truncationPolicy: undefined,
 })
 
 function officialRows(value) {
   if (Array.isArray(value)) return value
   if (value !== null && typeof value === 'object' && Array.isArray(value.models)) return value.models
   return []
+}
+
+function modelTokenBudget(row) {
+  const value = row?.model_messages?.token_budget
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  if (!Number.isInteger(value.reminder_threshold_tokens) || value.reminder_threshold_tokens < 0) return undefined
+  if (!Number.isInteger(value.auto_compact_fallback_buffer_tokens) || value.auto_compact_fallback_buffer_tokens < 0) return undefined
+  if (typeof value.reminder_message_template !== 'string'
+    || typeof value.guidance_message !== 'string'
+    || typeof value.auto_compact_fallback_prompt !== 'string') return undefined
+  return {
+    reminderThresholdTokens: value.reminder_threshold_tokens,
+    reminderMessageTemplate: value.reminder_message_template,
+    guidanceMessage: value.guidance_message,
+    autoCompactFallbackPrompt: value.auto_compact_fallback_prompt,
+    autoCompactFallbackBufferTokens: value.auto_compact_fallback_buffer_tokens,
+  }
+}
+
+function modelTruncationPolicy(row) {
+  const value = row?.truncation_policy
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  if ((value.mode !== 'bytes' && value.mode !== 'tokens') || !Number.isInteger(value.limit) || value.limit <= 0) return undefined
+  return { mode: value.mode, limit: value.limit }
+}
+
+function truncationByteLimit(policy) {
+  if (policy === undefined) return undefined
+  return policy.mode === 'bytes' ? policy.limit : policy.limit * 4
+}
+
+function truncateToolText(text, policy) {
+  const limit = truncationByteLimit(policy)
+  if (limit === undefined || Buffer.byteLength(text, 'utf8') <= limit) return text
+  const marker = '\n[output truncated]'
+  const bodyLimit = Math.max(0, limit - Buffer.byteLength(marker, 'utf8'))
+  const body = Buffer.from(text, 'utf8').subarray(0, bodyLimit).toString('utf8')
+  return body + marker
+}
+
+function truncateToolContent(content, policy) {
+  if (!Array.isArray(content) || policy === undefined) return content
+  let changed = false
+  const truncated = content.map(block => {
+    if (block?.type !== 'text' || typeof block.text !== 'string') return block
+    const text = truncateToolText(block.text, policy)
+    if (text === block.text) return block
+    changed = true
+    return { ...block, text }
+  })
+  return changed ? truncated : content
 }
 
 async function readText(path, fallback) {
@@ -321,11 +381,26 @@ function profileForModel(model) {
     includePluginUsageInstructions: row.include_plugin_usage_instructions !== false,
     inputModalities: Array.isArray(row.input_modalities) ? row.input_modalities : ['text'],
     supportsImageDetailOriginal: row.supports_image_detail_original === true,
-    supportsSearchTool: row.supports_search_tool !== false,
+    // The official model field defaults to false when absent; only an
+    // explicit catalog opt-in should expose a network search tool.
+    supportsSearchTool: row.supports_search_tool === true,
     webSearchToolType: typeof row.web_search_tool_type === 'string' ? row.web_search_tool_type : undefined,
     defaultReasoningLevel: typeof row.default_reasoning_level === 'string' ? row.default_reasoning_level : undefined,
     contextWindow: Number.isInteger(row.context_window) ? row.context_window : undefined,
     maxContextWindow: Number.isInteger(row.max_context_window) ? row.max_context_window : undefined,
+    effectiveContextWindowPercent: Number.isInteger(row.effective_context_window_percent)
+      && row.effective_context_window_percent > 0
+      ? row.effective_context_window_percent
+      : 95,
+    autoCompactTokenLimit: Number.isInteger(row.auto_compact_token_limit) && row.auto_compact_token_limit > 0
+      ? row.auto_compact_token_limit
+      : undefined,
+    tokenBudget: modelTokenBudget(row),
+    supportVerbosity: row.support_verbosity === true,
+    defaultVerbosity: typeof row.default_verbosity === 'string' ? row.default_verbosity : undefined,
+    reasoningSummaryFormat: typeof row.reasoning_summary_format === 'string' ? row.reasoning_summary_format : undefined,
+    defaultReasoningSummary: typeof row.default_reasoning_summary === 'string' ? row.default_reasoning_summary : undefined,
+    truncationPolicy: modelTruncationPolicy(row),
   }
 }
 
@@ -354,6 +429,70 @@ function currentProvider(agent, assembly) {
   const header = requestHeaderConfig(agent)
   if (header && typeof header.provider === 'string' && header.provider.trim() !== '') return header.provider
   return agent && agent.options ? agent.options.provider || '' : ''
+}
+
+function tokenBudgetStateFor(session, profile) {
+  const generation = Number.isInteger(session?.surface?.replaceGeneration)
+    ? session.surface.replaceGeneration
+    : 0
+  const route = profile.model
+  let state = TOKEN_BUDGET_STATES.get(session)
+  if (state === undefined || state.generation !== generation || state.route !== route) {
+    state = { generation, route, reminderDelivered: false, fallbackDelivered: false }
+    TOKEN_BUDGET_STATES.set(session, state)
+  }
+  return state
+}
+
+function tokenBudgetContextText(ctx, agent, selectedProfile) {
+  const profile = selectedProfile ?? profileForModel(currentModel(agent))
+  const budget = profile.tokenBudget
+  const parts = []
+  if (profile.supportVerbosity && profile.defaultVerbosity !== undefined) {
+    parts.push('<model_response_preferences>\n'
+      + 'Default response verbosity: ' + profile.defaultVerbosity + '. Match this level unless the user requests a different level.\n'
+      + '</model_response_preferences>')
+  }
+  if (budget === undefined) return parts.join('\n\n')
+  if (budget.guidanceMessage.trim() !== '') {
+    parts.push('<context_window_guidance>\n' + budget.guidanceMessage + '\n</context_window_guidance>')
+  }
+
+  const meter = (() => {
+    try { return ctx.get('tokenMeter') } catch { return undefined }
+  })()
+  const contextWindow = profile.contextWindow ?? profile.maxContextWindow
+  if (meter === undefined || typeof meter.measure !== 'function' || !Number.isInteger(contextWindow) || contextWindow <= 0) {
+    return parts.join('\n\n')
+  }
+
+  let measurement
+  try {
+    measurement = meter.measure(agent.session)
+  } catch {
+    return parts.join('\n\n')
+  }
+  const effectiveLimit = Math.floor(contextWindow * profile.effectiveContextWindowPercent / 100)
+  const derivedCompactLimit = Math.floor(contextWindow * 0.9)
+  const compactLimit = Number.isInteger(profile.autoCompactTokenLimit)
+    ? Math.min(profile.autoCompactTokenLimit, derivedCompactLimit)
+    : derivedCompactLimit
+  const baseWindowTokensRemaining = Math.max(
+    0,
+    Math.min(effectiveLimit, compactLimit) - Math.max(0, measurement.totalTokens),
+  )
+  const state = tokenBudgetStateFor(agent.session, profile)
+  if (baseWindowTokensRemaining <= budget.reminderThresholdTokens && !state.reminderDelivered) {
+    state.reminderDelivered = true
+    parts.push(budget.reminderMessageTemplate.replaceAll('{n_remaining}', String(baseWindowTokensRemaining)))
+  }
+  if (baseWindowTokensRemaining === 0
+    && budget.autoCompactFallbackPrompt.trim() !== ''
+    && !state.fallbackDelivered) {
+    state.fallbackDelivered = true
+    parts.push(budget.autoCompactFallbackPrompt)
+  }
+  return parts.join('\n\n')
 }
 
 function planModeActive(ctx, agent) {
@@ -2053,6 +2192,20 @@ function registerModelParity(ctx) {
     }
   })
 
+  // Codex applies the selected model's truncation policy to direct tool
+  // responses. Code Mode receives typed values and is intentionally exempt;
+  // its program may inspect the complete result before the parent call logs
+  // the model-facing projection.
+  ctx.on('tools/post-execute', async (execution, result, next) => {
+    const decision = await next()
+    if (execution.parent !== undefined || result.isError || decision.kind !== 'accept') return decision
+    if (Object.hasOwn(decision, 'value')) return decision
+    const profile = profileForModel(currentModel(execution.agent))
+    const content = decision.content ?? result.content
+    const truncated = truncateToolContent(content, profile.truncationPolicy)
+    return truncated === content ? decision : { ...decision, content: truncated }
+  })
+
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const assembled = await next()
     const agent = context.agent
@@ -2076,7 +2229,10 @@ function registerModelParity(ctx) {
         return section
       })
       .filter(section => section !== undefined)
-    return { ...assembled, sections, tools }
+    const contexts = (assembled.contexts ?? []).filter(context => context.name !== 'codex:token-budget')
+    const tokenBudgetText = tokenBudgetContextText(ctx, agent, profile)
+    if (tokenBudgetText !== '') contexts.push({ name: 'codex:token-budget', text: tokenBudgetText })
+    return { ...assembled, sections, contexts, tools }
   })
 }
 
@@ -2102,6 +2258,8 @@ export {
   registerCodeModeAlias,
   registerV2Agents,
   rewriteCodeModeName,
+  truncateToolContent,
+  tokenBudgetContextText,
   v2FinalMessageId,
   v2PendingUpdate,
   v2Status,

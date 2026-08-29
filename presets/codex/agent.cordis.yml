@@ -1,6 +1,6 @@
 # Codex-compatible agent-plane composition for DeepSeek Harness.
 #
-# OpenAI/codex reference: official HEAD @ 70b5cfc73b25458a7af225d24b16ef4794f8f380.
+# OpenAI/codex reference: official HEAD @ 6478a751fde8884b2fdc76486fe23175a8e795d4.
 # The Luna model instructions and web.run description are pinned verbatim from
 # that tree; only host-mechanism adaptations are maintained locally.
 # The host remains authoritative for sandboxing, approval, persistence, model
@@ -247,6 +247,10 @@
   config:
     - id: compaction-basic
       name: '@deepseek-ai/dsh-compaction-basic'
+      config:
+        # Codex derives automatic compaction from a 90% context threshold;
+        # model-owned token-budget fallback text supplies the remaining headroom.
+        thresholdRatio: 0.9
 
     - id: command-compact
       name: '@deepseek-ai/dsh-command-compact'

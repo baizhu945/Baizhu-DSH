@@ -13,6 +13,8 @@ import {
   registerCodeModeAlias,
   registerV2Agents,
   rewriteCodeModeName,
+  truncateToolContent,
+  tokenBudgetContextText,
   v2FinalMessageId,
   v2Status,
   validateV2TaskName,
@@ -23,6 +25,7 @@ import {
   applyPatch,
   collabInputContent,
   outputFromOperation,
+  outputTokenBudget,
   parsePatchOperations,
   preflightPatch,
   pipeOutput,
@@ -367,6 +370,64 @@ test('search tool routing matches Responses Lite capability boundaries', () => {
   assert.equal(modelToolAllowed({}, legacy, 'web__run', {}, true), false)
   assert.equal(modelToolAllowed({}, legacy, 'web_search', {}, false), true)
   assert.equal(modelToolAllowed({}, unknown, 'web_search', {}, false), false)
+})
+
+test('model-owned token-budget messages follow remaining capacity and reset after compaction', () => {
+  const session = { surface: { replaceGeneration: 0 } }
+  const agent = { options: { model: 'gpt-5.6-luna' }, session }
+  const meter = { measure: () => ({ totalTokens: 944_000 }) }
+  const ctx = { get: name => name === 'tokenMeter' ? meter : undefined }
+  const first = tokenBudgetContextText(ctx, agent)
+  assert.match(first, /<context_window_guidance>/)
+  assert.match(first, /only 1000 tokens remain/)
+  assert.doesNotMatch(tokenBudgetContextText(ctx, agent), /only 1000 tokens remain/)
+  session.surface.replaceGeneration = 1
+  assert.match(tokenBudgetContextText(ctx, agent), /only 1000 tokens remain/)
+
+  const exhausted = { options: { model: 'gpt-5.6-terra' }, session: { id: 'session-b', surface: { replaceGeneration: 0 } } }
+  const exhaustedContext = tokenBudgetContextText(
+    { get: () => ({ measure: () => ({ totalTokens: 945_000 }) }) },
+    exhausted,
+  )
+  assert.match(exhaustedContext, /only 0 tokens remain/)
+  assert.match(exhaustedContext, /current context window is exhausted/i)
+})
+
+test('Terra and Sol retain their catalog-owned response preferences', () => {
+  for (const model of ['gpt-5.6-terra', 'gpt-5.6-sol']) {
+    const profile = profileForModel(model)
+    assert.equal(profile.contextWindow, 1_050_000)
+    assert.equal(profile.maxContextWindow, 1_050_000)
+    assert.equal(profile.supportVerbosity, true)
+    assert.equal(profile.defaultVerbosity, 'low')
+    assert.equal(profile.tokenBudget.reminderThresholdTokens, 6144)
+    const context = tokenBudgetContextText(
+      { get: () => undefined },
+      { options: { model }, session: {} },
+    )
+    assert.match(context, /Default response verbosity: low/)
+    assert.match(context, /<context_window_guidance>/)
+  }
+})
+
+test('model truncation policy caps unified-exec output budgets', () => {
+  const bytesModel = { options: { model: 'gpt-5.2' }, session: {} }
+  const tokenModel = { options: { model: 'gpt-5.4' }, session: {} }
+  assert.equal(outputTokenBudget(bytesModel, undefined), 2500)
+  assert.equal(outputTokenBudget(bytesModel, 50_000), 2500)
+  assert.equal(outputTokenBudget(tokenModel, undefined), 10_000)
+  assert.equal(outputTokenBudget(tokenModel, 50_000), 10_000)
+})
+
+test('model truncation policy bounds direct tool text without touching typed blocks', () => {
+  const content = [
+    { type: 'text', text: '你'.repeat(100) },
+    { type: 'image', data: 'opaque' },
+  ]
+  const result = truncateToolContent(content, { mode: 'bytes', limit: 40 })
+  assert.ok(Buffer.byteLength(result[0].text, 'utf8') <= 40)
+  assert.match(result[0].text, /output truncated/)
+  assert.deepEqual(result[1], content[1])
 })
 
 test('DirectModelOnly request_user_input stays out of the nested Code Mode SDK', () => {

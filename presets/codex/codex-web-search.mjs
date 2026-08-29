@@ -881,7 +881,7 @@ function registerWebSearch(ctx) {
 }
 
 export const name = 'codex-web-search'
-export const inject = ['tools']
+export const inject = ['tools', 'systemPrompt']
 
 export function apply(ctx) {
   registerHostedWebSearch(ctx)
