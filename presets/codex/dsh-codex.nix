@@ -23,11 +23,10 @@ let
     python3 ${./patches/fix-gpt56-context.py} "$out"
   '';
 
-  # Keep the Luna prompt as a local fallback for model ids not present in the
-  # pinned official catalog (for example a provider-local preview model).
-  # Known official models use their catalog-provided base_instructions instead.
+  # Keep the official generic Codex prompt as the fallback for model ids not
+  # present in the pinned catalog. Known models use catalog instructions.
   codexPrompt = lib.concatMapStringsSep "\n" (line: "      ${line}") (
-    lib.splitString "\n" (lib.removeSuffix "\n" (builtins.readFile ./codex-luna-prompt.md))
+    lib.splitString "\n" (lib.removeSuffix "\n" (builtins.readFile ./codex-default-prompt.md))
   );
 
   # Codex's PTY backend must not assume /bin/bash: NixOS intentionally keeps
@@ -50,6 +49,7 @@ in
     ".dsh/.agent-presets/codex/codex-surface.mjs".source = codexSurface;
     ".dsh/.agent-presets/codex/codex-model-parity.mjs".source = ./codex-model-parity.mjs;
     ".dsh/.agent-presets/codex/codex-models.json".source = codexModels;
+    ".dsh/.agent-presets/codex/codex-default-prompt.md".source = ./codex-default-prompt.md;
     ".dsh/.agent-presets/codex/codex-web-search.mjs".source = ./codex-web-search.mjs;
     ".dsh/.agent-presets/codex/codex-luna-prompt.md".source = ./codex-luna-prompt.md;
     ".dsh/.agent-presets/codex/codex-web-run-description.md".source = ./codex-web-run-description.md;

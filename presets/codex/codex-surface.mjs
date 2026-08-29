@@ -146,18 +146,21 @@ const textOutput = {
 /** Upstream Codex renders the sandbox boundary as a <filesystem> element. */
 function filesystemElement(policy) {
   const root = xmlEscape(policy.workspaceRoot ?? '')
+  const workspaceRoots = root === ''
+    ? ''
+    : `<workspace_roots><root>${root}</root></workspace_roots>`
   switch (policy.mode) {
     case 'read-only':
-      return `<filesystem><workspace_roots><root>${root}</root></workspace_roots>`
+      return `<filesystem>${workspaceRoots}`
         + '<permission_profile type="managed"><file_system type="restricted" />'
         + '</permission_profile></filesystem>'
     case 'workspace-write':
-      return `<filesystem><workspace_roots><root>${root}</root></workspace_roots>`
+      return `<filesystem>${workspaceRoots}`
         + '<permission_profile type="managed"><file_system type="restricted">'
         + `<entry access="write"><path>${root}</path></entry>`
         + '</file_system></permission_profile></filesystem>'
     case 'danger-full-access':
-      return '<filesystem><permission_profile type="disabled">'
+      return `<filesystem>${workspaceRoots}<permission_profile type="disabled">`
         + '<file_system type="unrestricted" /></permission_profile></filesystem>'
     default:
       return undefined
@@ -229,7 +232,7 @@ function permissionInstructions(policy, approval) {
       ? `Filesystem sandboxing defines which files can be read or written. sandbox_mode is workspace-write: The sandbox permits reading files, and editing files in cwd and writable_roots. Editing files in other directories requires approval. Network access is ${network}.`
       : `Filesystem sandboxing defines which files can be read or written. sandbox_mode is read-only: The sandbox only permits reading files. Network access is ${network}.`
   const approvals = approval === 'never'
-    ? 'Approval policy is currently never. Do not provide sandbox_permissions for any reason; escalation requests will be rejected.'
+    ? 'Approval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.'
     : policy.mode === 'danger-full-access'
       ? 'approval_policy is unless-trusted: the harness requires user approval before every exec_command or apply_patch call.'
       : 'Commands run inside the sandbox without prompting. After a real sandbox denial, retry the exact command with sandbox_permissions=require_escalated and a short justification; do not ask in chat first.'
@@ -268,6 +271,7 @@ function registerPromptBoundary(ctx) {
         '  <shell>bash</shell>',
         `  <current_date>${localDate()}</current_date>`,
         `  <timezone>${xmlEscape(timezone)}</timezone>`,
+        '  <network enabled="true" />',
         ...(filesystem !== undefined ? [`  ${filesystem}`] : []),
         '</environment_context>',
       ].join('\n')
@@ -536,7 +540,9 @@ async function waitForTerminalOperation(operation, yieldTimeMs, signal) {
 function terminalOutputText(value) {
   const output = typeof value?.output === 'string' ? value.output : ''
   const markers = []
-  if (typeof value?.exit_code === 'number') markers.push('[exit code: ' + String(value.exit_code) + ']')
+  // Match DSH's standard shell renderer: success is represented by the output
+  // itself, while a non-zero status remains a concise recovery signal.
+  if (typeof value?.exit_code === 'number' && value.exit_code !== 0) markers.push('[exit code: ' + String(value.exit_code) + ']')
   if (value?.session_id !== undefined) markers.push('[session ID: ' + String(value.session_id) + ']')
   const body = output.length > 0 ? output : markers.length > 0 ? '(no output)' : ''
   return markers.length === 0 ? body : body + String.fromCharCode(10) + markers.join(String.fromCharCode(10))
@@ -931,7 +937,7 @@ function registerWriteStdin(ctx) {
 function waitOutputText(value) {
   const output = typeof value?.output === 'string' && value.output.length > 0 ? value.output : '(no output)'
   const markers = []
-  if (typeof value?.exit_code === 'number') markers.push(`[exit code: ${value.exit_code}]`)
+  if (typeof value?.exit_code === 'number' && value.exit_code !== 0) markers.push(`[exit code: ${value.exit_code}]`)
   if (value?.session_id !== undefined) markers.push(`[session ID: ${value.session_id}]`)
   return markers.length === 0 ? output : `${output}\n${markers.join('\n')}`
 }
@@ -1324,6 +1330,24 @@ function patchBody(patch) {
   return lines.slice(1, -1).join('\n')
 }
 
+/**
+ * The upstream freeform grammar only accepts Environment ID as a single patch
+ * preamble.  DSH currently has one selected local environment, so retain the
+ * syntax check but fail closed instead of silently applying it to a different
+ * target.
+ */
+function patchEnvironmentId(patch) {
+  const identifiers = patchBody(patch)
+    .split('\n')
+    .map(patchControlLine)
+    .filter(line => line.startsWith('*** Environment ID:'))
+  if (identifiers.length === 0) return undefined
+  if (identifiers.length > 1) throw new Error('apply_patch environment_id can only be specified once')
+  const value = identifiers[0].slice('*** Environment ID:'.length).trim()
+  if (value === '') throw new Error('apply_patch environment_id cannot be empty')
+  return value
+}
+
 function parsePatchOperations(patch) {
   const lines = patchBody(patch).split('\n')
   const operations = []
@@ -1428,6 +1452,10 @@ async function writePatchedFile(ctx, exec, target, content, expectedVersion, san
 
 async function preflightPatch(ctx, exec, patch) {
   const agent = agentOf(exec)
+  const environmentId = patchEnvironmentId(patch)
+  if (environmentId !== undefined) {
+    throw new Error('apply_patch environment_id is unavailable: this Codex preset exposes one local environment')
+  }
   const operations = parsePatchOperations(patch)
   if (operations.length === 0) throw new Error('apply_patch contains no file operations')
   const resolved = []
@@ -1894,6 +1922,7 @@ function registerViewImage(ctx) {
         properties: {
           path: { type: 'string', required: true },
           detail: { type: 'string', required: true, enum: ['high', 'original'] },
+          image_url: { type: 'string', required: true, description: 'Data URL for the loaded image.' },
           image: {
             type: 'object',
             required: true,
@@ -1927,7 +1956,12 @@ function registerViewImage(ctx) {
         attachments.imageLimits.maxMessageImageBytes,
       ))
       const ref = await attachments.saveImage({ data: bytes, mediaType, name: target.displayPath.split('/').at(-1) })
-      return { path: target.displayPath, detail: args.detail ?? 'high', image: ref }
+      return {
+        path: target.displayPath,
+        detail: args.detail ?? 'high',
+        image_url: `data:${mediaType};base64,${Buffer.from(bytes).toString('base64')}`,
+        image: ref,
+      }
     },
     presentCall(args) {
       return { card: 'generic', title: `View image ${args.path}`, kind: 'read', locations: [{ path: args.path }] }
@@ -2118,7 +2152,7 @@ const COLLAB_INPUT_ITEM = {
 const COLLAB_INPUT_ITEMS = {
   type: 'array',
   items: COLLAB_INPUT_ITEM,
-  description: 'Structured input items. This DSH adapter currently accepts text items; media and mention items require host attachment/reference support.',
+  description: 'Structured input items. Text, image data URLs, local images, skills, and mentions are supported; audio items are unavailable in the dsh message model.',
 }
 
 function collabInputContent(message, items) {
@@ -2135,6 +2169,57 @@ function collabInputContent(message, items) {
       throw new Error('DSH collaboration currently supports only text items; use message for plain text')
     }
     content.push({ type: 'text', text: item.text })
+  }
+  return content
+}
+
+async function collabImageAttachment(ctx, agent, item, signal) {
+  const attachments = ctx.get('attachments')
+  if (attachments === undefined) throw new Error('image collaboration items require a durable attachment service')
+  if (item.type === 'image') {
+    if (typeof item.image_url !== 'string') throw new Error('image items require image_url')
+    const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(item.image_url)
+    if (match === null) throw new Error('image collaboration items require a base64 data URL in this host')
+    return attachments.saveImage({
+      data: Buffer.from(match[2], 'base64'),
+      mediaType: match[1],
+      name: item.name,
+    })
+  }
+  if (item.type !== 'local_image' || typeof item.path !== 'string' || item.path.trim() === '') {
+    throw new Error('unsupported collaboration image item')
+  }
+  const extension = item.path.slice(item.path.lastIndexOf('.')).toLowerCase()
+  const mediaType = IMAGE_EXTENSIONS[extension]
+  if (mediaType === undefined) throw new Error(`local_image only accepts PNG/JPEG/WebP/GIF paths: ${item.path}`)
+  const target = await ctx.fs.resolve(item.path, { cwd: cwdOf(agent), signal })
+  const bytes = await ctx.fs.readBytes(target, signal, Math.min(
+    attachments.imageLimits.maxImageBytes,
+    attachments.imageLimits.maxMessageImageBytes,
+  ))
+  return attachments.saveImage({ data: bytes, mediaType, name: item.name ?? target.displayPath.split('/').at(-1) })
+}
+
+async function collabPromptContent(ctx, agent, message, items, signal) {
+  if (message !== undefined || items === undefined) return collabInputContent(message, items)
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Items cannot be empty')
+  const content = []
+  for (const item of items) {
+    if (item?.type === 'text' && typeof item.text === 'string') {
+      content.push({ type: 'text', text: item.text })
+      continue
+    }
+    if (item?.type === 'image' || item?.type === 'local_image') {
+      content.push({ type: 'image', attachment: await collabImageAttachment(ctx, agent, item, signal) })
+      continue
+    }
+    if (item?.type === 'skill' || item?.type === 'mention') {
+      const label = typeof item.name === 'string' && item.name.trim() !== '' ? item.name.trim() + ': ' : ''
+      if (typeof item.path !== 'string' || item.path.trim() === '') throw new Error(`${item.type} items require path`)
+      content.push({ type: 'text', text: label + item.path })
+      continue
+    }
+    throw new Error('DSH collaboration does not support audio items; use text, image, local_image, skill, or mention')
   }
   return content
 }
@@ -2362,7 +2447,7 @@ function registerAgents(ctx) {
     async execute(args, exec) {
       const parent = agentOf(exec)
       rejectUnsupportedSpawnOptions(args)
-      const content = collabInputContent(args.message, args.items)
+      const content = await collabPromptContent(ctx, parent, args.message, args.items, exec.signal)
       const provider = args.fork_context === true ? 'fork' : 'spawn'
       if (!ctx.subagents.list().includes(provider)) throw new Error(`subagent provider is unavailable: ${provider}`)
       const agentOptions = {
@@ -2417,7 +2502,7 @@ function registerAgents(ctx) {
       if (closedAgents.has(args.target)) {
         throw new Error(`subagent "${args.target}" is closed; call resume_agent before send_input`)
       }
-      const content = collabInputContent(args.message, args.items)
+      const content = await collabPromptContent(ctx, parent, args.message, args.items, exec.signal)
       if (args.interrupt === true) {
         ctx.subagents.interrupt(args.target, { kind: 'ancestor', agent: parent })
       }
@@ -2598,7 +2683,11 @@ export function apply(ctx) {
 export {
   boundedOutput,
   collabInputContent,
+  collabPromptContent,
+  filesystemElement,
+  patchEnvironmentId,
   parsePatchOperations,
+  permissionInstructions,
   preflightPatch,
   outputFromOperation,
   outputTokenBudget,

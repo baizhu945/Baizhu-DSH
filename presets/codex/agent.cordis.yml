@@ -80,7 +80,8 @@
 
 # ── identity and instruction chain ──────────────────────────────────────────
 
-# OpenAI Codex GPT-5.6 Luna model instructions from the pinned model catalog.
+# Official generic Codex fallback instructions; known catalog rows replace
+# this section at each prompt boundary.
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
@@ -93,11 +94,10 @@
   config:
     maxBytes: 32768
 
-# Expose the user's local skill roots and the model-facing loader in Codex. The
-# model-parity layer deliberately enables this capability for this preset,
-# including catalog rows whose hosted Codex metadata disables Skills guidance.
-# These rows are scoped to this preset; other profiles keep their own skill
-# composition unchanged.
+# Mount the user's local skill roots and loader only inside this preset. The
+# model-parity layer still follows each official catalog row: models that do
+# not advertise Skills never see or invoke the loader, while opted-in rows can
+# use the same scoped provider without affecting other presets.
 - id: skill-filesystem
   name: '@deepseek-ai/dsh-skill-filesystem'
 

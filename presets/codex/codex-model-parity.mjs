@@ -21,20 +21,28 @@ const { createUserMessage } = await import(llmEntry)
 const { structuredPatch } = requireFromDsh('diff')
 
 const MODEL_CATALOG_PATH = nodePath.join(dshHome, '.agent-presets/codex/codex-models.json')
-const FALLBACK_PROMPT_PATH = nodePath.join(dshHome, '.agent-presets/codex/codex-luna-prompt.md')
+const FALLBACK_PROMPT_PATH = nodePath.join(dshHome, '.agent-presets/codex/codex-default-prompt.md')
 const RUN_CODE = 'run_code'
 // DSH reserves run_code as its transport name. Keep that host-only name
 // behind the Codex-scoped exec facade so the model sees the upstream name.
 const CODE_MODE_TOOL = 'exec'
 const WAIT_TOOL = 'wait'
+const GET_CONTEXT_REMAINING_TOOL = 'get_context_remaining'
 const SKILL = 'skill'
 const WEB_RUN = 'web__run'
 const WEB_SEARCH = 'web_search'
-// This preset intentionally exposes DSH's local skill catalog. The upstream
-// Luna rows set this false because hosted Codex does not inject local skills;
-// that metadata cannot describe this preset's scoped filesystem provider.
-const INCLUDE_LOCAL_SKILLS = true
+// Match the selected official catalog row.  The preset still mounts the local
+// skill provider so rows that opt in (for example GPT-5.4) work normally, but
+// Luna/terra/sol do not receive an unadvertised local-Skills surface.
+const INCLUDE_LOCAL_SKILLS = false
 const V1_PREFIX = 'multi_agent_v1__'
+const V1_NAMES = new Set([
+  'multi_agent_v1__spawn_agent',
+  'multi_agent_v1__send_input',
+  'multi_agent_v1__resume_agent',
+  'multi_agent_v1__wait_agent',
+  'multi_agent_v1__close_agent',
+])
 const V2_NAMES = new Set([
   'spawn_agent',
   'send_message',
@@ -458,29 +466,8 @@ function tokenBudgetContextText(ctx, agent, selectedProfile) {
     parts.push('<context_window_guidance>\n' + budget.guidanceMessage + '\n</context_window_guidance>')
   }
 
-  const meter = (() => {
-    try { return ctx.get('tokenMeter') } catch { return undefined }
-  })()
-  const contextWindow = profile.contextWindow ?? profile.maxContextWindow
-  if (meter === undefined || typeof meter.measure !== 'function' || !Number.isInteger(contextWindow) || contextWindow <= 0) {
-    return parts.join('\n\n')
-  }
-
-  let measurement
-  try {
-    measurement = meter.measure(agent.session)
-  } catch {
-    return parts.join('\n\n')
-  }
-  const effectiveLimit = Math.floor(contextWindow * profile.effectiveContextWindowPercent / 100)
-  const derivedCompactLimit = Math.floor(contextWindow * 0.9)
-  const compactLimit = Number.isInteger(profile.autoCompactTokenLimit)
-    ? Math.min(profile.autoCompactTokenLimit, derivedCompactLimit)
-    : derivedCompactLimit
-  const baseWindowTokensRemaining = Math.max(
-    0,
-    Math.min(effectiveLimit, compactLimit) - Math.max(0, measurement.totalTokens),
-  )
+  const baseWindowTokensRemaining = contextTokensRemaining(ctx, agent, profile)
+  if (baseWindowTokensRemaining === undefined) return parts.join('\n\n')
   const state = tokenBudgetStateFor(agent.session, profile)
   if (baseWindowTokensRemaining <= budget.reminderThresholdTokens && !state.reminderDelivered) {
     state.reminderDelivered = true
@@ -493,6 +480,29 @@ function tokenBudgetContextText(ctx, agent, selectedProfile) {
     parts.push(budget.autoCompactFallbackPrompt)
   }
   return parts.join('\n\n')
+}
+
+/** Match Codex's model-callable remaining-context utility with the local meter. */
+function contextTokensRemaining(ctx, agent, profile = profileForModel(currentModel(agent))) {
+  const meter = (() => {
+    try { return ctx.get('tokenMeter') } catch { return undefined }
+  })()
+  const contextWindow = profile.contextWindow ?? profile.maxContextWindow
+  if (meter === undefined || typeof meter.measure !== 'function' || !Number.isInteger(contextWindow) || contextWindow <= 0) {
+    return undefined
+  }
+  let measurement
+  try {
+    measurement = meter.measure(agent.session)
+  } catch {
+    return undefined
+  }
+  const effectiveLimit = Math.floor(contextWindow * profile.effectiveContextWindowPercent / 100)
+  const derivedCompactLimit = Math.floor(contextWindow * 0.9)
+  const compactLimit = Number.isInteger(profile.autoCompactTokenLimit)
+    ? Math.min(profile.autoCompactTokenLimit, derivedCompactLimit)
+    : derivedCompactLimit
+  return Math.max(0, Math.min(effectiveLimit, compactLimit) - Math.max(0, measurement.totalTokens))
 }
 
 function planModeActive(ctx, agent) {
@@ -511,9 +521,23 @@ function isV1Tool(name) {
   return name.startsWith(V1_PREFIX)
 }
 
+/**
+ * CodeModeOnly hides only tools that have a Code Mode binding.  Codex keeps
+ * DirectModelOnly tools visible beside exec/wait: request_user_input and, by
+ * default, the V2 coordinator surface.  They deliberately stay out of the
+ * nested SDK.
+ */
+function isCodeModeOnlyDirectTool(name, profile) {
+  return name === CODE_MODE_TOOL
+    || name === WAIT_TOOL
+    || name === 'request_user_input'
+    || (profile?.multiAgentVersion === 'v1' && V1_NAMES.has(name))
+    || (profile?.multiAgentVersion === 'v2' && V2_NAMES.has(name))
+}
+
 function modelToolAllowed(ctx, profile, name, agent, nested, toolArguments) {
   if (!nested && name === RUN_CODE) return false
-  if (!nested && profile.toolMode === 'code_mode_only' && name !== CODE_MODE_TOOL && name !== WAIT_TOOL) return false
+  if (!nested && profile.toolMode === 'code_mode_only' && !isCodeModeOnlyDirectTool(name, profile)) return false
   if (!nested && profile.toolMode === 'native' && (name === CODE_MODE_TOOL || name === WAIT_TOOL)) return false
   if (nested && (name === RUN_CODE || name === CODE_MODE_TOOL || name === WAIT_TOOL)) return false
   if ((name === 'exec_command' || name === 'write_stdin') && normalizeShellType(profile.shellType) !== 'unified_exec') return false
@@ -524,13 +548,19 @@ function modelToolAllowed(ctx, profile, name, agent, nested, toolArguments) {
     && toolArguments !== null && typeof toolArguments === 'object' && toolArguments.image_query !== undefined) return false
   if (name === SKILL && !profile.includeSkillsUsageInstructions) return false
   if (name === 'view_image' && !isImageCapable(profile)) return false
+  if (name === GET_CONTEXT_REMAINING_TOOL) {
+    return profile.tokenBudget !== undefined && (nested || profile.toolMode !== 'code_mode_only')
+  }
   // The upstream handler is DirectModelOnly: it is callable by the direct
   // model surface in Plan Mode, but is intentionally absent from the nested
   // Code Mode SDK even for code_mode_only rows.
   if (name === 'request_user_input' && nested) return false
   if (name === 'request_user_input' && profile.toolMode !== 'code_mode_only' && !planModeActive(ctx, agent)) return false
-  if (isV1Tool(name)) return profile.multiAgentVersion === 'v1'
-  if (V2_NAMES.has(name)) return profile.multiAgentVersion === 'v2'
+  if (isV1Tool(name)) return profile.multiAgentVersion === 'v1' && !nested
+  // Upstream's default MultiAgentV2 configuration is DirectModelOnly.  In a
+  // CodeModeOnly row those controls remain direct siblings of exec/wait rather
+  // than Code Mode SDK methods.
+  if (V2_NAMES.has(name)) return profile.multiAgentVersion === 'v2' && !nested
   return true
 }
 
@@ -584,13 +614,64 @@ function dynamicSdk(ctx, agent, profile, fallback) {
   }
 }
 
-function rewriteCodeModeName(text, codeModeOnly = false) {
+function registerContextBudgetTools(ctx) {
+  ctx.tools.register(defineTool({
+    name: GET_CONTEXT_REMAINING_TOOL,
+    description: 'Get the remaining tokens in the current context window.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          tokens_left: { required: true, oneOf: [{ type: 'integer' }, { type: 'null' }] },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.tokens_left === null
+          ? 'You have unknown tokens left in this context window.'
+          : `You have ${value.tokens_left} tokens left in this context window.`,
+      }],
+    },
+    async execute(_args, execution) {
+      const agent = execution.agent
+      if (agent === undefined) return { tokens_left: null }
+      const profile = profileForModel(currentModel(agent))
+      return { tokens_left: contextTokensRemaining(ctx, agent, profile) ?? null }
+    },
+  }))
+}
+
+function codeModeOnlyDirectToolNames(profileOrCodeModeOnly) {
+  const names = [CODE_MODE_TOOL, WAIT_TOOL]
+  if (profileOrCodeModeOnly !== null && typeof profileOrCodeModeOnly === 'object') {
+    names.push('request_user_input')
+    if (profileOrCodeModeOnly.multiAgentVersion === 'v1') names.push(...V1_NAMES)
+    if (profileOrCodeModeOnly.multiAgentVersion === 'v2') names.push(...V2_NAMES)
+  }
+  return names
+}
+
+function quotedToolList(names) {
+  const quoted = names.map(name => '`' + name + '`')
+  if (quoted.length <= 1) return quoted[0] ?? ''
+  if (quoted.length === 2) return quoted[0] + ' and ' + quoted[1]
+  return quoted.slice(0, -1).join(', ') + ', and ' + quoted.at(-1)
+}
+
+function rewriteCodeModeName(text, profileOrCodeModeOnly = false) {
   if (typeof text !== 'string') return text
+  const codeModeOnly = typeof profileOrCodeModeOnly === 'object' && profileOrCodeModeOnly !== null
+    ? profileOrCodeModeOnly.toolMode === 'code_mode_only'
+    : profileOrCodeModeOnly === true
+  const directBoundary = quotedToolList(codeModeOnlyDirectToolNames(profileOrCodeModeOnly))
+    + ' are the only tools you can call directly'
   const rewritten = text
     .replaceAll(RUN_CODE, CODE_MODE_TOOL)
-    .replace('`exec` is the only tool you can call directly', '`exec` and `wait` are the only tools you can call directly')
+    .replace('`exec` is the only tool you can call directly', directBoundary)
   if (!codeModeOnly || rewritten.trim() !== '') return rewritten
-  return '`exec` and `wait` are the only tools you can call directly — a tool call naming any other tool fails. Reach every tool the SDK declares below from inside the program.'
+  return directBoundary + ' — a tool call naming any other tool fails. Reach every tool the SDK declares below from inside the program.'
 }
 
 function codeModeErrorText(result) {
@@ -1938,11 +2019,9 @@ function registerV2Agents(ctx) {
     parameters: {
       task_name: { type: 'string', required: true, description: 'Task name for the new agent. Use lowercase letters, digits, and underscores.' },
       message: { type: 'string', required: true, description: 'Initial plain-text task for the new agent.' },
-      agent_type: { type: 'string', description: 'Agent type override for the new agent. DSH does not expose Codex role configuration; requests using this field are rejected.' },
       fork_turns: { type: 'string', description: 'Use none for no surrounding context, or all to inherit completed parent history. Numeric last-N forks are not available in DSH.' },
       model: { type: 'string', description: 'Model override for the new agent. Omit unless explicitly requested.' },
       reasoning_effort: { type: 'string', description: 'Reasoning effort override is not exposed by DSH; omit this field.' },
-      service_tier: { type: 'string', description: 'Service tier override is not exposed by DSH; omit this field.' },
       fork_context: { type: 'boolean', description: 'Legacy V1 option; rejected in MultiAgentV2. Use fork_turns instead.' },
     },
     output: {
@@ -1958,9 +2037,7 @@ function registerV2Agents(ctx) {
       const taskName = validateV2TaskName(args.task_name)
       const message = v2MessageText(args.message)
       if (args.fork_context !== undefined) throw new Error('fork_context is not supported in MultiAgentV2; use fork_turns instead')
-      if (typeof args.agent_type === 'string' && args.agent_type.trim() !== '') throw new Error('agent_type overrides are not supported by the DSH subagent runtime')
       if (args.reasoning_effort !== undefined) throw new Error('reasoning_effort overrides are not supported by the DSH subagent runtime')
-      if (args.service_tier !== undefined) throw new Error('service_tier overrides are not supported by the DSH subagent runtime')
       const provider = v2ForkProvider(args.fork_turns)
       if (!ctx.subagents.list().includes(provider)) throw new Error('subagent provider is unavailable: ' + provider)
       const roster = await v2Roster(ctx, parent, execution.signal)
@@ -2211,20 +2288,21 @@ function registerModelParity(ctx) {
     const agent = context.agent
     if (agent === undefined) return assembled
     const profile = profileForModel(currentModel(agent, assembled))
+    // nativeSchemas already mirrors the official CodeModeOnly visibility rule,
+    // including DirectModelOnly request_user_input and V2 coordinator tools.
     const tools = nativeSchemas(ctx, agent, profile)
-      .filter(tool => profile.toolMode !== 'code_mode_only' || tool.name === CODE_MODE_TOOL || tool.name === WAIT_TOOL)
     const sections = assembled.sections
       .filter(section => profile.toolMode !== 'native' || section.name !== 'tools:code-only')
       .filter(section => profile.toolMode !== 'native' || section.name !== 'tools:sdk')
       .map(section => {
         if (section.name === 'deployment:persona') return { ...section, text: profile.instructions }
         if (section.name === 'tools:code-only') {
-          return { ...section, text: rewriteCodeModeName(section.text, profile.toolMode === 'code_mode_only') }
+          return { ...section, text: rewriteCodeModeName(section.text, profile) }
         }
         if (section.name === 'tool:web_search'
           && (profile.useResponsesLite || !profile.supportsSearchTool)) return undefined
         if (profile.toolMode !== 'native' && section.name === 'tools:sdk') {
-          return { ...section, text: rewriteCodeModeName(dynamicSdk(ctx, agent, profile, section.text)) }
+          return { ...section, text: rewriteCodeModeName(dynamicSdk(ctx, agent, profile, section.text), profile) }
         }
         return section
       })
@@ -2240,6 +2318,7 @@ export const name = 'codex-model-parity'
 export const inject = ['tools', 'systemPrompt', 'subagents', 'agents']
 
 export function apply(ctx) {
+  registerContextBudgetTools(ctx)
   registerCodeModeAlias(ctx)
   registerV2Agents(ctx)
   registerModelParity(ctx)
@@ -2248,6 +2327,7 @@ export function apply(ctx) {
 export {
   codeModePreview,
   codeModeSyntaxValid,
+  contextTokensRemaining,
   directPatchContent,
   modelToolAllowed,
   normalizeCodeModeSource,

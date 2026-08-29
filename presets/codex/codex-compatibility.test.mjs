@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   codeModePreview,
   codeModeSyntaxValid,
+  contextTokensRemaining,
   directPatchContent,
   modelToolAllowed,
   normalizeCodeModeSource,
@@ -24,9 +25,13 @@ import { approvalReason, apply as applyApproval, patchApprovalPreview } from './
 import {
   applyPatch,
   collabInputContent,
+  collabPromptContent,
+  filesystemElement,
   outputFromOperation,
   outputTokenBudget,
+  patchEnvironmentId,
   parsePatchOperations,
+  permissionInstructions,
   preflightPatch,
   pipeOutput,
   terminalOutputText,
@@ -278,6 +283,7 @@ test('PTY output parser preserves split echo, prompt, and exit marker state', ()
 })
 
 test('terminal output exposes session metadata and pipe termination signals', () => {
+  assert.equal(terminalOutputText({ output: 'ok', exit_code: 0 }), 'ok')
   assert.match(terminalOutputText({ output: 'hello', session_id: 3, exit_code: 2 }), /session ID: 3/)
   assert.match(terminalOutputText({ output: 'hello', session_id: 3, exit_code: 2 }), /exit code: 2/)
   const record = {
@@ -320,6 +326,15 @@ test('apply_patch rejects empty before stat and supports ordered same-target ope
   const exec = { agent: { session: { header: { cwd: '/tmp' } } }, signal: new AbortController().signal }
   await assert.rejects(preflightPatch(ctx, exec, empty), /no file operations/)
   assert.equal(statCalls, 0)
+  const foreignEnvironment = [
+    '*** Begin Patch',
+    '*** Environment ID: remote',
+    '*** Add File: remote.txt',
+    '+remote',
+    '*** End Patch',
+  ].join(newline)
+  assert.equal(patchEnvironmentId(foreignEnvironment), 'remote')
+  await assert.rejects(preflightPatch(ctx, exec, foreignEnvironment), /one local environment/)
   const sequential = [
     '*** Begin Patch',
     '*** Add File: same.txt',
@@ -355,10 +370,37 @@ test('legacy shell catalog rows retain unified exec and text-only web schemas ar
   assert.notEqual(schema.parameters.properties.image_query, undefined)
 })
 
-test('Codex local skill policy keeps the skill loader visible for hosted Code Mode rows', () => {
+test('Codex skill visibility follows the selected official catalog row', () => {
   const luna = profileForModel('gpt-5.6-luna')
-  assert.equal(luna.includeSkillsUsageInstructions, true)
-  assert.equal(modelToolAllowed({}, luna, 'skill', {}, true), true)
+  assert.equal(luna.includeSkillsUsageInstructions, false)
+  assert.equal(modelToolAllowed({}, luna, 'skill', {}, true), false)
+  const legacy = profileForModel('gpt-5.4')
+  assert.equal(legacy.includeSkillsUsageInstructions, true)
+  assert.equal(modelToolAllowed({}, legacy, 'skill', {}, false), true)
+})
+
+test('CodeModeOnly retains official DirectModelOnly controls beside exec', () => {
+  const luna = profileForModel('gpt-5.6-luna')
+  assert.equal(modelToolAllowed({}, luna, 'request_user_input', {}, false), true)
+  assert.equal(modelToolAllowed({}, luna, 'request_user_input', {}, true), false)
+  assert.equal(modelToolAllowed({}, luna, 'multi_agent_v1__spawn_agent', {}, false), true)
+  assert.equal(modelToolAllowed({}, luna, 'multi_agent_v1__spawn_agent', {}, true), false)
+  assert.equal(modelToolAllowed({}, luna, 'spawn_agent', {}, false), false)
+
+  const terra = profileForModel('gpt-5.6-terra')
+  assert.equal(modelToolAllowed({}, terra, 'spawn_agent', {}, false), true)
+  assert.equal(modelToolAllowed({}, terra, 'spawn_agent', {}, true), false)
+  assert.equal(modelToolAllowed({}, terra, 'wait_agent', {}, false), true)
+  assert.equal(modelToolAllowed({}, terra, 'wait_agent', {}, true), false)
+})
+
+test('Codex environment and never approval text retain official machine-readable facts', () => {
+  const unrestricted = filesystemElement({ mode: 'danger-full-access', workspaceRoot: '/repo' })
+  assert.match(unrestricted, /<workspace_roots><root>\/repo<\/root><\/workspace_roots>/)
+  assert.match(unrestricted, /permission_profile type="disabled"/)
+  const managed = filesystemElement({ mode: 'workspace-write', workspaceRoot: '/repo' })
+  assert.match(managed, /<entry access="write"><path>\/repo<\/path><\/entry>/)
+  assert.match(permissionInstructions({ mode: 'danger-full-access' }, 'never'), /`sandbox_permissions`/)
 })
 
 test('search tool routing matches Responses Lite capability boundaries', () => {
@@ -391,6 +433,17 @@ test('model-owned token-budget messages follow remaining capacity and reset afte
   )
   assert.match(exhaustedContext, /only 0 tokens remain/)
   assert.match(exhaustedContext, /current context window is exhausted/i)
+})
+
+test('official remaining-context tool is available only on token-budget routes', () => {
+  const luna = profileForModel('gpt-5.6-luna')
+  const legacy = profileForModel('gpt-5.4')
+  const ctx = { get: name => name === 'tokenMeter' ? { measure: () => ({ totalTokens: 1_000 }) } : undefined }
+  const agent = { options: { model: 'gpt-5.6-luna' }, session: {} }
+  assert.equal(modelToolAllowed(ctx, luna, 'get_context_remaining', agent, false), false)
+  assert.equal(modelToolAllowed(ctx, luna, 'get_context_remaining', agent, true), true)
+  assert.equal(modelToolAllowed(ctx, legacy, 'get_context_remaining', agent, true), false)
+  assert.equal(contextTokensRemaining(ctx, agent, luna), 944_000)
 })
 
 test('Terra and Sol retain their catalog-owned response preferences', () => {
@@ -447,6 +500,12 @@ test('CodeModeOnly prompt states the direct-tool boundary while combined mode st
   assert.equal(rewriteCodeModeName('', false), '')
   assert.match(rewriteCodeModeName('', true), /exec` and `wait` are the only tools you can call directly/)
   assert.match(rewriteCodeModeName('`run_code` is the only tool you can call directly', true), /`exec` and `wait`/)
+  assert.match(rewriteCodeModeName('', profileForModel('gpt-5.6-luna')), /`request_user_input`/)
+  const lunaBoundary = rewriteCodeModeName('', profileForModel('gpt-5.6-luna'))
+  assert.match(lunaBoundary, /multi_agent_v1__spawn_agent/)
+  const terraBoundary = rewriteCodeModeName('', profileForModel('gpt-5.6-terra'))
+  assert.match(terraBoundary, /`spawn_agent`/)
+  assert.match(terraBoundary, /`wait_agent`/)
 })
 
 test('V2 task names and statuses follow the canonical path/runtime boundaries', () => {
@@ -494,6 +553,8 @@ test('V2 collaboration tools resolve task names, return canonical spawn paths, a
   }
   registerV2Agents(ctx)
   const tool = name => registrations.find(item => item.name === name)
+  assert.equal(tool('spawn_agent').parameters.agent_type, undefined)
+  assert.equal(tool('spawn_agent').parameters.service_tier, undefined)
   const execution = { agent: parent, signal: new AbortController().signal, callId: 'v2-test' }
   const spawned = await tool('spawn_agent').execute({ task_name: 'new_task', message: 'work', fork_turns: 'none' }, execution)
   assert.deepEqual(spawned, { task_name: '/root/new_task' })
@@ -934,6 +995,21 @@ test('V1 collaboration input accepts text items and rejects unsupported rich ite
   assert.deepEqual(collabInputContent(undefined, [{ type: 'text', text: 'structured task' }]), [{ type: 'text', text: 'structured task' }])
   assert.throws(() => collabInputContent('message', [{ type: 'text', text: 'item' }]), /either message or items/)
   assert.throws(() => collabInputContent(undefined, [{ type: 'image', image_url: 'https://example.com/a.png' }]), /only text items/)
+})
+
+test('V1 collaboration converts base64 image items into durable image blocks', async () => {
+  const saved = []
+  const ctx = {
+    get: name => name === 'attachments' ? {
+      imageLimits: { maxImageBytes: 1024, maxMessageImageBytes: 1024 },
+      saveImage: async input => { saved.push(input); return { attachmentId: 'a1', mediaType: input.mediaType, bytes: input.data.length, width: 1, height: 1 } },
+    } : undefined,
+  }
+  const agent = { session: { header: { cwd: '/tmp' } } }
+  const content = await collabPromptContent(ctx, agent, undefined, [{ type: 'image', image_url: 'data:image/png;base64,aGVsbG8=' }], new AbortController().signal)
+  assert.equal(content[0].type, 'image')
+  assert.equal(content[0].attachment.attachmentId, 'a1')
+  assert.equal(saved[0].mediaType, 'image/png')
 })
 
 test('web request cleans timer and abort listener when request.end throws synchronously', async () => {
