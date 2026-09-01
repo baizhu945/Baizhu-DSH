@@ -41,10 +41,6 @@
     - id: openai-account-ui
       name: 'dsh-openai-account-ui'
 
-    # 上游 skin-center 自带全部内置皮肤，单独安装不引入其它 Web UI 组件。
-    - id: ui-skin-center
-      name: '@linxin666/dsh-client-ui-skin-center'
-
 # Keep the model-facing dsh-tool-web schema and renderer, but route its stable
 # ctx.web seam to the local keyless provider. Codex preset web_search/web.run
 # is agent-scoped and remains its separate implementation.

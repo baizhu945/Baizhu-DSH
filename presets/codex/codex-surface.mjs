@@ -33,11 +33,6 @@ const SURFACE_MODEL_CATALOG = await (async () => {
   }
 })()
 
-// Permission grants are deliberately scoped to one live Codex agent. They
-// approximate the official request_permissions lifetime without modifying the
-// deployment-wide permission preset table.
-const ADDITIONAL_PERMISSION_GRANTS = new WeakMap()
-
 const IMAGE_EXTENSIONS = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -337,16 +332,9 @@ const ADDITIONAL_PERMISSIONS_SCHEMA = {
   },
 }
 
-function grantedSandboxPolicy(agent, standing) {
-  const permissions = ADDITIONAL_PERMISSION_GRANTS.get(agent)
-  const writes = permissions?.file_system?.write
-  if (!Array.isArray(writes) || writes.length === 0 || standing.mode === 'danger-full-access') return standing
-  const insideWorkspace = writes.every(path => typeof path === 'string'
-    && nodePath.isAbsolute(path)
-    && pathIsWithin(standing.workspaceRoot, nodePath.resolve(path)))
-  return insideWorkspace
-    ? { ...standing, mode: 'workspace-write' }
-    : { ...standing, mode: 'danger-full-access' }
+function grantedSandboxPolicy(ctx, agent, standing) {
+  const codexPermissions = ctx.get?.('codexPermissions')
+  return codexPermissions?.policyFor?.(agent, standing) ?? standing
 }
 
 async function approvePolicy(ctx, exec, standingPolicy, requestedMode, justification, subject) {
@@ -368,7 +356,7 @@ async function execSandboxPolicy(ctx, args, exec) {
   const agent = agentOf(exec)
   const standing = ctx.sandboxPolicy.resolve({ session: agent.session })
   const requested = args.sandbox_permissions ?? 'use_default'
-  if (requested === 'use_default') return grantedSandboxPolicy(agent, standing)
+  if (requested === 'use_default') return grantedSandboxPolicy(ctx, agent, standing)
   if (requested !== 'require_escalated' && requested !== 'with_additional_permissions') {
     throw new Error(`unsupported sandbox_permissions: ${String(requested)}`)
   }
@@ -386,23 +374,28 @@ async function execSandboxPolicy(ctx, args, exec) {
     // The confirm-only pre-execute gate already approved this unrestricted call.
     return standing
   }
-  const granted = grantedSandboxPolicy(agent, standing)
-  if (requested === 'with_additional_permissions' && ADDITIONAL_PERMISSION_GRANTS.has(agent)) return granted
+  const granted = grantedSandboxPolicy(ctx, agent, standing)
+  if (requested === 'with_additional_permissions'
+    && (granted.mode !== standing.mode || granted.workspaceRoot !== standing.workspaceRoot)) return granted
   return approvePolicy(ctx, exec, standing, 'danger-full-access', args.justification, 'command')
 }
 
 async function patchSandboxPolicy(ctx, exec, targets) {
   const agent = agentOf(exec)
   const standing = ctx.sandboxPolicy.resolve({ session: agent.session })
-  if (standing.mode === 'danger-full-access') return standing
   const processPaths = targets.map(target => ctx.fs.processPath(target))
-  const insideWorkspace = processPaths.every(path => pathIsWithin(standing.workspaceRoot, path))
-  const requestedMode = standing.mode === 'read-only' && insideWorkspace
+  const codexPermissions = ctx.get?.('codexPermissions')
+  const effectiveStanding = codexPermissions?.policyForTargets !== undefined
+    ? codexPermissions.policyForTargets(agent, standing, processPaths)
+    : standing
+  if (effectiveStanding.mode === 'danger-full-access') return effectiveStanding
+  const insideWorkspace = processPaths.every(path => pathIsWithin(effectiveStanding.workspaceRoot, path))
+  const requestedMode = effectiveStanding.mode === 'read-only' && insideWorkspace
     ? 'workspace-write'
-    : insideWorkspace ? standing.mode : 'danger-full-access'
-  if (requestedMode === standing.mode) return standing
+    : insideWorkspace ? effectiveStanding.mode : 'danger-full-access'
+  if (requestedMode === effectiveStanding.mode) return effectiveStanding
   const scope = processPaths.length === 1 ? processPaths[0] : `${processPaths.length} files`
-  return approvePolicy(ctx, exec, standing, requestedMode, `Apply patch to ${scope}`, 'patch')
+  return approvePolicy(ctx, exec, effectiveStanding, requestedMode, `Apply patch to ${scope}`, 'patch')
 }
 
 function formatCollectedStream(stream) {
@@ -915,7 +908,7 @@ function permissionRequestHasEffect(permissions) {
 function registerRequestPermissions(ctx) {
   ctx.tools.register(defineTool({
     name: 'request_permissions',
-    description: 'Request additional filesystem or network permissions from the user and wait for the client to grant a subset of the requested permission profile. Relative filesystem paths resolve against the selected environment. Granted permissions apply to later shell-like commands in the current session.',
+    description: 'Request additional filesystem or network permissions from the user and wait for the client to grant a subset of the requested permission profile. Relative filesystem paths resolve against the selected environment. Granted permissions apply automatically to later shell-like commands in the current turn.',
     parameters: {
       reason: { type: 'string', description: 'Optional short explanation for why additional permissions are needed.' },
       permissions: { ...ADDITIONAL_PERMISSIONS_SCHEMA, required: true },
@@ -924,13 +917,18 @@ function registerRequestPermissions(ctx) {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { status: { type: 'string', required: true } },
+        properties: {
+          permissions: { ...ADDITIONAL_PERMISSIONS_SCHEMA, required: true },
+          scope: { type: 'string', required: true, enum: ['turn'] },
+          strict_auto_review: { type: 'boolean', required: true },
+          reason: { type: 'string' },
+        },
       },
       render: (_args, value) => [{
         type: 'text',
-        text: value.status === 'granted'
-          ? 'Additional permissions granted for this Codex session.'
-          : 'Additional permissions were not granted.',
+        text: permissionRequestHasEffect(value.permissions)
+          ? 'Additional permissions granted for this Codex turn.'
+          : `Additional permissions were not granted${value.reason ? `: ${value.reason}` : '.'}`,
       }],
     },
     async execute(args, exec) {
@@ -938,20 +936,17 @@ function registerRequestPermissions(ctx) {
       if (!permissionRequestHasEffect(args.permissions)) {
         throw new Error('permissions must request network access or at least one filesystem path')
       }
-      if (effectiveApprovalPolicy(agent.session.events) === 'never') {
-        throw new Error('approval policy is never; additional permissions cannot be requested')
+      const codexPermissions = ctx.get('codexPermissions')
+      if (codexPermissions?.request === undefined) {
+        throw new Error('Codex permission plugin is unavailable')
       }
-      const standing = ctx.sandboxPolicy.resolve({ session: agent.session })
-      await approvePolicy(
-        ctx,
-        exec,
-        standing,
-        'danger-full-access',
-        args.reason?.trim() || 'The command needs additional filesystem or network permissions.',
-        'permissions',
-      )
-      ADDITIONAL_PERMISSION_GRANTS.set(agent, structuredClone(args.permissions))
-      return { status: 'granted' }
+      const outcome = await codexPermissions.request(agent, exec, args.permissions, args.reason)
+      return {
+        permissions: outcome.granted ? structuredClone(args.permissions) : {},
+        scope: 'turn',
+        strict_auto_review: false,
+        ...(outcome.granted || outcome.reason === undefined ? {} : { reason: outcome.reason }),
+      }
     },
     presentCall(args) {
       return { card: 'generic', title: 'Request additional permissions', kind: 'execute', content: [{ type: 'text', text: args.reason?.trim() || 'Request filesystem or network permissions.' }] }
@@ -2068,7 +2063,7 @@ function registerApplyPatch(ctx) {
       // A nested Code Mode result carries content/isError but not the native
       // tool/result metadata envelope. Rebuild the same exact preview from
       // the freeform input so the Web/Trajectory cards still show +/- lines.
-      const preview = previewPatchDiffs(args.input)
+      const preview = previewPatchDiffs(patchInput(args))
       const diffs = narrowDiffs(result.meta) ?? (preview.length > 0 ? preview : undefined)
       return diffs === undefined ? undefined : { card: 'diff', title: 'Patch applied', diffs }
     },
@@ -2850,6 +2845,7 @@ export const inject = [
   'fs',
   'attachments',
   'systemPrompt',
+  'codexPermissions',
 ]
 
 export function apply(ctx) {

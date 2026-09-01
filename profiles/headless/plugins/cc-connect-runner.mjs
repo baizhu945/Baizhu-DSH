@@ -25,7 +25,6 @@
 import { randomUUID } from 'node:crypto'
 import { createInterface } from 'node:readline'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 
@@ -80,6 +79,15 @@ function isBlankSession(session) {
   return !session.events.some(event => event.type === 'turn/start')
 }
 
+/** Read the session's newest recorded preset without relying on the removed helper export. */
+function resolveRecordedPreset(session) {
+  for (let index = session.events.length - 1; index >= 0; index -= 1) {
+    const event = session.events[index]
+    if (event?.type === 'agent-preset/selected') return event.data.agentPreset
+  }
+  return session.header?.agentPreset
+}
+
 /**
  * Compose the agent from its recorded preset, or apply a requested switch
  * while the session is still blank. The dsh roster owns validation and
@@ -94,7 +102,7 @@ async function applyAgentPreset(ctx, agentCtx, requested, defaultPreset) {
 
   const session = agentCtx.agent?.session
   if (session === undefined) throw new Error('headless agent setup has no session')
-  const recorded = resolveSessionPreset(session)
+  const recorded = resolveRecordedPreset(session)
   const target = requested ?? recorded ?? defaultPreset
   if (target === undefined) return
 

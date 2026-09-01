@@ -10,7 +10,7 @@
  *
  * 实现机制:监听 tools/pre-execute 瀑布;当 ctx.permissionPresets.current()
  * 等于询问模式名时,对写/执行类工具返回 { kind: 'ask' },dsh 工具管线
- * 会将其转交 ctx.approval;web UI 的 apiproxy 提供 human answerer,
+ * 会将其转交 ctx.approval;web UI 的 approval interaction 提供 human answerer,
  * 批准一次(allowed-once)才放行,拒绝/取消则工具收到拒绝结果。
  *
  * 零依赖纯 ESM:不 import 任何 dsh/cordis 包,由 loader 经相对路径加载。
@@ -40,7 +40,7 @@ export function apply(ctx, config = {}) {
 
   // 进程内"总是允许"会话集合(内存态,不持久):dsh 重启/插件重载后自动清空恢复询问
   const alwaysAllowSessions = new Set()
-  // 注意:api-proxy 广播的参数是 sessionId 字符串本身(非对象),必须按字符串接收
+  // 保留旧版客户端广播兼容入口;新版客户端在页面内维护 always-allow 状态。
   ctx.on('confirm-writes/always-allow', (sessionId) => {
     alwaysAllowSessions.add(sessionId)
   })
@@ -50,12 +50,12 @@ export function apply(ctx, config = {}) {
     if (exec.agent) {
       let current
       try {
-        current = ctx.permissionPresets?.current?.(exec.agent.session.events)
+        current = ctx.permissionPresets?.current?.(exec.agent.session)
       } catch {
         return next() // 权限服务异常时安全降级为放行
       }
       if (current !== askPreset) return next()
-      // 会话级 always-allow(审批弹窗选择"总是允许",api-proxy 广播后记录):
+      // 会话级 always-allow(审批弹窗选择"总是允许",由客户端页面内记录):
       // 本次运行中的对话所有写/执行默认放行;dsh 重启后自动恢复询问
       if (alwaysAllowSessions.has(exec.agent.session.id)) return next()
     }

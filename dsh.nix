@@ -40,12 +40,12 @@ let
     ];
   };
 
-  # deepseek-harness v0.1.1-rc.1
+  # deepseek-harness v0.1.2-alpha.3
   dshSrc = pkgs.fetchFromGitHub {
     owner = "deepseek-ai";
     repo = "deepseek-harness";
-    rev = "528c682e061696f5a160f363f236ecbf53cbd006";
-    hash = "sha256-daCh+O/lbv5QrJvslyEHfy+p9HcYhgTzda6I1VNnJZk=";
+    rev = "dd6322d604e00eec1ba5e0c8541159906a21094a";
+    hash = "sha256-emUzEU1phOvCAYzTepfe7RkOUP8IObpX9Xw+wL3OfqM=";
   };
 
   # 声明式 pnpm 依赖(fetchPnpmDeps 为 fixed-output 派生,沙箱内可联网下载;
@@ -65,25 +65,24 @@ let
       pnpm config set network-concurrency 4
     '';
 
-    hash = "sha256-+PsdK9u3ZKv4XtSc8tBKKP48J/95/CGTMIUf8Q8dbok=";
+    hash = "sha256-KK34f9oTm/ofvAR9VV/FGnR1jJAQUyFzQMz7a/Xv6VE=";
   };
 
   dsh = pkgs.stdenv.mkDerivation {
     pname = "dsh";
-    version = "0.1.1-rc.1";
+    version = "0.1.2-alpha.3";
     src = dshSrc;
 
     pnpmDeps = dshPnpmDeps;
 
     patches = [
-      ./patches/expand-running.patch
       ./patches/tool-bottom-collapse.patch
       ./patches/bash-command-hscroll.patch
       ./patches/durable-session-lease.patch
       # Optional trusted terminal/FS seams used only by the Codex preset.
       # Existing callers omit the new fields/methods and retain upstream behavior.
       ./presets/codex/patches/codex-runtime-parity.patch
-      # One Codex-scoped UI patch keeps live, replay, and trajectory rendering together.
+      # Codex-scoped UI patches keep live, replay, and trajectory rendering together.
       ./presets/codex/patches/codex-readable-tools.patch
       # Promote only marked Codex Code Mode children to native tool rows.
       ./presets/codex/patches/codex-native-display.patch
@@ -114,18 +113,10 @@ let
       runHook preBuild
       # node-pty 的 pty.node 由 install script 用 node-gyp 编译(--ignore-scripts 跳过)
       cd node_modules/node-pty && node-gyp rebuild && cd ../..
-      export DSH_CLIENT_COMMIT_HASH=528c682e061696f5a160f363f236ecbf53cbd006
+      export DSH_CLIENT_COMMIT_HASH=dd6322d604e00eec1ba5e0c8541159906a21094a
       npm run build
       runHook postBuild
-      # 把 DeepSeek V4 正式版注入 pi-ai 的 OpenRouter 目录快照。
-      # 根因:dsh 构建时锁定的 @earendil-works/pi-ai@0.82.1 内置目录快照
-      # 早于 0731 / 0813 正式版上线,只收录了 0423 预览版
-      # (deepseek/deepseek-v4-flash、deepseek/deepseek-v4-pro);而 discovery
-      # 对目录路由直接短路返回内置目录,从不联网查询 OpenRouter /models,
-      # 所以列表永远无法自愈。这里在构建期把正式版补进内置目录数据,
-      # 重启 dsh 后 4 个版本(flash/pro × 预览/正式)都会出现在模型列表。
-      python3 ${./patches/inject-openrouter-models.py} ${./patches/openrouter-extra-models.json}
-      # pi-ai 0.82.1 的 OpenAI API 与 OpenAI Codex 目录都把 GPT-5.6 的
+      # pi-ai 的 OpenAI API 与 OpenAI Codex 目录都把 GPT-5.6 的
       # 272000 价格分层阈值误当成上下文上限。fix-gpt56-context.py 会同时
       # 修正两个 provider 的目录；OpenAI 账号默认走 openai-codex，不能只
       # 修改 openai.json，否则 Web 中仍会显示/记录 272K。
@@ -166,7 +157,6 @@ in
 
   imports = [
     ./skills.nix
-    ./skins/skin-center.nix
     ./presets/codex/dsh-codex.nix
   ];
 

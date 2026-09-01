@@ -1,13 +1,11 @@
-diff -ruN base/packages/client/ui-conversation/src/client/chat/ReasoningRow.module.css final/packages/client/ui-conversation/src/client/chat/ReasoningRow.module.css
---- base/packages/client/ui-conversation/src/client/chat/ReasoningRow.module.css	1970-01-01 08:00:01.000000000 +0800
-+++ final/packages/client/ui-conversation/src/client/chat/ReasoningRow.module.css	2026-08-15 15:28:52.271137473 +0800
-@@ -74,6 +74,30 @@
+diff --git a/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css b/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
+index 2d7cbe8f0..8342000ac 100644
+--- a/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
++++ b/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
+@@ -78,6 +78,27 @@
    word-break: break-word;
  }
  
-+/* Bottom collapse affordance under the expanded Think body: always visible,
-+   indented to the same left edge as the reasoning text, so a long reasoning
-+   trace can be folded back up without scrolling to the header row. */
 +.collapseButton {
 +  display: inline-flex;
 +  align-self: flex-start;
@@ -32,9 +30,10 @@ diff -ruN base/packages/client/ui-conversation/src/client/chat/ReasoningRow.modu
  @media (prefers-reduced-motion: reduce) {
    .root[data-state='running'] .row::after {
      animation: none;
-diff -ruN base/packages/client/ui-conversation/src/client/chat/ReasoningRow.tsx final/packages/client/ui-conversation/src/client/chat/ReasoningRow.tsx
---- base/packages/client/ui-conversation/src/client/chat/ReasoningRow.tsx	2026-08-15 15:13:38.261294005 +0800
-+++ final/packages/client/ui-conversation/src/client/chat/ReasoningRow.tsx	2026-08-15 15:28:40.025755901 +0800
+diff --git a/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx b/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
+index 1f5fba56b..b155b8d7e 100644
+--- a/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
++++ b/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
 @@ -1,6 +1,6 @@
  /** Assistant reasoning disclosure, independent of Tool-call presentation. */
  import { useEffect, useRef, useState } from 'react'
@@ -43,7 +42,7 @@ diff -ruN base/packages/client/ui-conversation/src/client/chat/ReasoningRow.tsx 
  import type { ChatViewSlotProps } from '../contract/slots.ts'
  import { useThrottledVisualUpdate } from './use-throttled-visual-update.ts'
  import a11yCss from './accessibility.module.css'
-@@ -63,6 +63,14 @@
+@@ -59,6 +59,14 @@ export function ReasoningRow({ text, running, t }: { text: string; running: bool
          )}
        >
          <div className={css.thinkBody}>{text}</div>
@@ -58,54 +57,54 @@ diff -ruN base/packages/client/ui-conversation/src/client/chat/ReasoningRow.tsx 
        </DisclosureRow>
      </div>
    )
-diff -ruN base/packages/client/ui-conversation/src/client/locales.ts final/packages/client/ui-conversation/src/client/locales.ts
---- base/packages/client/ui-conversation/src/client/locales.ts	2026-08-15 15:13:38.262732585 +0800
-+++ final/packages/client/ui-conversation/src/client/locales.ts	2026-08-15 15:18:08.859958416 +0800
-@@ -150,6 +150,7 @@
+diff --git a/packages/client/ui-chat/src/client/locale.ts b/packages/client/ui-chat/src/client/locale.ts
+index f10a9ced2..ab701c99d 100644
+--- a/packages/client/ui-chat/src/client/locale.ts
++++ b/packages/client/ui-chat/src/client/locale.ts
+@@ -112,6 +112,7 @@ export const zh = {
+   'command.title': '指令',
    'row.running': '运行中',
    'row.failed': '失败',
-   'row.stopped': '已停止',
 +  'row.collapse': '折叠',
-   'queue.count': '{n} 条排队消息',
-   'queue.edit': '编辑排队消息',
-   'queue.edit.unsupported': '包含非文本内容，暂不支持编辑',
-@@ -320,6 +321,7 @@
+   'json.truncated': '… 已截断，共 {total} 字符',
+   'clock.md': '{m}月{d}日',
+   'clock.ymd': '{y}年{m}月{d}日',
+@@ -229,6 +230,7 @@ export const en = {
+   'command.title': 'Command',
    'row.running': 'Running',
    'row.failed': 'Failed',
-   'row.stopped': 'Stopped',
 +  'row.collapse': 'Collapse',
-   'queue.count': '{n} queued messages',
-   'queue.edit': 'Edit queued message',
-   'queue.edit.unsupported': 'Contains non-text content; editing is not supported yet',
-diff -ruN base/packages/client/ui-skill/src/client/locales.ts final/packages/client/ui-skill/src/client/locales.ts
---- base/packages/client/ui-skill/src/client/locales.ts	1970-01-01 08:00:01.000000000 +0800
-+++ final/packages/client/ui-skill/src/client/locales.ts	2026-08-15 15:18:08.860069591 +0800
-@@ -8,6 +8,7 @@
-   'row.running': '正在加载 skill',
-   'row.failed': 'skill 加载失败',
-   'row.stopped': 'skill 加载已中止',
+   'json.truncated': '… truncated, {total} characters total',
+   'clock.md': '{m}/{d}',
+   'clock.ymd': '{y}-{m}-{d}',
+diff --git a/packages/client/ui-conversation/src/client/locales.ts b/packages/client/ui-conversation/src/client/locales.ts
+index 296f95b33..2db5315c9 100644
+--- a/packages/client/ui-conversation/src/client/locales.ts
++++ b/packages/client/ui-conversation/src/client/locales.ts
+@@ -91,6 +91,7 @@ export const zh = {
+   'row.input': '输入',
+   'row.output': '输出',
+   'row.inspect': '查看',
 +  'row.collapse': '折叠',
-   'row.instructions': '说明',
-   'menu.userOnly': '仅用户',
- } satisfies Record<string, string>
-@@ -20,6 +21,7 @@
-   'row.running': 'Loading skill',
-   'row.failed': 'Skill load failed',
-   'row.stopped': 'Skill load stopped',
+   'tool.title.search': '搜索',
+   'tool.title.read': '读取',
+   'tool.title.bash': 'Bash',
+@@ -241,6 +242,7 @@ export const en = {
+   'row.input': 'IN',
+   'row.output': 'OUT',
+   'row.inspect': 'Inspect',
 +  'row.collapse': 'Collapse',
-   'row.instructions': 'Instructions',
-   'menu.userOnly': 'user-only',
- } satisfies Record<SkillKey, string>
-diff -ruN base/packages/client/ui-skill/src/client/SkillRow.module.css final/packages/client/ui-skill/src/client/SkillRow.module.css
---- base/packages/client/ui-skill/src/client/SkillRow.module.css	1970-01-01 08:00:01.000000000 +0800
-+++ final/packages/client/ui-skill/src/client/SkillRow.module.css	2026-08-15 15:18:08.860179185 +0800
-@@ -189,6 +189,30 @@
+   'tool.title.search': 'Search',
+   'tool.title.read': 'Read',
+   'tool.title.bash': 'Bash',
+diff --git a/packages/client/ui-skill/src/client/SkillRow.module.css b/packages/client/ui-skill/src/client/SkillRow.module.css
+index 05c3388aa..bb21f2b59 100644
+--- a/packages/client/ui-skill/src/client/SkillRow.module.css
++++ b/packages/client/ui-skill/src/client/SkillRow.module.css
+@@ -189,6 +189,27 @@
    color: var(--dsw-alias-label-primary);
  }
  
-+/* Bottom collapse affordance under the expanded body: same pill geometry as
-+   Inspect but always visible, so the instructions card can be folded from its
-+   bottom edge without scrolling back to the header row. */
 +.collapseButton {
 +  display: inline-flex;
 +  align-self: flex-start;
@@ -130,11 +129,11 @@ diff -ruN base/packages/client/ui-skill/src/client/SkillRow.module.css final/pac
  .visuallyHidden {
    position: absolute;
    width: 1px;
-diff -ruN base/packages/client/ui-skill/src/client/SkillRow.tsx final/packages/client/ui-skill/src/client/SkillRow.tsx
---- base/packages/client/ui-skill/src/client/SkillRow.tsx	1970-01-01 08:00:01.000000000 +0800
-+++ final/packages/client/ui-skill/src/client/SkillRow.tsx	2026-08-15 15:18:08.860246158 +0800
-@@ -4,7 +4,7 @@
- 
+diff --git a/packages/client/ui-skill/src/client/SkillRow.tsx b/packages/client/ui-skill/src/client/SkillRow.tsx
+index bee776d93..6bb2c96fe 100644
+--- a/packages/client/ui-skill/src/client/SkillRow.tsx
++++ b/packages/client/ui-skill/src/client/SkillRow.tsx
+@@ -1,6 +1,6 @@
  import { useState, type KeyboardEvent, type ReactNode } from 'react'
  import {
 -  IconChevronDownOutline14, IconInspectOutline12, IconSkillOutline16, StateDot,
@@ -142,8 +141,8 @@ diff -ruN base/packages/client/ui-skill/src/client/SkillRow.tsx final/packages/c
  } from '@deepseek-ai/dsh-client-ui-primitives'
  import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
  import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
-@@ -164,6 +164,10 @@
-               Inspect
+@@ -159,6 +159,10 @@ export function SkillRow({ block, inspect, t }: SkillRowProps) {
+               {t('row.inspect')}
              </button>
            ) : null}
 +          <button type="button" className={css.collapseButton} onClick={() => { setExpanded(false) }}>
@@ -153,16 +152,33 @@ diff -ruN base/packages/client/ui-skill/src/client/SkillRow.tsx final/packages/c
          </div>
        ) : null}
      </div>
-diff -ruN base/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css final/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
---- base/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css	1970-01-01 08:00:01.000000000 +0800
-+++ final/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css	2026-08-15 15:18:08.860316192 +0800
-@@ -171,6 +171,30 @@
+diff --git a/packages/client/ui-skill/src/client/locales.ts b/packages/client/ui-skill/src/client/locales.ts
+index d7a9b9422..42368a009 100644
+--- a/packages/client/ui-skill/src/client/locales.ts
++++ b/packages/client/ui-skill/src/client/locales.ts
+@@ -11,6 +11,7 @@ export const zh = {
+   'row.stopped': 'skill 加载已中止',
+   'row.instructions': '说明',
+   'row.inspect': '查看',
++  'row.collapse': '折叠',
+   'menu.userOnly': '仅用户',
+ } satisfies Record<string, string>
+ 
+@@ -25,5 +26,6 @@ export const en = {
+   'row.stopped': 'Skill load stopped',
+   'row.instructions': 'Instructions',
+   'row.inspect': 'Inspect',
++  'row.collapse': 'Collapse',
+   'menu.userOnly': 'user-only',
+ } satisfies Record<SkillKey, string>
+diff --git a/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css b/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
+index 2f344ac0d..c19270c19 100644
+--- a/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
++++ b/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
+@@ -196,6 +196,27 @@
    color: var(--dsw-alias-label-primary);
  }
  
-+/* Bottom collapse affordance under the expanded body: same pill geometry as
-+   Inspect but always visible, so a very long card can be folded back up from
-+   its bottom edge without scrolling to the row header. */
 +.collapseButton {
 +  display: inline-flex;
 +  align-self: flex-start;
@@ -187,23 +203,23 @@ diff -ruN base/packages/client/ui-tool/src/client/tool/components/ToolRow.module
  /* Expanded-body scroll wrapper for the run_code CodeBlock; the IN/OUT card
     and the terminal card scroll INSIDE their own surface instead, so the
     scrollbar sits within the rounded card. */
-diff -ruN base/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx final/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
---- base/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx	2026-08-15 15:13:38.261361724 +0800
-+++ final/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx	2026-08-15 15:18:08.860389488 +0800
-@@ -20,7 +20,7 @@
- import { useState, useEffect, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+diff --git a/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx b/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
+index 06029777a..9b7f40136 100644
+--- a/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
++++ b/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
+@@ -1,7 +1,7 @@
+ import { useMemo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
  import clsx from 'clsx'
  import {
 -  CodeBlock, DiffBlock, DisclosureRow, IconInspectOutline12, ReadBlock, SearchBlock, StateDot, TerminalBlock, WebBlock,
 +  CodeBlock, DiffBlock, DisclosureRow, IconChevronUpOutline14, IconInspectOutline12, ReadBlock, SearchBlock, StateDot, TerminalBlock, WebBlock,
+   diffTotals,
  } from '@deepseek-ai/dsh-client-ui-primitives'
- import type { WebBlockProps } from '@deepseek-ai/dsh-client-ui-primitives'
  import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-@@ -307,6 +307,15 @@
-               Inspect
+@@ -279,6 +279,14 @@ export function ToolRow({
+               {t('row.inspect')}
              </button>
            )}
-+          {/* 底部折叠按钮:长工具卡无需滚回顶部,在展开内容的底部即可收起 */}
 +          <button
 +            type="button"
 +            className={css.collapseButton}
@@ -215,16 +231,14 @@ diff -ruN base/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx fi
          </div>
        </DisclosureRow>
      </div>
-diff -ruN base/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css final/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
---- base/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css	1970-01-01 08:00:01.000000000 +0800
-+++ final/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css	2026-08-15 15:18:08.860458216 +0800
-@@ -228,6 +228,30 @@
+diff --git a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
+index 4c1d7b18b..bd628069e 100644
+--- a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
++++ b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
+@@ -240,6 +240,27 @@
    color: var(--dsw-alias-label-primary);
  }
  
-+/* Bottom collapse affordance under the expanded body: same pill geometry as
-+   Inspect but always visible, so a long terminal card can be folded from its
-+   bottom edge without scrolling back to the header row. */
 +.collapseButton {
 +  display: inline-flex;
 +  align-self: flex-start;
@@ -249,10 +263,11 @@ diff -ruN base/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.mod
  
  .visuallyHidden {
    position: absolute;
-diff -ruN base/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx final/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
---- base/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx	1970-01-01 08:00:01.000000000 +0800
-+++ final/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx	2026-08-15 15:18:08.860514965 +0800
-@@ -17,7 +17,7 @@
+diff --git a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
+index c291a733a..36fd5796a 100644
+--- a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
++++ b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
+@@ -2,7 +2,7 @@ import { useMemo, useState, type KeyboardEvent } from 'react'
  import type { Context } from '@deepseek-ai/cordis'
  import clsx from 'clsx'
  import {
@@ -261,8 +276,8 @@ diff -ruN base/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
  } from '@deepseek-ai/dsh-client-ui-primitives'
  import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
  import type { ToolCallViewProps } from '../../contract/slots.ts'
-@@ -157,6 +157,10 @@
-               Inspect
+@@ -146,6 +146,10 @@ export function BashRow({ toolName, block, sessionId, useSessions, inspect, t }:
+               {t('row.inspect')}
              </button>
            )}
 +          <button type="button" className={css.collapseButton} onClick={() => { setExpanded(false) }}>
@@ -272,16 +287,14 @@ diff -ruN base/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
          </div>
        )}
      </div>
-diff -ruN base/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css final/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
---- base/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css	1970-01-01 08:00:01.000000000 +0800
-+++ final/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css	2026-08-15 15:18:08.860580416 +0800
-@@ -281,6 +281,30 @@
+diff --git a/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css b/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
+index fdc2ebbf5..5493eca81 100644
+--- a/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
++++ b/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
+@@ -281,6 +281,27 @@
    color: var(--dsw-alias-label-primary);
  }
  
-+/* Bottom collapse affordance under the expanded body: same pill geometry as
-+   Inspect but always visible, so a long source card can be folded from its
-+   bottom edge without scrolling back to the header row. */
 +.collapseButton {
 +  display: inline-flex;
 +  align-self: flex-start;
@@ -306,9 +319,10 @@ diff -ruN base/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.c
  .visuallyHidden {
    position: absolute;
    width: 1px;
-diff -ruN base/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx final/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx
---- base/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx	1970-01-01 08:00:01.000000000 +0800
-+++ final/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx	2026-08-15 15:18:08.860640231 +0800
+diff --git a/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx b/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx
+index 0f2207c59..27afaee53 100644
+--- a/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx
++++ b/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx
 @@ -2,7 +2,7 @@
  
  import { useId, useState, type ReactNode } from 'react'
@@ -318,33 +332,34 @@ diff -ruN base/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx fina
  } from '@deepseek-ai/dsh-client-ui-primitives'
  import type { InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
  import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
-@@ -164,6 +164,10 @@
-               Inspect
+@@ -164,6 +164,10 @@ export function CordisDefineRow({
+               {t('action.inspect')}
              </button>
            )}
 +          <button type="button" className={css.collapseButton} onClick={() => { setExpanded(false) }}>
 +            <IconChevronUpOutline14 />
-+            {t('row.collapse')}
++            {t('action.collapse')}
 +          </button>
          </div>
        </DisclosureRow>
      </div>
-diff -ruN base/packages/extensions/ui-cordis/src/client/locales.ts final/packages/extensions/ui-cordis/src/client/locales.ts
---- base/packages/extensions/ui-cordis/src/client/locales.ts	1970-01-01 08:00:01.000000000 +0800
-+++ final/packages/extensions/ui-cordis/src/client/locales.ts	2026-08-15 15:18:08.860693523 +0800
-@@ -9,6 +9,7 @@
-   'row.updateTitle': '更新 Cordis 插件',
-   'row.stopTitle': '停止 Cordis 插件',
-   'row.removeTitle': '移除 Cordis 插件',
-+  'row.collapse': '折叠',
-   'purpose.missing': '(未填写用途)',
-   'status.idle': '待激活',
-   'status.awaitingApproval': '待审批',
-@@ -72,6 +73,7 @@
-   'row.updateTitle': 'Update Cordis Plugin',
-   'row.stopTitle': 'Stop Cordis Plugin',
-   'row.removeTitle': 'Remove Cordis Plugin',
-+  'row.collapse': 'Collapse',
-   'purpose.missing': '(no purpose given)',
-   'status.idle': 'Ready',
-   'status.awaitingApproval': 'Awaiting approval',
+diff --git a/packages/extensions/ui-cordis/src/client/locales.ts b/packages/extensions/ui-cordis/src/client/locales.ts
+index 2c410a8f0..06a14ee37 100644
+--- a/packages/extensions/ui-cordis/src/client/locales.ts
++++ b/packages/extensions/ui-cordis/src/client/locales.ts
+@@ -43,6 +43,7 @@ export const zh = {
+   'action.retry': '重试',
+   'action.rollback': '回退',
+   'action.inspect': '查看',
++  'action.collapse': '折叠',
+   'render.failedAbdicated': '{slot} 渲染失败，已恢复默认界面：',
+   'render.failedHeld': '{slot} 渲染失败：',
+   'a11y.defining': '正在定义插件',
+@@ -107,6 +108,7 @@ export const en = {
+   'action.retry': 'Retry',
+   'action.rollback': 'Roll back',
+   'action.inspect': 'Inspect',
++  'action.collapse': 'Collapse',
+   'render.failedAbdicated': 'Rendering failed in {slot}; the default UI was restored:',
+   'render.failedHeld': 'Rendering failed in {slot}:',
+   'a11y.defining': 'Defining the plugin',

@@ -14,6 +14,7 @@ set -u
 
 PORT="${1:-3080}"
 URL="http://127.0.0.1:${PORT}/"
+OPEN_URL="$URL"
 
 BROWSER_BIN="${DSH_BROWSER:-}"
 if [ -z "${BROWSER_BIN}" ]; then
@@ -37,24 +38,51 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
+# 最新 dsh 的 Web 根路径在没有 token/cookie 时返回 401,这仍然说明
+# HTTP 服务已经监听;启动器不能再只把 2xx 当作 ready。
+httpReady() {
+  local code
+  code="$(curl -sS -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || true)"
+  case "$code" in
+    2*|3*|401|403|404) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# dsh web prints a one-time browser URL with a token. Only accept a token URL
+# for this invocation's port, so an old log cannot redirect another port.
+tokenURL() {
+  local candidate
+  [ -r "$HOME/.dsh-web.log" ] || return 1
+  candidate="$(sed -n 's#^dsh web: ##p' "$HOME/.dsh-web.log" | tail -1)"
+  case "$candidate" in
+    "http://127.0.0.1:${PORT}/"*) printf '%s\n' "$candidate"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # 端口无实例时由本次运行启动服务,并记录 PID 供退出时回收
-if ! curl -sf -o /dev/null "${URL}" 2>/dev/null; then
+if ! httpReady "$URL"; then
   dsh web --no-open --port "${PORT}" > "${HOME}/.dsh-web.log" 2>&1 &
   WEB_PID=$!
   for _ in $(seq 1 30); do
-    curl -sf -o /dev/null "${URL}" 2>/dev/null && break
+    candidate="$(tokenURL || true)"
+    if [ -n "$candidate" ]; then OPEN_URL="$candidate"; fi
+    httpReady "$OPEN_URL" && break
     kill -0 "${WEB_PID}" 2>/dev/null || break
     sleep 1
   done
-  if ! curl -sf -o /dev/null "${URL}" 2>/dev/null; then
+  if ! httpReady "$OPEN_URL"; then
     echo "dsh-web: 服务未能启动,请查看日志: ~/.dsh-web.log" >&2
     kill "${WEB_PID}" 2>/dev/null || true
     WEB_PID=""
     exit 1
   fi
-  echo "dsh-web: 服务已启动 ${URL} (pid ${WEB_PID})"
+  echo "dsh-web: 服务已启动 ${OPEN_URL} (pid ${WEB_PID})"
 else
-  echo "dsh-web: 复用已有实例 ${URL}(关闭页面不会停止已有实例)"
+  candidate="$(tokenURL || true)"
+  if [ -n "$candidate" ]; then OPEN_URL="$candidate"; fi
+  echo "dsh-web: 复用已有实例 ${OPEN_URL}(关闭页面不会停止已有实例)"
 fi
 
 # 独立临时 profile:chromium 关闭该窗口后进程即退出,脚本 wait 得以返回;
@@ -79,7 +107,7 @@ echo "dsh-web: 打开独立浏览器窗口;关闭该窗口(或 Ctrl+C)即退出�
   --no-first-run \
   --no-default-browser-check \
   ${OZONE_FLAGS} \
-  --app="${URL}" &
+  --app="${OPEN_URL}" &
 
 BROWSER_PID=$!
 wait "${BROWSER_PID}"

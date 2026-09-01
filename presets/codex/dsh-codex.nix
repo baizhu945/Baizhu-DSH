@@ -1,13 +1,13 @@
 { pkgs, lib, ... }:
 
 let
-  # OpenAI/codex model catalog @ 6478a751fde8884b2fdc76486fe23175a8e795d4.
+  # OpenAI/codex model catalog @ 2b7c279735d0d096cf7b34fe98938f46792f4d4f.
   # The catalog is mounted only below the Codex preset. Its base_instructions
   # and capability fields are read by codex-model-parity.mjs per request, so a
   # model switch changes the model-facing contract without touching other
   # agent presets or the host model registry.
   codexModelsSource = pkgs.fetchurl {
-    url = "https://raw.githubusercontent.com/openai/codex/6478a751fde8884b2fdc76486fe23175a8e795d4/codex-rs/models-manager/models.json";
+    url = "https://raw.githubusercontent.com/openai/codex/2b7c279735d0d096cf7b34fe98938f46792f4d4f/codex-rs/models-manager/models.json";
     hash = "sha256-6w17ml3K8QOJXF+KFMFrJp30bgObN1pVupf2I4VC0u0=";
   };
 
@@ -55,6 +55,7 @@ in
     ".dsh/.agent-presets/codex/codex-web-run-description.md".source = ./codex-web-run-description.md;
     ".dsh/.agent-presets/codex/codex-subagent-v1-description.md".source = ./codex-subagent-v1-description.md;
     ".dsh/.agent-presets/codex/codex-approval.mjs".source = ./codex-approval.mjs;
+    ".dsh/.agent-presets/codex/codex-permissions.mjs".source = ./codex-permissions.mjs;
     ".dsh/.agent-presets/codex/tool-restrictions.mjs".source = ./tool-restrictions.mjs;
   };
 }

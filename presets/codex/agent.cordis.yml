@@ -1,6 +1,6 @@
 # Codex-compatible agent-plane composition for DeepSeek Harness.
 #
-# OpenAI/codex reference: official HEAD @ 6478a751fde8884b2fdc76486fe23175a8e795d4.
+# OpenAI/codex reference: official HEAD @ 2b7c279735d0d096cf7b34fe98938f46792f4d4f.
 # The Luna model instructions and web.run description are pinned verbatim from
 # that tree; only host-mechanism adaptations are maintained locally.
 # The host remains authoritative for sandboxing, approval, persistence, model
@@ -43,7 +43,13 @@
   group: true
   isolate:
     terminals: true
+    codexPermissions: true
   config:
+    # This service must share the isolated realm with its only consumer below;
+    # publishing it at preset root would make it process-global.
+    - id: codex-permissions
+      name: './codex-permissions.mjs'
+
     - id: codex-terminals
       name: '@deepseek-ai/dsh-terminal'
 

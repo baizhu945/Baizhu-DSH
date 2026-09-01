@@ -16,7 +16,6 @@
  * the built-in web packages.
  */
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { WebError } from '@deepseek-ai/dsh-web'
 
 export const name = 'dsh-web-search-keyless'
@@ -27,7 +26,7 @@ const TAVILY_SEARCH_URL = 'https://api.tavily.com/search'
 const OPENAI_RESPONSES_URL = 'https://api.openai.com/v1/responses'
 const OPENAI_SEARCH_MODEL = 'gpt-4.1-mini'
 const OPENAI_PROVIDER_ID = 'openai'
-const LLM_PI_AI_SETTINGS = settingsNamespace('llm-pi-ai')
+const LLM_PI_AI_SETTINGS = 'llm-pi-ai'
 const MIMO_PROVIDER_ID = 'xiaomi'
 const MIMO_DEFAULT_BASE_URL = 'https://api.xiaomimimo.com/v1'
 const MIMO_SEARCH_MODELS = new Set(['mimo-v2.5', 'mimo-v2.5-pro'])

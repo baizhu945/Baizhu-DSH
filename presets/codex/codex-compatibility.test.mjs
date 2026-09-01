@@ -14,10 +14,12 @@ import {
   normalizeToolMode,
   patchWebSearchSchema,
   profileForModel,
+  modelRowFor,
   registerCodeModeAlias,
   registerV2Agents,
   rewriteCodeModeName,
   truncateToolContent,
+  unwrapCodeModeResult,
   tokenBudgetContextText,
   v2FinalMessageId,
   v2Status,
@@ -43,6 +45,7 @@ import {
   waitForTerminalOperation,
 } from './codex-surface.mjs'
 import { apply as applyCodexWebSearch, parseResponseBody, parseResponseEnvelope, requestCodexSearchForTest, searchCommands } from './codex-web-search.mjs'
+import { apply as applyCodexPermissions, CODEX_PROFILES, commonDirectory, normalizePermissionRequest } from './codex-permissions.mjs'
 
 const agentComposition = readFileSync(new URL('./agent.cordis.yml', import.meta.url), 'utf8')
 
@@ -213,6 +216,30 @@ test('Code Mode injects the official helper names and catches exit()', async () 
   const run = new AsyncFunction('console', source)
   await run({ log: value => logs.push(value) })
   assert.deepEqual(logs, ['hello'])
+})
+
+test('Code Mode seeds and returns session store state through its runtime envelope', async () => {
+  const source = officialRuntimeProgram('store("answer", 42); return load("answer");', { answer: 7 })
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+  const result = await new AsyncFunction('console', source)({ log: () => {} })
+  assert.equal(result.__dshCodexEnvelope, true)
+  assert.equal(result.__dshCodexResultPresent, true)
+  assert.equal(result.__dshCodexResult, 42)
+  assert.equal(result.__dshCodexStore.answer, 42)
+})
+
+test('Code Mode unwraps the host run_code envelope before exposing exec results', () => {
+  const session = {}
+  const envelope = {
+    __dshCodexEnvelope: true,
+    __dshCodexResultPresent: true,
+    __dshCodexResult: 'visible result',
+    __dshCodexStore: { answer: 42 },
+  }
+  assert.deepEqual(unwrapCodeModeResult({ logs: ['host log'], result: envelope }, session), {
+    logs: ['host log'],
+    result: 'visible result',
+  })
 })
 
 test('raw freeform patch gets an edit preview', () => {
@@ -402,6 +429,9 @@ test('legacy shell catalog rows retain unified exec and text-only web schemas ar
   assert.equal(daybreak.shellType, 'unified_exec')
   assert.equal(modelToolAllowed({}, daybreak, 'exec_command', {}, true), true)
   const spark = profileForModel('gpt-5.3-codex-spark')
+  assert.equal(spark.toolMode, 'native')
+  assert.equal(spark.applyPatchToolType, 'none')
+  assert.equal(spark.contextWindow, 272_000)
   const schema = {
     name: 'web__run',
     parameters: { properties: { search_query: {}, image_query: {} } },
@@ -427,7 +457,7 @@ test('CodeModeOnly retains official DirectModelOnly controls beside exec', () =>
   assert.equal(modelToolAllowed({}, luna, 'new_context', {}, false), true)
   assert.equal(modelToolAllowed({}, luna, 'new_context', {}, true), false)
   assert.equal(modelToolAllowed({}, luna, 'update_plan', {}, false), true)
-  assert.equal(modelToolAllowed({}, luna, 'update_plan', {}, true), false)
+  assert.equal(modelToolAllowed({}, luna, 'update_plan', {}, true), true)
   assert.equal(modelToolAllowed({}, luna, 'multi_agent_v1__spawn_agent', {}, false), true)
   assert.equal(modelToolAllowed({}, luna, 'multi_agent_v1__spawn_agent', {}, true), false)
   assert.equal(modelToolAllowed({}, luna, 'collaboration__spawn_agent', {}, false), false)
@@ -447,7 +477,77 @@ test('Codex scope hides dsh-native tool names for every selected provider', () =
   }
   assert.equal(modelToolAllowed({}, profile, 'request_permissions', {}, false), true)
   assert.equal(modelToolAllowed({}, profile, 'update_plan', {}, false), true)
-  assert.equal(modelToolAllowed({}, profile, 'update_plan', {}, true), false)
+  assert.equal(modelToolAllowed({}, profile, 'update_plan', {}, true), true)
+})
+
+test('unknown Codex model fallback matches official conservative metadata', () => {
+  const unknown = profileForModel('vendor/custom-coder')
+  assert.equal(unknown.includeSkillsUsageInstructions, false)
+  assert.equal(unknown.includeAppsUsageInstructions, false)
+  assert.equal(unknown.includePluginUsageInstructions, false)
+  assert.equal(unknown.applyPatchToolType, 'none')
+  assert.equal(unknown.contextWindow, 272_000)
+  assert.deepEqual(unknown.truncationPolicy, { mode: 'bytes', limit: 10_000 })
+})
+
+test('Codex model lookup follows the official longest-prefix namespace rules', () => {
+  const prefixed = profileForModel('vendor/gpt-5.6-sol-pro')
+  assert.equal(modelRowFor('vendor/gpt-5.6-sol-pro')?.slug, 'gpt-5.6-sol')
+  assert.equal(prefixed.toolMode, 'code_mode_only')
+  assert.equal(prefixed.contextWindow, 1_050_000)
+  assert.equal(prefixed.maxContextWindow, 1_050_000)
+  assert.equal(modelRowFor('vendor/nested/gpt-5.6-sol'), undefined)
+})
+
+test('Codex permission aliases stay isolated and grants use a bounded common root', () => {
+  assert.deepEqual(Object.keys(CODEX_PROFILES), ['codex-read-only', 'codex-on-request', 'codex-full-access'])
+  assert.equal(commonDirectory(['/home/baizhu945/repo/a.txt', '/home/baizhu945/repo/b.txt']), '/home/baizhu945/repo')
+  assert.equal(commonDirectory(['/tmp/a.txt', '/var/b.txt']), undefined)
+  const normalized = normalizePermissionRequest(
+    { session: { header: { cwd: '/home/baizhu945' } } },
+    { file_system: { write: ['repo/a.txt'] } },
+  )
+  assert.deepEqual(normalized.write, ['/home/baizhu945/repo/a.txt'])
+  assert.equal(normalized.writeRoot, '/home/baizhu945/repo')
+})
+
+test('Codex permission grants are turn-scoped and never policy rejects without prompting', async () => {
+  const events = [{ type: 'turn/start', data: { turn: 1 }, seq: 1 }]
+  const agent = { session: { header: { cwd: '/repo' }, events } }
+  let provided
+  let asks = 0
+  const ctx = {
+    provide: (_name, value) => { provided = value },
+    on: () => () => {},
+    inject: () => {},
+    get: name => name === 'approval' ? {
+      effectivePolicy: () => 'ask',
+      request: async () => { asks++; return 'allowed-once' },
+    } : undefined,
+  }
+  applyCodexPermissions(ctx)
+  const granted = await provided.request(
+    agent,
+    { callId: 'permissions-1', signal: new AbortController().signal },
+    { file_system: { write: ['/repo/out.txt'] } },
+    'write the output',
+  )
+  assert.deepEqual(granted, { granted: true })
+  assert.equal(asks, 1)
+  assert.equal(provided.policyFor(agent, { mode: 'read-only', workspaceRoot: '/repo' }).mode, 'workspace-write')
+  events.push({ type: 'turn/start', data: { turn: 2 }, seq: 2 })
+  assert.equal(provided.policyFor(agent, { mode: 'read-only', workspaceRoot: '/repo' }).mode, 'read-only')
+
+  const neverCtx = {
+    provide: (_name, value) => { provided = value },
+    on: () => () => {},
+    inject: () => {},
+    get: name => name === 'approval' ? { effectivePolicy: () => 'never', request: async () => { throw new Error('must not ask') } } : undefined,
+  }
+  applyCodexPermissions(neverCtx)
+  const rejected = await provided.request(agent, { callId: 'permissions-2' }, { network: { enabled: true } }, 'network')
+  assert.equal(rejected.granted, false)
+  assert.match(rejected.reason, /approval policy is never/)
 })
 
 test('Codex environment and never approval text retain official machine-readable facts', () => {
@@ -501,6 +601,13 @@ test('Codex compaction stays automatic and leaves room for summary replay', () =
 test('Codex model parity is mounted at the preset root for first-turn filtering', () => {
   assert.match(agentComposition, /# Read the pinned official model catalog[\s\S]*?- id: codex-model-parity\n  name: '\.\/codex-model-parity\.mjs'/)
   assert.doesNotMatch(agentComposition, /- id: codex-pty-surface[\s\S]*?\n    - id: codex-model-parity/)
+})
+
+test('Codex permission service shares the isolated realm with its consumer', () => {
+  const ptySurface = agentComposition.match(/- id: codex-pty-surface[\s\S]*?(?=\n- id: codex-model-parity)/)?.[0] ?? ''
+  assert.match(ptySurface, /isolate:\s+terminals: true\s+codexPermissions: true/)
+  assert.match(ptySurface, /- id: codex-permissions\s+name: '\.\/codex-permissions\.mjs'/)
+  assert.match(ptySurface, /- id: codex-surface\s+name: '\.\/codex-surface\.mjs'/)
 })
 
 test('official remaining-context tool is available only on token-budget routes', () => {

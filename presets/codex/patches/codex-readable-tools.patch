@@ -1,525 +1,387 @@
---- a/packages/host/apiproxy/src/api-proxy.ts
-+++ b/packages/host/apiproxy/src/api-proxy.ts
-@@ -44,6 +44,7 @@
-   ModelCatalogFailure, ModelProviderGroup,
-   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
-   QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
-+  ToolCallView, ToolResultView,
-   WorkspaceId, WorkspaceView,
- } from './api/index.ts'
- import {
-@@ -692,6 +693,108 @@
-  * which soft-falls to no view. Presenter or JSON.parse throws also soft-fall:
-  * the client's documented default (generic JSON card) covers every miss.
-  */
-+/** The caller supplies the session's resolved preset; ScopeKey is intentionally opaque. */
-+
-+function markCodexView<T extends object>(view: T): T {
-+  return { ...view, __codexPreset: true } as T
-+}
-+
-+/** Code Mode's outer wrapper and presenter failures need a readable fallback. */
-+function codexHumanLabel(value: unknown): string {
-+  return String(value)
-+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-+    .replaceAll('_', ' ')
-+    .replace(/\b\w/g, character => character.toUpperCase())
-+    .replace(/\bId\b/g, 'ID')
-+    .replace(/\bUrl\b/g, 'URL')
-+}
-+
-+function codexHumanScalar(value: unknown): string {
-+  if (value === null || value === undefined) return 'none'
-+  if (typeof value === 'boolean') return value ? 'yes' : 'no'
-+  if (typeof value === 'string') return value === '' ? '(empty)' : value
-+  return String(value)
-+}
-+
-+function codexHumanLines(value: unknown, indent = ''): string[] {
-+  if (value === null || typeof value !== 'object') return [`${indent}${codexHumanScalar(value)}`]
-+  if (Array.isArray(value)) {
-+    if (value.length === 0) return [`${indent}(none)`]
-+    return value.flatMap(item => {
-+      const lines = codexHumanLines(item, `${indent}  `)
-+      return [`${indent}- ${lines[0]?.trimStart() ?? codexHumanScalar(item)}`, ...lines.slice(1)]
-+    })
-+  }
-+  const entries = Object.entries(value as Record<string, unknown>)
-+  if (entries.length === 0) return [`${indent}(none)`]
-+  return entries.flatMap(([key, child]) => {
-+    const label = codexHumanLabel(key)
-+    if (child === null || typeof child !== 'object') return [`${indent}${label}: ${codexHumanScalar(child)}`]
-+    return [`${indent}${label}:`, ...codexHumanLines(child, `${indent}  `)]
-+  })
-+}
-+
-+function codexHumanText(value: unknown): string {
-+  if (typeof value !== 'string') return codexHumanLines(value).join('\n')
-+  const trimmed = value.trim()
-+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return value
-+  try {
-+    return codexHumanLines(JSON.parse(trimmed)).join('\n')
-+  } catch {
-+    return value
-+  }
-+}
-+
-+function codexHumanContent(content: unknown): ContentBlock[] {
-+  if (!Array.isArray(content)) return [{ type: 'text', text: codexHumanText(content) }]
-+  return content.map(block => {
-+    if (block === null || typeof block !== 'object') return block
-+    const record = block as Record<string, unknown>
-+    return record.type === 'text' && typeof record.text === 'string'
-+      ? { ...record, text: codexHumanText(record.text) }
-+      : block
-+  }) as ContentBlock[]
-+}
-+
-+function codexToolTitle(name: string): string {
-+  if (name === 'exec') return 'Code Mode'
-+  if (name === 'apply_patch') return 'Apply patch'
-+  return codexHumanLabel(name)
-+}
-+
-+function codexFallbackCallView(name: string, args: unknown): ToolCallView {
-+  const record = args !== null && typeof args === 'object' ? args as Record<string, unknown> : undefined
-+  const rawInput = typeof record?.code === 'string'
-+    ? record.code
-+    : typeof record?.input === 'string'
-+      ? record.input
-+      : typeof record?.cmd === 'string' ? record.cmd : undefined
-+  return {
-+    card: 'generic',
-+    title: codexToolTitle(name),
-+    kind: 'other',
-+    ...(rawInput === undefined ? {} : { rawInput }),
-+    content: [{ type: 'text', text: codexHumanText(args) }],
-+  }
-+}
-+
-+function codexFallbackResultView(name: string, content: unknown, isError: boolean): ToolResultView {
-+  return {
-+    card: 'generic',
-+    title: `${codexToolTitle(name)} ${isError ? 'failed' : 'completed'}`,
-+    content: codexHumanContent(content),
-+  }
-+}
-+
-+function codexTryPresent<T>(presenter: unknown, args: unknown, result?: unknown): T | undefined {
-+  if (typeof presenter !== 'function') return undefined
-+  try {
-+    const callable = presenter as (args: unknown, result?: unknown) => T
-+    return result === undefined ? callable(args) : callable(args, result)
-+  } catch {
-+    return undefined
-+  }
-+}
- function viewFor(
-   ctx: Context,
-   event: SessionEvent,
-@@ -704,23 +807,60 @@
-   scope?: ScopeKey,
-+  codexSession = false,
- ): ToolEventView | undefined {
-   try {
-+    if (event.type === 'tool/code-dispatch-start' || event.type === 'tool/code-dispatch') {
-+      if (!codexSession) return undefined
-+      const { name, arguments: args } = event.data
-+      const tool = ctx.tools.get(name, scope)
-+      if (event.type === 'tool/code-dispatch-start') {
-+        const view = codexTryPresent<ToolCallView>(tool?.presentCall, args) ?? codexFallbackCallView(name, args)
-+        return { for: 'call', view: markCodexView(view) }
-+      }
-+      const result = {
-+        content: event.data.content,
-+        isError: event.data.isError === true,
-+      }
-+      const view = codexTryPresent<ToolResultView>(tool?.presentResult, args, result)
-+        ?? codexFallbackResultView(name, result.content, result.isError)
-+      return { for: 'result', view: markCodexView(view) }
-+    }
-     if (event.type === 'tool/call') {
-       const { name, arguments: raw } = event.data as ToolCallData
--      const view = ctx.tools.get(name, scope)?.presentCall?.(JSON.parse(raw))
--      return view === undefined ? undefined : { for: 'call', view }
-+      const args = JSON.parse(raw)
-+      const codex = codexSession
-+      const view = codexTryPresent<ToolCallView>(ctx.tools.get(name, scope)?.presentCall, args)
-+      if (view === undefined && codex) {
-+        return { for: 'call', view: markCodexView(codexFallbackCallView(name, args)) }
-+      }
-+      return view === undefined ? undefined : {
-+        for: 'call',
-+        view: codex ? markCodexView(view) : view,
-+      }
-     }
-     if (event.type === 'tool/result') {
-       const { message, meta } = event.data
-       const [result] = message.content
-       const callId = message.source.callId
-       const call = argsFor(callId) as { name: string; args: unknown } | undefined
--      if (call === undefined) return undefined
--      const view = ctx.tools.get(call.name, scope)?.presentResult?.(call.args, {
-+      if (call === undefined) {
-+        return codexSession
-+          ? { for: 'result', view: markCodexView(codexFallbackResultView('tool', result.content, result.isError === true)) }
-+          : undefined
-+      }
-+      const codex = codexSession
-+      const resultValue = {
-         content: result.content,
-         isError: result.isError === true,
-         ...meta === undefined ? {} : { meta },
--      })
--      return view === undefined ? undefined : { for: 'result', view }
-+      }
-+      const view = codexTryPresent<ToolResultView>(ctx.tools.get(call.name, scope)?.presentResult, call.args, resultValue)
-+      if (view === undefined && codex) {
-+        return { for: 'result', view: markCodexView(codexFallbackResultView(call.name, result.content, result.isError === true)) }
-+      }
-+      return view === undefined ? undefined : {
-+        for: 'result',
-+        view: codex ? markCodexView(view) : view,
-+      }
-     }
-   } catch (error: unknown) {
-     // A throwing presenter (or unparseable arguments) must not break delivery;
-@@ -761,0 +762,1 @@
-+  codexSession = false,
-@@ -766,1 +766,1 @@
--      const view = viewFor(ctx, event, callId => backscanArgs(page.events, callId), scope)
-+      const view = viewFor(ctx, event, callId => backscanArgs(page.events, callId), scope, codexSession)
-@@ -2322,1 +2322,2 @@
--          const scope = await presenterScopeFor(sessionId, sourceSession(source))
-+          const recordedSession = sourceSession(source)
-+          const scope = await presenterScopeFor(sessionId, recordedSession)
-@@ -2325,1 +2325,1 @@
--          const page = historyPage(ctx, cut.events, beforeSeq, maxMessages, scope)
-+          const page = historyPage(ctx, cut.events, beforeSeq, maxMessages, scope, resolveSessionPreset(recordedSession) === 'codex')
-@@ -3561,1 +3561,2 @@
--            )
-+              resolveSessionPreset(session) === 'codex',
-+            )
---- a/packages/client/ui-conversation/src/client/conversation-nodes/tool.ts
-+++ b/packages/client/ui-conversation/src/client/conversation-nodes/tool.ts
-@@ -79,6 +79,10 @@
-   readonly content?: ToolResultNode['content']
+diff --git a/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts b/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
+--- a/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
++++ b/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
+@@ -47,4 +47,88 @@
+   return out
  }
  
-+function codexView<T>(view: T | undefined): T | null {
-+  const record = view as unknown as { __codexPreset?: unknown } | null | undefined
-+  return record?.__codexPreset === true ? view ?? null : null
++function codexPatchInput(block: ToolCallBlock): string | null {
++  const parsed = parsedToolCall(block)
++  if (parsed === null || parsed.name !== 'apply_patch') return null
++  const args = parsed.args as Record<string, unknown>
++  const input = args.input ?? args.patch
++  return typeof input === 'string' ? input : null
 +}
- function childCall(match: ConversationMatch, data: DispatchData): RunningToolCall {
-   return {
-     callId: data.subCallId,
-@@ -87,7 +91,7 @@
-     turn: locationTurn(match),
-     step: locationStep(match),
-     time: match.event.time,
--    callView: null,
-+    callView: codexView(match.view?.for === 'call' ? match.view.view : undefined),
-     subCalls: [],
++
++function codexPatchPreview(patch: string): DiffHunk[] {
++  const allLines = patch.replace(/\r\n?/g, '\n').trim().split('\n')
++  const begin = allLines.findIndex(line => line.trim() === '*** Begin Patch')
++  if (begin < 0) return []
++  const end = allLines.findIndex((line, index) => index > begin && line.trim() === '*** End Patch')
++  const lines = allLines.slice(begin + 1, end < 0 ? allLines.length : end)
++  const diffs: DiffHunk[] = []
++  let path: string | undefined
++  let moveTo: string | undefined
++  let operation: 'add' | 'update' | 'delete' | undefined
++  let hunk: string[] = []
++  const flush = () => {
++    if (path === undefined || hunk.length === 0) return
++    const oldLines = hunk.filter(line => line === '' || line[0] !== '+').map(line => line === '' ? '' : line.slice(1))
++    const newLines = hunk.filter(line => line === '' || line[0] !== '-').map(line => line === '' ? '' : line.slice(1))
++    if (oldLines.length === 0 && newLines.length === 0) return
++    diffs.push({ path: moveTo ?? path, oldText: oldLines.length > 0 ? oldLines.join('\n') : null, newText: newLines.join('\n') })
++    hunk = []
++  }
++  for (const line of lines) {
++    const header = /^\s*\*\*\* (Update|Add|Delete) File:\s*(.*?)\s*$/.exec(line)
++    if (header !== null) {
++      flush()
++      operation = header[1]!.toLowerCase() as 'add' | 'update' | 'delete'
++      path = header[2]
++      moveTo = undefined
++      continue
++    }
++    if (path === undefined) continue
++    const move = /^\s*\*\*\* Move to:\s*(.*?)\s*$/.exec(line)
++    if (move !== null) { moveTo = move[1]; continue }
++    if (line.trim() === '*** End of File') continue
++    if (line.startsWith('@@')) { flush(); continue }
++    if (operation === 'add' && line.startsWith('+')) hunk.push(line)
++    else if (operation === 'update' && (line === '' || /^[ +\-]/.test(line))) hunk.push(line)
++  }
++  flush()
++  return diffs
++}
++
++function codexPatchResultDiffs(block: ToolCallBlock): DiffHunk[] {
++  if (!('kind' in block)) return []
++  const lines = block.content.flatMap(item => item.type === 'text' ? item.text.split('\n') : [])
++  const diffs: DiffHunk[] = []
++  let path: string | undefined
++  let hunk: string[] | undefined
++  const flush = () => {
++    if (path === undefined || hunk === undefined || hunk.length === 0) return
++    const oldLines = hunk.filter(line => line[0] !== '+').map(line => line.slice(2))
++    const newLines = hunk.filter(line => line[0] !== '-').map(line => line.slice(2))
++    diffs.push({ path, oldText: oldLines.length > 0 ? oldLines.join('\n') : null, newText: newLines.join('\n') })
++    hunk = undefined
++  }
++  for (const line of lines) {
++    if (line.startsWith('File: ')) { flush(); path = line.slice('File: '.length); continue }
++    if (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line)) { flush(); hunk = []; continue }
++    if (hunk !== undefined && /^[ +\-] /.test(line)) hunk.push(line)
++  }
++  flush()
++  return diffs
++}
++
++function codexApplyPatchDiffs(block: ToolCallBlock): DiffHunk[] | null {
++  const input = codexPatchInput(block)
++  if (input === null) return null
++  if ('kind' in block) {
++    if (block.isError) return null
++    const applied = appliedDiffs(block.meta)
++    if (applied !== null && applied !== 'empty') return applied
++    const result = codexPatchResultDiffs(block)
++    if (result.length > 0) return result
++  }
++  const preview = codexPatchPreview(input)
++  return preview.length > 0 ? preview : null
++}
++
+ type IntendedDiff = { tool: 'write' | 'edit' | 'str_replace_editor'; diff: DiffHunk }
+@@ -108,13 +192,15 @@ export function diffCardModel(block: ToolCallBlock): DiffCardModel | null {
+ export function diffCardModel(block: ToolCallBlock): DiffCardModel | null {
++  const codex = codexApplyPatchDiffs(block)
++  if (codex !== null) return { card: { diffs: codex } }
+   if (block.parentCallId !== undefined) return null
+   const intended = intendedDiff(block)
+   if (intended === null) return null
+   if (!('kind' in block)) return { card: { diffs: [intended.diff] } }
+   if (intended.tool === 'str_replace_editor') return null
+   if (block.isError) return null
+   const applied = appliedDiffs(block.meta)
+   if (applied === null || applied === 'empty') {
+     return intended.tool === 'write' ? { card: { diffs: [intended.diff] } } : null
    }
+   return { card: { diffs: applied } }
  }
-@@ -102,8 +106,8 @@
-     callTime: previous?.time ?? null,
-     content: data.content ?? [],
-     isError: data.isError === true,
--    callView: null,
--    resultView: null,
-+    callView: previous?.callView ?? codexView(match.view?.for === 'call' ? match.view.view : undefined),
-+    resultView: codexView(match.view?.for === 'result' ? match.view.view : undefined),
-     subCalls: [],
-   }
- }
---- a/packages/client/ui-trajectory/src/client/trajectory-tool-definition.ts
-+++ b/packages/client/ui-trajectory/src/client/trajectory-tool-definition.ts
-@@ -76,6 +76,10 @@
-   return match.location.kind === 'step' ? match.location.step.step : 0
+diff --git a/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts b/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
+index c0dd19358..25e3dea99 100644
+--- a/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
++++ b/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
+@@ -51,6 +51,10 @@ const TOOL_VARIANTS: Record<string, ToolRowVariant> = {
+   write: 'write',
+   edit: 'edit',
+   run_code: 'code',
++  exec: 'code',
++  apply_patch: 'edit',
++  exec_command: 'bash',
++  write_stdin: 'bash',
+   cordis_package_inspect: 'read',
+   cordis_runtime_inspect: 'read',
+   // The three run-control verbs take one package id and produce a receipt, so
+@@ -134,7 +138,159 @@
+   return nl === -1 ? text : text.slice(0, nl)
  }
  
-+function codexView<T>(view: T | undefined): T | null {
-+  const record = view as unknown as { __codexPreset?: unknown } | null | undefined
-+  return record?.__codexPreset === true ? view ?? null : null
-+}
- function childCall(match: ConversationMatch, data: DispatchData): RunningToolCall {
-   return {
-     callId: data.subCallId,
-@@ -84,7 +88,7 @@
-     turn: locationTurn(match),
-     step: locationStep(match),
-     time: match.event.time,
--    callView: null,
-+    callView: codexView(match.view?.for === 'call' ? match.view.view : undefined),
-     subCalls: [],
-   }
- }
-@@ -103,8 +107,8 @@
-     callTime: previous === undefined || 'kind' in previous ? null : previous.time,
-     content: data.content ?? [],
-     isError: data.isError === true,
--    callView: null,
--    resultView: null,
-+    callView: previous?.callView ?? codexView(match.view?.for === 'call' ? match.view.view : undefined),
-+    resultView: codexView(match.view?.for === 'result' ? match.view.view : undefined),
-     subCalls: [],
-   }
- }
---- a/packages/client/ui-trajectory/src/client/layout.ts
-+++ b/packages/client/ui-trajectory/src/client/layout.ts
-@@ -432,9 +432,9 @@
-             kind: 'tool',
-             sourceSeq: node.seq,
-             ...(node.call !== null
--              ? summarizeCall(node.call.name, node.call.argsRaw)
-+              ? summarizeCall(node.call.name, node.call.argsRaw, node.callView)
-               : resultAsText(resultPreview)),
--            ...(node.call !== null ? { inputDetail: node.call.argsRaw } : {}),
-+            ...(node.call !== null ? { inputDetail: codexInputDetail(node.call.argsRaw, node.callView) } : {}),
-             outputDetail: detailResult(node),
-             outputBlocks: node.content.map(block => sourceBlock(block)),
-             ...resultPreview,
-@@ -486,7 +486,7 @@
-         index: ++index,
-         kind: 'tool',
-         ...summarizeCall(call.name, call.argsRaw),
--        inputDetail: call.argsRaw,
-+        inputDetail: codexInputDetail(call.argsRaw, call.callView),
-         callId: call.callId,
-         timeSeconds: null,
-         startedAt: finiteTime(call.time),
-@@ -738,7 +738,7 @@
-       cell: {
-         index: ++index, kind: 'tool',
-         ...summarizeCall(block.name, block.argsRaw),
--        inputDetail: block.argsRaw,
-+        inputDetail: codexInputDetail(block.argsRaw, call?.callView),
-         callId: block.callId,
-         ...(result !== undefined
-           ? {
-@@ -1010,12 +1010,12 @@
-         callId: sub.callId,
-         ...(settled
-           ? (sub.call !== null
--            ? summarizeCall(sub.call.name, sub.call.argsRaw)
-+            ? summarizeCall(sub.call.name, sub.call.argsRaw, sub.callView)
-             : resultAsText(resultPreview))
--          : summarizeCall(sub.name, sub.argsRaw)),
-+          : summarizeCall(sub.name, sub.argsRaw, sub.callView)),
-         ...(settled
--          ? (sub.call !== null ? { inputDetail: sub.call.argsRaw } : {})
--          : { inputDetail: sub.argsRaw }),
-+          ? (sub.call !== null ? { inputDetail: codexInputDetail(sub.call.argsRaw, sub.callView) } : {})
-+          : { inputDetail: codexInputDetail(sub.argsRaw, sub.callView) }),
-         ...(settled
-           ? {
-             outputDetail: detailResult(sub),
-@@ -1044,7 +1044,18 @@
- function summarizeCall(
-   name: string,
-   argsRaw: string,
-+  view?: unknown,
- ): Pick<TrajectoryCellProps, 'text' | 'previewMarkdown'> {
-+  if (typeof view === 'object' && view !== null && 'title' in view && typeof view.title === 'string') {
-+    const record = view as { title: string; card?: string; cwd?: string; rawInput?: string }
-+    if (record.card === 'terminal') {
-+      return { text: record.title, ...(record.cwd === undefined ? {} : { previewMarkdown: 'Working directory: ' + record.cwd }) }
++type CodeModeCallPreview = { name: string; args: string }
++
++function codeModeBalancedEnd(text: string, start: number): number | undefined {
++  const opening = text[start]
++  const closing = opening === "(" ? ")" : opening === "[" ? "]" : opening === "{" ? "}" : undefined
++  if (closing === undefined) return undefined
++  let depth = 0
++  let quote: string | undefined
++  let escaped = false
++  for (let index = start; index < text.length; index++) {
++    const character = text[index]
++    if (quote !== undefined) {
++      if (escaped) escaped = false
++      else if (character === String.fromCharCode(92)) escaped = true
++      else if (character === quote) quote = undefined
++      continue
 +    }
-+    if (record.rawInput !== undefined) return { text: record.title, previewMarkdown: record.rawInput }
-+    return { text: record.title }
-+  }
-+  const fallback = codexInputEnvelope(argsRaw)
-+  if (fallback !== undefined) return { text: fallback.title, previewMarkdown: fallback.rawInput }
-   return {
-     text: name,
-     ...(argsRaw === '' ? {} : { previewMarkdown: argsRaw }),
-@@ -1124,3 +1135,48 @@
-   const previewMarkdown = previewContent(content)
-   return previewMarkdown === undefined ? {} : { previewMarkdown }
- }
-+function codexInputEnvelope(argsRaw: string): { title: string; rawInput: string } | undefined {
-+  try {
-+    const parsed: unknown = JSON.parse(argsRaw)
-+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
-+    const record = parsed as Record<string, unknown>
-+    if (typeof record.input !== 'string') return undefined
-+    const rawInput = record.input
-+    if (typeof record.description === 'string' && record.description.trim() !== '') {
-+      return { title: record.description.trim(), rawInput }
-+    }
-+    if (rawInput.trimStart().startsWith('*** Begin Patch')) return { title: 'Apply patch', rawInput }
-+    if (rawInput.includes('tools.exec_command(')) return { title: 'Code Mode', rawInput }
-+  } catch {
-+    return undefined
++    if ([String.fromCharCode(34), String.fromCharCode(39), String.fromCharCode(96)].includes(character ?? "")) { quote = character; continue }
++    if (["(", "[", "{"].includes(character ?? "")) { depth++; continue }
++    if ([")", "]", "}"].includes(character ?? "")) { depth--; if (depth === 0) return index }
 +  }
 +  return undefined
 +}
 +
-+function codexInputDetail(argsRaw: string, view?: unknown): string {
-+  const record = view as {
-+    __codexPreset?: unknown
-+    card?: unknown
-+    title?: unknown
-+    rawInput?: unknown
-+    diffs?: unknown
-+  } | null | undefined
-+  if (record?.__codexPreset !== true) return codexInputEnvelope(argsRaw)?.rawInput ?? argsRaw
-+  if (typeof record.rawInput === 'string') return record.rawInput
-+  if (Array.isArray(record.diffs)) {
-+    const sections = record.diffs.flatMap((entry) => {
-+      if (typeof entry !== 'object' || entry === null) return []
-+      const diff = entry as { path?: unknown; oldText?: unknown; newText?: unknown }
-+      const path = typeof diff.path === 'string' ? diff.path : 'unknown file'
-+      const oldLines = typeof diff.oldText === 'string'
-+        ? diff.oldText.split(String.fromCharCode(10)).filter((line, index, lines) => index < lines.length - 1 || line !== '')
-+        : []
-+      const newLines = typeof diff.newText === 'string'
-+        ? diff.newText.split(String.fromCharCode(10)).filter((line, index, lines) => index < lines.length - 1 || line !== '')
-+        : []
-+      return ['File: ' + path, ...oldLines.map(line => '- ' + line), ...newLines.map(line => '+ ' + line)]
-+    })
-+    if (sections.length > 0) return sections.join(String.fromCharCode(10))
++function codeModeSplitTopLevel(text: string): string[] {
++  const parts: string[] = []
++  let start = 0
++  let depth = 0
++  let quote: string | undefined
++  let escaped = false
++  for (let index = 0; index < text.length; index++) {
++    const character = text[index]
++    if (quote !== undefined) {
++      if (escaped) escaped = false
++      else if (character === String.fromCharCode(92)) escaped = true
++      else if (character === quote) quote = undefined
++      continue
++    }
++    if ([String.fromCharCode(34), String.fromCharCode(39), String.fromCharCode(96)].includes(character ?? "")) { quote = character; continue }
++    if (["(", "[", "{"].includes(character ?? "")) { depth++; continue }
++    if ([")", "]", "}"].includes(character ?? "")) { if (depth > 0) depth--; continue }
++    if (depth === 0 && character === ",") { parts.push(text.slice(start, index).trim()); start = index + 1 }
 +  }
-+  return typeof record.title === 'string' ? record.title : argsRaw
++  parts.push(text.slice(start).trim())
++  return parts
 +}
++
++function codeModeTopLevelIndex(text: string, wanted: string): number {
++  let depth = 0
++  let quote: string | undefined
++  let escaped = false
++  for (let index = 0; index < text.length; index++) {
++    const character = text[index]
++    if (quote !== undefined) {
++      if (escaped) escaped = false
++      else if (character === String.fromCharCode(92)) escaped = true
++      else if (character === quote) quote = undefined
++      continue
++    }
++    if ([String.fromCharCode(34), String.fromCharCode(39), String.fromCharCode(96)].includes(character ?? "")) { quote = character; continue }
++    if (["(", "[", "{"].includes(character ?? "")) { depth++; continue }
++    if ([")", "]", "}"].includes(character ?? "")) { if (depth > 0) depth--; continue }
++    if (depth === 0 && character === wanted) return index
++  }
++  return -1
++}
++
++function codeModeLiteral(expression: string | undefined): string | undefined {
++  if (expression === undefined) return undefined
++  const text = expression.trim().replace(/;$/, "").trim()
++  if (text.startsWith("String.raw") && text.at(-1) === String.fromCharCode(96)) {
++    const start = text.indexOf(String.fromCharCode(96))
++    return start >= 0 ? text.slice(start + 1, -1) : undefined
++  }
++  const quote = text[0]
++  if ((quote === String.fromCharCode(34) || quote === String.fromCharCode(39) || quote === String.fromCharCode(96)) && text.at(-1) === quote) {
++    const body = text.slice(1, -1)
++    if (quote === String.fromCharCode(34)) { try { const value: unknown = JSON.parse(text); return typeof value === "string" ? value : undefined } catch { return undefined } }
++    let output = ""
++    for (let index = 0; index < body.length; index++) {
++      const character = body[index]
++      if (character !== String.fromCharCode(92)) { output += character; continue }
++      const escaped = body[++index]
++      if (escaped === undefined) break
++      output += escaped === "n" ? String.fromCharCode(10) : escaped === "r" ? String.fromCharCode(13) : escaped === "t" ? String.fromCharCode(9) : escaped
++    }
++    return output
++  }
++  if (text.startsWith("[")) {
++    const arrayEnd = codeModeBalancedEnd(text, 0)
++    if (arrayEnd !== undefined && text.slice(arrayEnd + 1).trim().startsWith(".join(")) {
++      const tail = text.slice(arrayEnd + 1).trim()
++      const open = tail.indexOf("(")
++      const close = open < 0 ? -1 : codeModeBalancedEnd(tail, open)
++      if (open >= 0 && close === tail.length - 1) {
++        const values = codeModeSplitTopLevel(text.slice(1, arrayEnd)).filter(Boolean).map(codeModeLiteral)
++        const separatorText = tail.slice(open + 1, close)
++        const separator = codeModeLiteral(separatorText) ?? (separatorText.trim() === "" ? "," : undefined)
++        if (separator !== undefined && !values.some(value => value === undefined)) return (values as string[]).join(separator)
++      }
++    }
++  }
++  return undefined
++}
++
++function codeModeProperty(args: string, key: string): string | undefined {
++  const text = args.trim()
++  const body = text.startsWith("{") && text.endsWith("}") ? text.slice(1, -1) : text
++  for (const part of codeModeSplitTopLevel(body)) {
++    const trimmed = part.trim()
++    const colon = codeModeTopLevelIndex(trimmed, ":")
++    if (colon < 0) continue
++    const candidate = trimmed.slice(0, colon).trim().replace(/^["']|["']$/g, "")
++    if (candidate === key) return trimmed.slice(colon + 1).trim()
++  }
++  return undefined
++}
++
++function codeModeCalls(source: string): CodeModeCallPreview[] {
++  const text = String(source)
++  const pattern = /\btools\.([A-Za-z0-9_]+)\s*\(/g
++  const calls: CodeModeCallPreview[] = []
++  let match: RegExpExecArray | null
++  while ((match = pattern.exec(text)) !== null) {
++    const name = match[1]
++    const open = text.indexOf("(", match.index)
++    const close = codeModeBalancedEnd(text, open)
++    if (name === undefined || close === undefined) continue
++    calls.push({ name, args: text.slice(open + 1, close) })
++    pattern.lastIndex = close + 1
++  }
++  return calls
++}
++
++function codeModeHumanBody(source: string): string | undefined {
++  const rendered = codeModeCalls(source).map(call => {
++    const args = call.args.trim()
++    if (call.name === "exec_command") {
++      const expression = codeModeProperty(args, "cmd")
++      return codeModeLiteral(expression) ?? expression ?? args
++    }
++    if (call.name === "apply_patch") {
++      const expression = codeModeProperty(args, "input") ?? codeModeProperty(args, "patch")
++      return codeModeLiteral(expression) ?? expression ?? args
++    }
++    if (call.name === "update_plan") return "Update plan\n" + args
++    const label = call.name === "web__run" ? "web.run" : call.name.replaceAll("_", " ")
++    return label + "\n" + args
++  })
++  if (rendered.length === 0) return undefined
++  return rendered.length === 1 ? rendered[0] : rendered.map((value, index) => String(index + 1) + ". " + value).join("\n\n")
++}
+ function pickString(args: Record<string, unknown>, keys: readonly string[]): string | undefined {
+   for (const key of keys) {
+     const v = args[key]
+     if (typeof v === 'string' && v !== '') return v
+@@ -170,6 +327,15 @@ function deriveSummary(variant: ToolRowVariant, argsRaw: string): string {
+   const parsed = parseArgs(argsRaw)
+   if (typeof parsed !== 'object' || parsed === null) return firstLine(argsRaw)
+   const args = parsed as Record<string, unknown>
++  if ((variant === 'code' || variant === 'edit') && typeof args.input === 'string' && args.input !== '') {
++    if (args.input.trimStart().startsWith('*** Begin Patch')) return 'Apply patch'
++    if (variant === 'code') {
++      if (args.input.includes('tools.apply_patch')) return 'Apply patch'
++      if (args.input.includes('tools.update_plan')) return 'Update plan'
++      const preview = codeModeHumanBody(args.input)
++      return firstLine(preview ?? (typeof args.description === 'string' ? args.description : args.input))
++    }
++  }
+   if (variant === 'search' && Array.isArray(args.queries)) {
+     const queries = args.queries.filter((query): query is string => typeof query === 'string' && query !== '')
+     if (queries.length > 0) return queries.map(firstLine).join(', ')
+@@ -211,6 +377,12 @@ export function formatToolBody(variant: ToolRowVariant, argsRaw: string): string
+   if (variant === 'code' && typeof parsed === 'object' && parsed !== null) {
+     const code = (parsed as Record<string, unknown>).code
+     if (typeof code === 'string' && code !== '') return code
++    const input = (parsed as Record<string, unknown>).input
++    if (typeof input === 'string' && input !== '') return codeModeHumanBody(input) ?? input
++  }
++  if (variant === 'edit' && typeof parsed === 'object' && parsed !== null) {
++    const input = (parsed as Record<string, unknown>).input ?? (parsed as Record<string, unknown>).patch
++    if (typeof input === 'string' && input !== '') return codeModeHumanBody(input) ?? input
+   }
+   return JSON.stringify(parsed, null, 2)
+ }
+diff --git a/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx b/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx
+index 726395d00..450b64ade 100644
 --- a/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx
 +++ b/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx
-@@ -28,6 +28,97 @@
-   others: <IconSparkle16 size={14} />,
- }
- 
-+interface CodexGenericView {
-+  __codexPreset?: unknown
-+  card?: unknown
-+  title?: unknown
-+  rawInput?: unknown
-+  content?: unknown
-+}
-+
-+function codexGenericView(value: unknown): CodexGenericView | null {
-+  if (value === null || typeof value !== 'object') return null
-+  const view = value as CodexGenericView
-+  return view.__codexPreset === true && view.card === 'generic' ? view : null
-+}
-+
-+function codexContentText(view: CodexGenericView | null): string | null {
-+  if (!Array.isArray(view?.content)) return null
-+  const text = view.content
-+    .filter((block): block is { type: 'text'; text: string } => (
-+      block !== null && typeof block === 'object'
-+      && (block as { type?: unknown }).type === 'text'
-+      && typeof (block as { text?: unknown }).text === 'string'
-+    ))
-+    .map(block => block.text)
-+    .join('\n')
-+  return text === '' ? null : text
-+}
-+function codexRawArguments(block: ToolCallOwnerProps['block']): Record<string, unknown> | null {
-+  const raw = 'kind' in block ? block.call?.argsRaw : block.argsRaw
-+  if (typeof raw !== 'string' || raw === '') return null
-+  try {
-+    const parsed: unknown = JSON.parse(raw)
-+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
-+      ? parsed as Record<string, unknown>
-+      : null
-+  } catch {
-+    return null
-+  }
-+}
-+function codexMarkedView(value: unknown): boolean {
-+  return value !== null
-+    && typeof value === 'object'
-+    && (value as { __codexPreset?: unknown }).__codexPreset === true
-+}
-+/** Replay/live paths can omit the envelope view; recognize only Codex-shaped wrappers. */
-+function codexFallbackCallView(
-+  toolName: string,
-+  block: ToolCallOwnerProps['block'],
-+): CodexGenericView | null {
-+  const args = codexRawArguments(block)
-+  if (args === null || typeof args.input !== 'string') return null
-+  const input = args.input
-+  if (toolName === 'exec' && (
-+    typeof args.description === 'string' || input.includes('tools.exec_command(')
-+  )) {
-+    const description = typeof args.description === 'string' ? args.description.trim() : ''
-+    return {
-+      __codexPreset: true,
-+      card: 'generic',
-+      title: description === '' ? 'Code Mode' : description,
-+      rawInput: input,
-+    }
-+  }
-+  if (toolName === 'apply_patch' && input.trimStart().startsWith('*** Begin Patch')) {
-+    return {
-+      __codexPreset: true,
-+      card: 'generic',
-+      title: 'Apply patch',
-+      rawInput: input,
-+    }
-+  }
-+  return null
-+}
-+
-+function codexGenericPresentation(block: ToolCallOwnerProps['block'], toolName: string): {
-+  call: CodexGenericView | null
-+  result: CodexGenericView | null
-+} | null {
-+  const marked = codexMarkedView(block.callView)
-+    || ('kind' in block && codexMarkedView(block.resultView))
-+  const call = codexGenericView(block.callView)
-+    ?? (marked ? null : codexFallbackCallView(toolName, block))
-+  const result = 'kind' in block
-+    ? codexGenericView(block.resultView) ?? (call === null ? null : {
-+      __codexPreset: true,
-+      card: 'generic',
-+      title: `${typeof call.title === 'string' ? call.title : toolName} ${block.isError ? 'failed' : 'completed'}`,
-+      content: block.content,
-+    })
-+    : null
-+  return call === null && result === null ? null : { call, result }
-+}
- /** Card props: the owner payload plus the render site's locale seat (plain prop). */
- export interface GenericToolCardProps extends ToolCallOwnerProps {
-   t: ToolTreeProps['t']
-@@ -35,6 +126,18 @@
- 
- export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect, t }: GenericToolCardProps) {
-   const model = toolRowModel(toolName, block, cwd, home)
-+  const codex = codexGenericPresentation(block, toolName)
-+  const codexCallTitle = typeof codex?.call?.title === 'string' ? codex.call.title : undefined
-+  const codexResultTitle = typeof codex?.result?.title === 'string' ? codex.result.title : undefined
-+  const codexTitle = codexCallTitle ?? codexResultTitle
-+  const codexInput = typeof codex?.call?.rawInput === 'string'
-+    ? codex.call.rawInput
-+    : codexContentText(codex?.call ?? null)
-+  const codexOutput = codexContentText(codex?.result ?? null)
-+  const rowTitle = codexTitle ?? model.title
-+  const rowSummary = codexResultTitle ?? codexContentText(codex?.call ?? null) ?? model.summary
-+  const rowBody = codex === null ? model.body : codexInput
-+  const rowOutput = codex === null ? model.output : codexOutput
-   const terminal = terminalCardModel(block, cwd)
-   const read = readCardModel(block, cwd, home)
-   const diff = diffCardModel(block)
-@@ -52,16 +155,16 @@
+@@ -40,13 +40,16 @@ export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect,
+     ? 'error'
+     : model.state
+   const singleFile = model.filePath !== undefined
++  const title = toolName === 'exec' ? 'Code Mode'
++    : toolName === 'apply_patch' ? 'Apply patch'
++      : t(model.titleKey)
+   return (
+     <ToolRow
+       t={t}
        variant={model.variant}
        toolName={toolName}
        icon={VARIANT_ICONS[model.variant]}
--      title={model.title}
-+      title={rowTitle}
-       // A terminal presenter's description is the contract's above-card text, so
-       // it outranks the args-derived summary here exactly as it does in BashRow;
-       // a search result view's replacement title outranks it the same way.
--      summary={terminal?.description ?? search?.title ?? model.summary}
-+      summary={terminal?.description ?? search?.title ?? rowSummary}
+-      title={t(model.titleKey)}
++      title={title}
+       summary={model.summary}
        // Single-file tools never expose an args body — the path link is the only
        // args interaction. A card is not an args body: a read/write/edit row is
-       // single-file AND carries a card, so the card expands under the path link.
--      body={singleFile ? null : model.body}
--      output={model.output}
-+      body={singleFile ? null : rowBody}
-+      output={rowOutput}
-       errorSummary={model.errorSummary}
-       terminal={terminal}
-       diff={diff}
+diff --git a/packages/client/ui-trajectory/src/client/layout.ts b/packages/client/ui-trajectory/src/client/layout.ts
+index a811e915f..3adf0439e 100644
+--- a/packages/client/ui-trajectory/src/client/layout.ts
++++ b/packages/client/ui-trajectory/src/client/layout.ts
+@@ -1047,6 +1047,48 @@ function summarizeCall(
+   name: string,
+   argsRaw: string,
+ ): Pick<TrajectoryCellProps, 'text' | 'previewMarkdown'> {
++  const codexPreview = (source: string): string => {
++    const text = String(source)
++    const array = /tools\.exec_command\s*\(\s*\{\s*cmd\s*:\s*\[\s*"([^"]*)"/s.exec(text)
++    if (array?.[1] !== undefined) return array[1]
++    const quoted = /tools\.exec_command\s*\(\s*\{\s*cmd\s*:\s*"([^"]*)"/s.exec(text)
++    if (quoted?.[1] !== undefined) return quoted[1]
++    if (text.includes('tools.apply_patch')) {
++      const raw = /tools\.apply_patch\s*\(\s*\{\s*(?:input|patch)\s*:\s*String\.raw`([\s\S]*?)`/s.exec(text)
++      if (raw?.[1] !== undefined) return raw[1]
++      return 'Apply patch'
++    }
++    if (text.includes('tools.update_plan')) return 'Update plan'
++    const start = text.indexOf('tools.')
++    if (start >= 0) {
++      const end = text.indexOf(';', start)
++      return text.slice(start, end < 0 ? text.length : end).trim()
++    }
++    return text
++  }
++  try {
++    const args = JSON.parse(argsRaw) as unknown
++    if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
++      const record = args as Record<string, unknown>
++      if (name === 'exec' && typeof record.input === 'string') {
++        return {
++          text: typeof record.description === 'string' && record.description.trim() !== ''
++            ? record.description.trim()
++            : 'Code Mode',
++          previewMarkdown: codexPreview(record.input),
++        }
++      }
++      if (name === 'apply_patch') {
++        const input = typeof record.input === 'string' ? record.input : record.patch
++        if (typeof input === 'string') return { text: 'Apply patch', previewMarkdown: input }
++      }
++      if (name === 'exec_command' && typeof record.cmd === 'string') {
++        return { text: 'Bash', previewMarkdown: record.cmd }
++      }
++    }
++  } catch {
++    // Keep the raw payload as the trajectory fallback for partial streaming JSON.
++  }
+   return {
+     text: name,
+     ...(argsRaw === '' ? {} : { previewMarkdown: argsRaw }),

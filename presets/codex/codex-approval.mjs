@@ -18,7 +18,6 @@ const ASK_TOOLS = new Set([
   // the authority-bearing nested command/edit calls, exactly as in native mode.
   'exec_command',
   'apply_patch',
-  'request_permissions',
 ])
 
 /** Last `approval/policy` payload, or undefined when the session has none. */
@@ -125,7 +124,7 @@ export function apply(ctx) {
     // Fallback for sessions without explicit knob events: honor the host's
     // named preset table when it declares the deployment's confirm preset.
     try {
-      if (ctx.permissionPresets.current(events) === 'confirm') {
+      if (ctx.permissionPresets.current(exec.agent.session) === 'confirm') {
         return { kind: 'ask', reason: approvalReason(ctx, exec) }
       }
     } catch {

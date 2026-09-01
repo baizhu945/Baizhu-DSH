@@ -88,6 +88,9 @@ const SERIAL_ROOT_TAILS = new WeakMap()
 const V2_PATH_CACHES = new WeakMap()
 const V2_PATH_RESERVATIONS = new WeakMap()
 const TOKEN_BUDGET_STATES = new WeakMap()
+// Official Code Mode keeps stored values in the session runtime. Preserve the
+// same lifetime across DSH's otherwise independent run_code invocations.
+const CODE_MODE_STORES = new WeakMap()
 const V2_STEERED = Object.freeze({ kind: 'steered' })
 const V2_WAIT_DEFAULT_MS = 30_000
 const V2_WAIT_MIN_MS = 10_000
@@ -245,22 +248,24 @@ function readableValue(value, title) {
 const DEFAULT_PROFILE = Object.freeze({
   toolMode: 'native',
   multiAgentVersion: 'none',
-  applyPatchToolType: 'freeform',
+  // Match Codex's model_info_from_slug fallback: an unknown model does not
+  // positively advertise the model-specific patch surface.
+  applyPatchToolType: 'none',
   shellType: 'unified_exec',
   supportsParallelToolCalls: true,
   useResponsesLite: false,
-  includeSkillsUsageInstructions: true,
-  includeAppsUsageInstructions: true,
-  includePluginUsageInstructions: true,
+  includeSkillsUsageInstructions: false,
+  includeAppsUsageInstructions: false,
+  includePluginUsageInstructions: false,
   inputModalities: ['text'],
   supportsImageDetailOriginal: false,
   // Unknown slugs use the official fallback posture: do not advertise a
   // network search capability until the catalog positively enables it.
   supportsSearchTool: false,
-  webSearchToolType: undefined,
+  webSearchToolType: 'text',
   defaultReasoningLevel: undefined,
-  contextWindow: undefined,
-  maxContextWindow: undefined,
+  contextWindow: 272_000,
+  maxContextWindow: 272_000,
   effectiveContextWindowPercent: 95,
   autoCompactTokenLimit: undefined,
   tokenBudget: undefined,
@@ -268,7 +273,7 @@ const DEFAULT_PROFILE = Object.freeze({
   defaultVerbosity: undefined,
   reasoningSummaryFormat: undefined,
   defaultReasoningSummary: undefined,
-  truncationPolicy: undefined,
+  truncationPolicy: { mode: 'bytes', limit: 10_000 },
 })
 
 function officialRows(value) {
@@ -357,18 +362,43 @@ function modelTail(model) {
   return slash >= 0 ? value.slice(slash + 1) : value
 }
 
-function heuristicRow(model) {
-  const id = modelTail(model)
-  if (id === 'gpt-5.6-luna') {
-    return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v1', use_responses_lite: true, include_skills_usage_instructions: false, include_apps_usage_instructions: true, include_plugin_usage_instructions: true, web_search_tool_type: 'text_and_image', context_window: 1050000, max_context_window: 1050000, default_reasoning_level: 'medium', input_modalities: ['text', 'image'], supports_image_detail_original: true, supports_search_tool: true }
+/** Match the official model manager: longest slug prefix, then one safe namespace. */
+function modelRowFor(model) {
+  const value = String(model || '').trim()
+  if (value === '') return undefined
+  let best
+  for (const row of catalogRows) {
+    if (row === null || typeof row !== 'object' || typeof row.slug !== 'string') continue
+    if (!value.startsWith(row.slug)) continue
+    if (best === undefined || row.slug.length > best.slug.length) best = row
   }
-  if (id === 'gpt-5.6-sol' || id === 'gpt-5.6-terra') {
-    return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v2', use_responses_lite: true, include_skills_usage_instructions: false, include_apps_usage_instructions: true, include_plugin_usage_instructions: true, web_search_tool_type: 'text_and_image', context_window: 1050000, max_context_window: 1050000, default_reasoning_level: id.endsWith('sol') ? 'low' : 'medium', input_modalities: ['text', 'image'], supports_image_detail_original: true, supports_search_tool: true }
+  if (best !== undefined) return best
+  const slash = value.indexOf('/')
+  if (slash <= 0 || value.slice(slash + 1).includes('/')) return undefined
+  const namespace = value.slice(0, slash)
+  if (!/^[A-Za-z0-9_-]+$/.test(namespace)) return undefined
+  const suffix = value.slice(slash + 1)
+  for (const row of catalogRows) {
+    if (row === null || typeof row !== 'object' || typeof row.slug !== 'string') continue
+    if (!suffix.startsWith(row.slug)) continue
+    if (best === undefined || row.slug.length > best.slug.length) best = row
   }
-  if (id === 'gpt-5.3-codex-spark') {
-    return { slug: id, tool_mode: 'code_mode_only', multi_agent_version: 'v1', use_responses_lite: true, include_skills_usage_instructions: false, include_apps_usage_instructions: true, include_plugin_usage_instructions: true, web_search_tool_type: 'text', context_window: 128000, max_context_window: 128000, default_reasoning_level: 'medium', input_modalities: ['text'], supports_image_detail_original: false, supports_search_tool: true }
+  return best
+}
+
+function modelInstructionsForRow(row) {
+  const template = row?.model_messages?.instructions_template
+  if (typeof template !== 'string') {
+    return typeof row?.base_instructions === 'string' ? row.base_instructions : FALLBACK_INSTRUCTIONS
   }
-  return undefined
+  const variables = row.model_messages?.instructions_variables
+  if (variables === null || typeof variables !== 'object' || Array.isArray(variables)) return template
+  // DSH has no separate personality selector. Use the catalog's default
+  // variable, which is the same value Codex uses when no personality is set.
+  const personality = typeof variables.personality_default === 'string'
+    ? variables.personality_default
+    : ''
+  return template.replaceAll('{{ personality }}', personality)
 }
 
 function normalizeShellType(value) {
@@ -396,7 +426,7 @@ function normalizeToolMode(value) {
 
 function profileForModel(model) {
   const id = modelTail(model)
-  const row = catalogById.get(String(model || '').trim()) || catalogById.get(id) || heuristicRow(id)
+  const row = modelRowFor(model)
   if (row === undefined) return { ...DEFAULT_PROFILE, model: id, instructions: FALLBACK_INSTRUCTIONS }
   const toolMode = normalizeToolMode(row.tool_mode)
   const multiAgentVersion = row.multi_agent_version === 'v1' || row.multi_agent_version === 'v2'
@@ -405,7 +435,7 @@ function profileForModel(model) {
   return {
     ...DEFAULT_PROFILE,
     model: id,
-    instructions: typeof row.base_instructions === 'string' ? row.base_instructions : FALLBACK_INSTRUCTIONS,
+    instructions: modelInstructionsForRow(row),
     toolMode,
     multiAgentVersion,
     applyPatchToolType: typeof row.apply_patch_tool_type === 'string' ? row.apply_patch_tool_type : 'freeform',
@@ -587,10 +617,11 @@ function modelToolAllowed(ctx, profile, name, agent, nested, toolArguments) {
     return profile.tokenBudget !== undefined && !nested
   }
   if (name === REQUEST_PERMISSIONS_TOOL) return !nested
-  if (name === 'update_plan') return !nested
-  // The upstream handler is DirectModelOnly: it is callable by the direct
-  // model surface in Plan Mode, but is intentionally absent from the nested
-  // Code Mode SDK even for code_mode_only rows.
+  // DSH's update_plan implementation is safe to dispatch from Code Mode and
+  // models commonly compose it beside their shell/edit calls. Keep it in the
+  // nested SDK as well as the direct surface; Plan mode still owns its own
+  // execution-time rejection.
+  if (name === 'update_plan') return true
   if (name === 'request_user_input' && nested) return false
   if (name === 'request_user_input' && profile.toolMode !== 'code_mode_only' && !planModeActive(ctx, agent)) return false
   if (isV1Tool(name)) return profile.multiAgentVersion === 'v1' && !nested
@@ -1696,14 +1727,61 @@ const CODE_MODE_RUNTIME_PRELUDE = [
   "const exit = () => { const error = new Error('Codex Code Mode exit'); error.__dshCodexExit = true; throw error; };",
 ].join('\n')
 
-function officialRuntimeProgram(source) {
-  return CODE_MODE_RUNTIME_PRELUDE
-    + '\ntry {\n'
+function officialRuntimeProgram(source, initialStore = {}) {
+  let storeLiteral = '{}'
+  try {
+    const serialized = JSON.stringify(initialStore)
+    if (serialized !== undefined) storeLiteral = serialized
+  } catch {
+    // Stored values are required to be JSON-compatible; an empty seed is the
+    // safest fallback if a legacy caller supplies a lossy value.
+  }
+  const prelude = CODE_MODE_RUNTIME_PRELUDE.replace(
+    'const __dshCodexStore = Object.create(null);',
+    `const __dshCodexStore = Object.assign(Object.create(null), ${storeLiteral});`,
+  )
+  return prelude
+    + '\nlet __dshCodexResult;\n'
+    + 'let __dshCodexResultPresent = false;\n'
+    + 'try {\n'
+    + '  __dshCodexResult = await (async () => {\n'
     + String(source)
-    + '\n} catch (__dshCodexExitError) {\n'
-    + '  if (__dshCodexExitError?.__dshCodexExit === true) return;\n'
-    + '  throw __dshCodexExitError;\n'
-    + '}'
+    + '\n  })();\n'
+    + '  __dshCodexResultPresent = __dshCodexResult !== undefined;\n'
+    + '} catch (__dshCodexExitError) {\n'
+    + '  if (__dshCodexExitError?.__dshCodexExit !== true) throw __dshCodexExitError;\n'
+    + '}\n'
+    + 'return { __dshCodexEnvelope: true, __dshCodexResultPresent, __dshCodexResult: __dshCodexResult ?? null, __dshCodexStore };'
+}
+
+function codeModeEnvelope(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && value.__dshCodexEnvelope === true
+    && value.__dshCodexStore !== null && typeof value.__dshCodexStore === 'object'
+    && !Array.isArray(value.__dshCodexStore)
+}
+
+function unwrapCodeModeEnvelope(value, session) {
+  if (!codeModeEnvelope(value)) return value
+  CODE_MODE_STORES.set(session, structuredClone(value.__dshCodexStore))
+  return value.__dshCodexResultPresent === true
+    ? { logs: value.logs ?? [], result: value.__dshCodexResult }
+    : { logs: value.logs ?? [] }
+}
+
+/** The host run_code tool wraps the worker value in its own logs/result object. */
+function unwrapCodeModeResult(value, session) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value
+  const envelope = value.result
+  if (!codeModeEnvelope(envelope)) return value
+  const unwrapped = unwrapCodeModeEnvelope(envelope, session)
+  return {
+    logs: [
+      ...(Array.isArray(value.logs) ? value.logs : []),
+      ...(Array.isArray(unwrapped.logs) ? unwrapped.logs : []),
+    ],
+    ...(Object.hasOwn(unwrapped, 'result') ? { result: unwrapped.result } : {}),
+  }
 }
 
 async function executeNestedCodeModeTool(ctx, execution, name, toolArguments) {
@@ -1776,7 +1854,9 @@ function registerCodeModeAlias(ctx) {
         const result = await executeNestedCodeModeTool(ctx, execution, 'apply_patch', { input: directPatch })
         return { logs: [], result }
       }
-      const program = officialRuntimeProgram(normalizeCodeModeSource(args.input))
+      const session = execution.agent?.session
+      const initialStore = session === undefined ? {} : CODE_MODE_STORES.get(session) ?? {}
+      const program = officialRuntimeProgram(normalizeCodeModeSource(args.input), initialStore)
       const callId = execution.callId + ':run_code'
       INTERNAL_RUN_CODE_CALLS.set(callId, { agent: execution.agent, parent: execution.token })
       try {
@@ -1791,7 +1871,7 @@ function registerCodeModeAlias(ctx) {
         })
         if (result.isError) throw new Error(codeModeErrorText(result) || 'Code Mode execution failed')
         if (result.value === undefined) throw new Error('Code Mode returned no result')
-        return result.value
+        return session === undefined ? result.value : unwrapCodeModeResult(result.value, session)
       } finally {
         INTERNAL_RUN_CODE_CALLS.delete(callId)
       }
@@ -2475,11 +2555,13 @@ export {
   normalizeToolMode,
   patchWebSearchSchema,
   profileForModel,
+  modelRowFor,
   registerCodeModeAlias,
   rewriteCodeModeSdk,
   registerV2Agents,
   rewriteCodeModeName,
   truncateToolContent,
+  unwrapCodeModeResult,
   tokenBudgetContextText,
   v2FinalMessageId,
   v2PendingUpdate,

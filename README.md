@@ -9,7 +9,7 @@
 - **第四种 Confirm 权限模式**：保留 DSH 原有的 Read Only、Workspace Write、Full Access，另加默认的 `confirm`：使用完整访问范围，但每次文件写入或命令执行都先询问。
 - **Codex-compatible preset**：`Codex Mode` 把 DSH 的底层能力映射为 `exec_command`、`apply_patch`、Plan、图片查看、用户提问和 Luna V1 子代理等 Codex 形状的工具，同时仍由主机统一掌管沙箱、审批、文件系统和会话持久化。
 - **面向长任务的会话保护**：`durable-session-lease.patch` 为持久化日志增加跨进程租约和 revision guard，避免 headless 审批、恢复或多个进程同时写入同一个 session 时产生交错事件和序号回退。
-- **声明式的插件化扩展**：权限询问、审批面板、OpenAI 账号、headless JSONL runner、皮肤和 skills 都通过 profile/preset 注入，而不是长期维护一份分叉的 DSH 源码。
+- **声明式的插件化扩展**：权限询问、审批面板、OpenAI 账号、headless JSONL runner 和 skills 都通过 profile/preset 注入，而不是长期维护一份分叉的 DSH 源码。
 
 ## 分层结构
 
@@ -17,7 +17,7 @@
 dsh.nix
 ├── 构建 DSH 源码与 pnpm 依赖
 ├── 应用 patches/                          # UI、会话和模型修复
-├── 导入 skills.nix、skin-center 和 presets/
+├── 导入 skills.nix 和 presets/
 ├── 部署 .dsh/profile 的运行时 patch/plugin
 └── 安装 dsh、Node.js、rg、bubblewrap、dsh-web
 
@@ -98,17 +98,15 @@ Codex preset 只改变选中该 preset 的 session 的 model-facing surface：SS
 
 ## 模型、账号与 UI 修复
 
-- 构建期把 OpenRouter 的 DeepSeek V4 Flash 0731、V4 Pro 0813 正式版注入 pi-ai 内置目录，和原有预览版一起出现在模型选择器中。
 - 修正 pi-ai 将 GPT-5.6 的价格分层阈值误当成上下文上限的问题，相关 OpenAI/Codex 条目使用约 105 万上下文窗口。
 - `openai-codex-account.mjs` 复用 pi-ai 的 OAuth 流程，支持 ChatGPT Plus/Pro token plan；凭据保存为 `~/.dsh/openai-codex-credentials.json`（权限 0600），并在请求前自动刷新 access token。
 - Web 中可使用 `/openai-login`、`/openai-logout`、`/openai-status`，也可在设置页的 **OpenAI 账号** 分节操作。
-- `expand-running.patch` 让运行中的思考和工具卡片自动展开；`tool-bottom-collapse.patch` 在长卡片底部提供折叠按钮；`bash-command-hscroll.patch` 保留长命令原文并让状态/复制控件固定可见。
+- `tool-bottom-collapse.patch` 在长卡片底部提供折叠按钮；`bash-command-hscroll.patch` 保留长命令原文并让状态/复制控件固定可见。
 
-## 持久化、技能与皮肤
+## 持久化与技能
 
 - `home-cordis.patch.yml` 将 DeepSeek provider 和 pi-ai 的 `minimax-cn` provider 的重试次数声明为 5，避免依赖源码级默认值。
 - `skills.nix` 合并本地 `agent/skills` 与 Anthropic 的 docx/pptx/xlsx/pdf/canvas-design、media-processor、idea-refine 以及 superpowers；技能由 `~/.dsh/skills/` 自动发现。
-- `skin-center.nix` 安装包含内置皮肤集合的 skin-center，并复用 DSH 已构建的 `lightningcss`/`schemastery` 运行时依赖；不再安装已废弃的单独 Maid Whale 包。
 
 ## 维护提示
 
