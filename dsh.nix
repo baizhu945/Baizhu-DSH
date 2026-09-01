@@ -1,6 +1,45 @@
 { config, pkgs, lib, ... }:
 
 let
+  # Local SearXNG is the no-vendor-quota search backend. The service is bound
+  # to loopback and uses SearXNG's Bing engine. Do not override Bing's default
+  # www.bing.com base URL with cn.bing.com: the current SearXNG Bing parser
+  # expects the www endpoint's result markup. dsh's provider plugin talks to
+  # it over HTTP JSON. This is generated into the Nix store, so no mutable
+  # hand-written config is required on the host.
+  dshSearxngSettings = (pkgs.formats.yaml { }).generate "dsh-local-searxng-settings.yml" {
+    use_default_settings = {
+      engines = {
+        keep_only = [ "bing" ];
+      };
+    };
+    general = {
+      instance_name = "dsh-local-search";
+      enable_metrics = false;
+    };
+    search = {
+      formats = [ "json" ];
+      default_lang = "auto";
+    };
+    server = {
+      bind_address = "127.0.0.1";
+      port = 8765;
+      limiter = false;
+      public_instance = false;
+      secret_key = "dsh-local-search-secret-v1";
+      method = "GET";
+    };
+    outgoing = {
+      request_timeout = 5.0;
+      max_request_timeout = 10.0;
+    };
+    engines = [
+      # Keep the engine's default https://www.bing.com base_url. Overriding
+      # this with cn.bing.com makes SearXNG report a Bing parsing error.
+      { name = "bing"; disabled = false; }
+    ];
+  };
+
   # deepseek-harness v0.1.1-rc.1
   dshSrc = pkgs.fetchFromGitHub {
     owner = "deepseek-ai";
@@ -133,6 +172,7 @@ in
 
   home.packages = [
     dsh
+    pkgs.searxng
     # dsh 运行时依赖(必须):
     pkgs.nodejs_22 # dsh 子进程/spawn helper 需要 node 在 PATH
     pkgs.ripgrep   # dsh-tool-fs-search 通过 ctx.subprocess 调用 rg
@@ -143,6 +183,26 @@ in
     # 用法:dsh-web [port]  (默认 3080;浏览器可用 DSH_BROWSER 覆盖)
     (pkgs.writeShellScriptBin "dsh-web" (builtins.readFile ./dsh-web.sh))
   ];
+
+  systemd.user.services.dsh-searxng = {
+    Unit = {
+      Description = "Local SearXNG search backend for dsh web_search";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+    };
+    Service = {
+      ExecStart = "${pkgs.searxng}/bin/searxng-run";
+      Environment = [
+        "SEARXNG_SETTINGS_PATH=${dshSearxngSettings}"
+        "SEARXNG_DISABLE_ETC_SETTINGS=1"
+      ];
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
 
   home.file = {
     ".dsh/AGENTS.md".source = ../agent-context.md;
@@ -202,6 +262,8 @@ in
       "$HOME/.dsh/profiles/headless/plugins/cc-connect-startup.mjs"
     run install -m 644 ${./profiles/headless/plugins/cc-connect-runner.mjs} \
       "$HOME/.dsh/profiles/headless/plugins/cc-connect-runner.mjs"
+    run install -m 644 ${./profiles/web/plugins/dsh-web-search-keyless.mjs} \
+      "$HOME/.dsh/profiles/web/plugins/dsh-web-search-keyless.mjs"
     run install -m 644 ${./profiles/web/node_modules/dsh-baizhu-approval/package.json} \
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval/package.json"
     run install -m 644 ${./profiles/web/node_modules/dsh-baizhu-approval/index.mjs} \
@@ -219,6 +281,8 @@ in
     # realpath 到 /nix/store 导致找不到依赖,因此必须真实拷贝到 profile 插件目录。
     run install -m 644 ${./profiles/web/plugins/openai-codex-account.mjs} \
       "$HOME/.dsh/profiles/web/plugins/openai-codex-account.mjs"
+    run install -m 644 ${./profiles/web/plugins/openai-codex-account.mjs} \
+      "$HOME/.dsh/profiles/headless/plugins/openai-codex-account.mjs"
 
     # Codex preset's PTY backend is shipped in the dsh installation but is not
     # part of the Web bundle's automatic dependency heal set. Keep its three

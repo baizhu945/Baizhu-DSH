@@ -18,8 +18,38 @@ const HOST_EXTRAS = [
   'ssh_upload',
 ]
 
+// The web profile keeps the standard dsh tool bundle mounted beside the
+// preset. Codex exposes the equivalent unified-exec/fs surface instead, so
+// hide the dsh-native names only in this agent scope.
+const DSH_NATIVE_TOOLS = [
+  'ask_user_question',
+  'bash',
+  'create_goal',
+  'edit',
+  'get_goal',
+  'glob',
+  'grep',
+  'job_kill',
+  'job_list',
+  'job_output',
+  'pwsh',
+  'read',
+  'read_image',
+  'str_replace_editor',
+  'terminal_close',
+  'terminal_list',
+  'terminal_open',
+  'terminal_read',
+  'terminal_send',
+  'terminal_signal',
+  'todo_write',
+  'update_goal',
+  'web_fetch',
+  'write',
+]
+
 export function apply(ctx) {
   const available = new Set(ctx.tools.schemas().map(tool => tool.name))
-  const deny = HOST_EXTRAS.filter(name => available.has(name))
+  const deny = [...HOST_EXTRAS, ...DSH_NATIVE_TOOLS].filter(name => available.has(name))
   if (deny.length > 0) ctx.tools.restrict({ deny })
 }

@@ -14,6 +14,13 @@
           - pwsh
           - terminal_send
 
+    # Replace the DeepSeek-only search provider with a provider-independent,
+    # zero-config search plugin. It uses the declarative local SearXNG service
+    # first, then Exa MCP, with Tavily only as a final optional fallback.
+    # TAVILY_API_KEY optionally makes Tavily primary.
+    - id: dsh-web-search-keyless
+      name: './plugins/dsh-web-search-keyless.mjs'
+
     # 审批面板插件(approval-always-allow + approval-keyboard 两个源码补丁
     # 的插件迁移):内置面板仍可工作,本插件以 composer chain 更高优先级
     # 接管审批 UI,提供「总是允许」第三按钮与 Esc/Ctrl+Enter 快捷键。
@@ -37,6 +44,16 @@
     # 上游 skin-center 自带全部内置皮肤，单独安装不引入其它 Web UI 组件。
     - id: ui-skin-center
       name: '@linxin666/dsh-client-ui-skin-center'
+
+# Keep the model-facing dsh-tool-web schema and renderer, but route its stable
+# ctx.web seam to the local keyless provider. Codex preset web_search/web.run
+# is agent-scoped and remains its separate implementation.
+- id: web
+  config:
+    searchProvider: simple-search
+
+- id: web-search-deepseek
+  disabled: true
 
 # ── 权限预设表 ──────────────────────────────────────────────────────────
 # dsh 三个内置模式保持原样(Read Only / Workspace Write / Full Access);

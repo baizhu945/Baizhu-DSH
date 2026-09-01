@@ -62,14 +62,15 @@
     - id: codex-surface
       name: './codex-surface.mjs'
 
-    # Read the pinned official model catalog at every prompt/request boundary.
-    # This row is inside the Codex preset scope and cannot affect other agents.
-    - id: codex-model-parity
-      name: './codex-model-parity.mjs'
-
 # Codex-shaped end tools are mounted with the PTY consumer above. They inherit
 # the host-owned sandbox, fs, attachment, interaction, and subagent services;
 # no authority is recreated or widened in this preset.
+
+# Read the pinned official model catalog at every prompt/request boundary. Keep
+# this adapter at the preset root so it can shape the first prompt before the
+# request header records the selected model.
+- id: codex-model-parity
+  name: './codex-model-parity.mjs'
 
 # Provide the standalone `web.run` extension used by Responses Lite. The
 # companion module also restores the official `web_search` function shape for
@@ -132,7 +133,7 @@
 
               Plan Mode is a collaboration mode that can involve requesting user input and eventually presenting your plan with the `exit_plan_mode` tool.
 
-              Separately, `update_plan` is a checklist/progress/TODOs tool; it does not enter or exit Plan Mode. Do not confuse it with Plan mode or try to use it while in Plan mode. If you try to use `update_plan` in Plan mode, it will return an error.
+              Separately, `update_plan` is a checklist/progress/TODOs tool; it does not enter or exit Plan Mode. Do not confuse it with Plan mode or try to use it while in Plan mode.
 
               ## Execution vs. mutation in Plan Mode
 
@@ -248,9 +249,10 @@
     - id: compaction-basic
       name: '@deepseek-ai/dsh-compaction-basic'
       config:
-        # Codex derives automatic compaction from a 90% context threshold;
-        # model-owned token-budget fallback text supplies the remaining headroom.
-        thresholdRatio: 0.9
+        # Compact early enough for the replayed summary request to carry the
+        # system prompt and tools within the same 1M model window.
+        thresholdRatio: 0.8
+        auto: true
 
     - id: command-compact
       name: '@deepseek-ai/dsh-command-compact'

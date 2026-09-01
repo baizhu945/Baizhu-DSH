@@ -33,6 +33,11 @@ const SURFACE_MODEL_CATALOG = await (async () => {
   }
 })()
 
+// Permission grants are deliberately scoped to one live Codex agent. They
+// approximate the official request_permissions lifetime without modifying the
+// deployment-wide permission preset table.
+const ADDITIONAL_PERMISSION_GRANTS = new WeakMap()
+
 const IMAGE_EXTENSIONS = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -234,7 +239,7 @@ function permissionInstructions(policy, approval) {
   const approvals = approval === 'never'
     ? 'Approval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.'
     : policy.mode === 'danger-full-access'
-      ? 'approval_policy is unless-trusted: the harness requires user approval before every exec_command or apply_patch call.'
+      ? 'approval_policy is on-request: the harness requires user approval before every exec_command or apply_patch call.'
       : 'Commands run inside the sandbox without prompting. After a real sandbox denial, retry the exact command with sandbox_permissions=require_escalated and a short justification; do not ask in chat first.'
   return `<permissions instructions>\n${sandbox}\n\n${approvals}\n</permissions instructions>`
 }
@@ -309,6 +314,41 @@ function pathIsWithin(root, candidate) {
   return relative === '' || (relative !== '..' && !relative.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(relative))
 }
 
+const ADDITIONAL_PERMISSIONS_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  description: 'Sandboxed filesystem or network access requested for this command.',
+  properties: {
+    network: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        enabled: { type: 'boolean', description: 'Request network access.' },
+      },
+    },
+    file_system: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        read: { type: 'array', items: { type: 'string' }, description: 'Absolute paths to grant read access.' },
+        write: { type: 'array', items: { type: 'string' }, description: 'Absolute paths to grant write access.' },
+      },
+    },
+  },
+}
+
+function grantedSandboxPolicy(agent, standing) {
+  const permissions = ADDITIONAL_PERMISSION_GRANTS.get(agent)
+  const writes = permissions?.file_system?.write
+  if (!Array.isArray(writes) || writes.length === 0 || standing.mode === 'danger-full-access') return standing
+  const insideWorkspace = writes.every(path => typeof path === 'string'
+    && nodePath.isAbsolute(path)
+    && pathIsWithin(standing.workspaceRoot, nodePath.resolve(path)))
+  return insideWorkspace
+    ? { ...standing, mode: 'workspace-write' }
+    : { ...standing, mode: 'danger-full-access' }
+}
+
 async function approvePolicy(ctx, exec, standingPolicy, requestedMode, justification, subject) {
   if (requestedMode === standingPolicy.mode) return standingPolicy
   const approvedMode = await approveEscalation(
@@ -328,18 +368,26 @@ async function execSandboxPolicy(ctx, args, exec) {
   const agent = agentOf(exec)
   const standing = ctx.sandboxPolicy.resolve({ session: agent.session })
   const requested = args.sandbox_permissions ?? 'use_default'
-  if (requested === 'use_default') return standing
-  if (requested !== 'require_escalated') throw new Error(`unsupported sandbox_permissions: ${String(requested)}`)
+  if (requested === 'use_default') return grantedSandboxPolicy(agent, standing)
+  if (requested !== 'require_escalated' && requested !== 'with_additional_permissions') {
+    throw new Error(`unsupported sandbox_permissions: ${String(requested)}`)
+  }
+  if (requested === 'with_additional_permissions'
+    && (args.additional_permissions === undefined || args.additional_permissions === null)) {
+    throw new Error('additional_permissions is required with sandbox_permissions=with_additional_permissions')
+  }
   if (typeof args.justification !== 'string' || args.justification.trim() === '') {
-    throw new Error('justification is required with sandbox_permissions=require_escalated')
+    throw new Error(`justification is required with sandbox_permissions=${requested}`)
+  }
+  if (effectiveApprovalPolicy(agent.session.events) === 'never') {
+    throw new Error('approval policy is never; escalated permissions cannot be requested')
   }
   if (standing.mode === 'danger-full-access') {
-    if (effectiveApprovalPolicy(agent.session.events) === 'never') {
-      throw new Error('approval policy is never; escalated permissions cannot be requested')
-    }
     // The confirm-only pre-execute gate already approved this unrestricted call.
     return standing
   }
+  const granted = grantedSandboxPolicy(agent, standing)
+  if (requested === 'with_additional_permissions' && ADDITIONAL_PERMISSION_GRANTS.has(agent)) return granted
   return approvePolicy(ctx, exec, standing, 'danger-full-access', args.justification, 'command')
 }
 
@@ -752,10 +800,11 @@ function registerExecCommand(ctx) {
       login: { type: 'boolean', description: 'True runs the shell with -l/-i semantics; false disables them. Defaults to true.' },
       sandbox_permissions: {
         type: 'string',
-        enum: ['use_default', 'require_escalated'],
-        description: 'Per-command sandbox override. Defaults to use_default; use require_escalated for unsandboxed execution.',
+        enum: ['use_default', 'with_additional_permissions', 'require_escalated'],
+        description: 'Per-command sandbox override. Defaults to use_default; use with_additional_permissions with additional_permissions, or require_escalated for unsandboxed execution.',
       },
-      justification: { type: 'string', description: 'User-facing approval question for require_escalated; omit otherwise.' },
+      additional_permissions: ADDITIONAL_PERMISSIONS_SCHEMA,
+      justification: { type: 'string', description: 'User-facing approval question for an escalated command; omit with use_default.' },
       prefix_rule: {
         type: 'array',
         items: { type: 'string' },
@@ -852,6 +901,63 @@ function registerExecCommand(ctx) {
     presentResult(_args, result) {
       if (result.isError) return genericToolError('Command failed', result)
       return { card: 'terminal', output: result.content.filter(block => block.type === 'text').map(block => block.text).join('') }
+    },
+  }))
+}
+
+function permissionRequestHasEffect(permissions) {
+  return permissions !== null && typeof permissions === 'object'
+    && (permissions.network?.enabled === true
+      || Array.isArray(permissions.file_system?.read) && permissions.file_system.read.length > 0
+      || Array.isArray(permissions.file_system?.write) && permissions.file_system.write.length > 0)
+}
+
+function registerRequestPermissions(ctx) {
+  ctx.tools.register(defineTool({
+    name: 'request_permissions',
+    description: 'Request additional filesystem or network permissions from the user and wait for the client to grant a subset of the requested permission profile. Relative filesystem paths resolve against the selected environment. Granted permissions apply to later shell-like commands in the current session.',
+    parameters: {
+      reason: { type: 'string', description: 'Optional short explanation for why additional permissions are needed.' },
+      permissions: { ...ADDITIONAL_PERMISSIONS_SCHEMA, required: true },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { status: { type: 'string', required: true } },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.status === 'granted'
+          ? 'Additional permissions granted for this Codex session.'
+          : 'Additional permissions were not granted.',
+      }],
+    },
+    async execute(args, exec) {
+      const agent = agentOf(exec)
+      if (!permissionRequestHasEffect(args.permissions)) {
+        throw new Error('permissions must request network access or at least one filesystem path')
+      }
+      if (effectiveApprovalPolicy(agent.session.events) === 'never') {
+        throw new Error('approval policy is never; additional permissions cannot be requested')
+      }
+      const standing = ctx.sandboxPolicy.resolve({ session: agent.session })
+      await approvePolicy(
+        ctx,
+        exec,
+        standing,
+        'danger-full-access',
+        args.reason?.trim() || 'The command needs additional filesystem or network permissions.',
+        'permissions',
+      )
+      ADDITIONAL_PERMISSION_GRANTS.set(agent, structuredClone(args.permissions))
+      return { status: 'granted' }
+    },
+    presentCall(args) {
+      return { card: 'generic', title: 'Request additional permissions', kind: 'execute', content: [{ type: 'text', text: args.reason?.trim() || 'Request filesystem or network permissions.' }] }
+    },
+    presentResult(_args, result) {
+      return result.isError ? genericToolError('Permission request failed', result) : genericToolResult('Permissions updated', result)
     },
   }))
 }
@@ -968,9 +1074,9 @@ function registerWait(ctx) {
   }
   ctx.tools.register(defineTool({
     name: 'wait',
-    description: 'Waits on a yielded `exec` cell and returns new output or completion.\n- Use `wait` only after `exec` returns `Script running with cell ID ...`.\n- `cell_id` identifies the running `exec` cell to resume.\n- `yield_time_ms` controls how long to wait for output. Defaults to 10000 ms.\n- `max_tokens` limits how much new output this wait call returns. Defaults to 10000 tokens.\n- `terminate: true` stops the running `exec` cell; false or omitted waits for output.\n- `wait` returns only the new output since the last yield, or the final completion or termination result for that cell.\n- If the cell is still running, `wait` may yield again with the same `cell_id`.\n- If the cell has already finished, the completed result is returned and the cell closes.\n- DSH compatibility: Code Mode programs complete synchronously and do not yield resumable cells. For a nested shell session, use `tools.write_stdin({ session_id, ... })` inside Code Mode. This adapter accepts a numeric unified-exec session ID as `cell_id` when needed.',
+    description: 'Waits on a yielded `exec` cell and returns new output or completion.\n- Use `wait` only after `exec` returns `Script running with cell ID ...`.\n- `cell_id` identifies the running `exec` cell to resume.\n- `yield_time_ms` controls how long to wait for output. Defaults to 10000 ms.\n- `max_tokens` limits how much new output this wait call returns. Defaults to 10000 tokens.\n- `terminate: true` stops the running `exec` cell; false or omitted waits for output.\n- `wait` returns only the new output since the last yield, or the final completion or termination result for that cell.\n- If the cell is still running, `wait` may yield again with the same `cell_id`.\n- If the cell has already finished, the completed result is returned and the cell closes.\n- Code Mode programs on this host complete synchronously and do not yield resumable cells. For a nested shell session, use `tools.write_stdin({ session_id, ... })` inside Code Mode. This adapter accepts a numeric unified-exec session ID as `cell_id` when needed.',
     parameters: {
-      cell_id: { type: 'string', required: true, description: 'Identifier of the running exec cell. In DSH, pass the numeric unified-exec session ID as a string.' },
+      cell_id: { type: 'string', required: true, description: 'Identifier of the running exec cell; for a nested shell session, use the numeric unified-exec session ID as a string.' },
       yield_time_ms: { type: 'number', description: 'Wait before yielding more output. Defaults to 10000 ms.' },
       max_tokens: { type: 'number', description: 'Output token budget for this wait call. Defaults to 10000 tokens.' },
       terminate: { type: 'boolean', description: 'True stops the running exec cell; false or omitted waits for output.' },
@@ -1132,7 +1238,7 @@ function applyHunks(original, patchLines, path) {
     } else if (!isPatchLine(first)) {
       throw new Error('invalid apply_patch hunk for ' + path)
     }
-    const hunk = []
+    let hunk = []
     let endOfFile = false
     while (cursor < patchLines.length) {
       const line = patchLines[cursor]
@@ -1156,7 +1262,7 @@ function applyHunks(original, patchLines, path) {
       cursor++
     }
     if (hunk.length === 0) throw new Error('apply_patch contained an empty hunk for ' + path)
-    const oldLines = hunk.filter(line => line === '' || line[0] !== '+').map(line => line === '' ? '' : line.slice(1))
+    let oldLines = hunk.filter(line => line === '' || line[0] !== '+').map(line => line === '' ? '' : line.slice(1))
     let anchorStart = searchFrom
     if (context !== undefined) {
       const contextIndex = findBlock(lines.map(line => line.text), [context], searchFrom)
@@ -1164,7 +1270,28 @@ function applyHunks(original, patchLines, path) {
       anchorStart = contextIndex + 1
     }
     const insertionAtEnd = oldLines.length === 0 && context === undefined
-    const index = findBlock(lines.map(line => line.text), oldLines, anchorStart, endOfFile || insertionAtEnd)
+    let index = findBlock(lines.map(line => line.text), oldLines, anchorStart, endOfFile || insertionAtEnd)
+    if (index < 0 && oldLines.at(-1) === '' && hunk.at(-1) !== undefined
+      && (hunk.at(-1) === '' || hunk.at(-1)[0] === ' ')) {
+      // The official verifier tolerates a trailing empty old-line sentinel
+      // when a patch describes the final newline. Retry without that sentinel
+      // before reporting a context mismatch.
+      const shortened = hunk.slice(0, -1)
+      const shortenedOldLines = shortened
+        .filter(line => line === '' || line[0] !== '+')
+        .map(line => line === '' ? '' : line.slice(1))
+      const shortenedIndex = findBlock(
+        lines.map(line => line.text),
+        shortenedOldLines,
+        anchorStart,
+        endOfFile || shortenedOldLines.length === 0,
+      )
+      if (shortenedIndex >= 0) {
+        hunk = shortened
+        oldLines = shortenedOldLines
+        index = shortenedIndex
+      }
+    }
     if (index < 0) throw new Error('apply_patch context did not match ' + path)
     const replacement = []
     let oldOffset = 0
@@ -1337,10 +1464,18 @@ function patchBody(patch) {
  * target.
  */
 function patchEnvironmentId(patch) {
-  const identifiers = patchBody(patch)
-    .split('\n')
-    .map(patchControlLine)
-    .filter(line => line.startsWith('*** Environment ID:'))
+  const lines = patchBody(patch).split('\n')
+  const identifiers = []
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed === '') continue
+    if (trimmed.startsWith('*** Environment ID:')) {
+      identifiers.push(trimmed)
+      continue
+    }
+    if (/^\*\*\* (?:Update|Add|Delete) File:\s*/.test(trimmed)) break
+    break
+  }
   if (identifiers.length === 0) return undefined
   if (identifiers.length > 1) throw new Error('apply_patch environment_id can only be specified once')
   const value = identifiers[0].slice('*** Environment ID:'.length).trim()
@@ -1355,12 +1490,16 @@ function parsePatchOperations(patch) {
   let cursor = 0
   while (cursor < lines.length) {
     const header = lines[cursor]
-    const normalizedHeader = patchControlLine(header)
+    // At an operation boundary the official parser trims marker whitespace.
+    // Hunk-body lines are handled below with patchControlLine so a leading
+    // space remains an actual context marker.
+    const normalizedHeader = header.trim()
     if (normalizedHeader === '') {
       cursor++
       continue
     }
     if (normalizedHeader.startsWith('*** Environment ID:')) {
+      if (operations.length > 0) throw new Error('apply_patch environment_id must appear before file operations')
       if (normalizedHeader.slice('*** Environment ID:'.length).trim() === '') throw new Error('apply_patch environment_id cannot be empty')
       if (environmentIdSeen) throw new Error('apply_patch environment_id can only be specified once')
       environmentIdSeen = true
@@ -1459,8 +1598,14 @@ async function preflightPatch(ctx, exec, patch) {
   const operations = parsePatchOperations(patch)
   if (operations.length === 0) throw new Error('apply_patch contains no file operations')
   const resolved = []
+  const operationTargets = new Set()
   for (const operation of operations) {
     const target = await ctx.fs.resolve(operation.path, { cwd: cwdOf(agent), signal: exec.signal })
+    const targetKey = String(target.targetKey ?? target.displayPath)
+    if (operationTargets.has(targetKey)) {
+      throw new Error('apply_patch multiple operations target ' + target.displayPath)
+    }
+    operationTargets.add(targetKey)
     let destination
     if (operation.moveTo !== undefined) {
       destination = await ctx.fs.resolve(operation.moveTo, { cwd: cwdOf(agent), signal: exec.signal })
@@ -1510,9 +1655,18 @@ async function preflightPatch(ctx, exec, patch) {
       if (operation.body.length === 0 || operation.body.some(line => patchControlLine(line) === '*** End of File' || !line.startsWith('+'))) {
         throw new Error('invalid apply_patch Add File body for ' + operation.path)
       }
-      if (source.exists) throw new Error('apply_patch Add File target already exists: ' + operation.path)
+      if (source.exists && source.type !== 'file') {
+        throw new Error('apply_patch Add File target is not a regular file: ' + operation.path)
+      }
       const content = operation.body.map(line => line.slice(1)).join('\n') + '\n'
-      prepared.push({ ...operation, target, content })
+      prepared.push({
+        ...operation,
+        target,
+        info: source.info,
+        original: source.content,
+        overwritten: source.exists,
+        content,
+      })
       publish(target, content)
       continue
     }
@@ -1566,6 +1720,22 @@ async function rollbackPatchMutation(ctx, exec, mutation, sandboxPolicy, state) 
     return current?.exists ? current.version : fallback
   }
   if (mutation.kind === 'add') {
+    if (mutation.operation.overwritten === true) {
+      const expectedVersion = currentVersion(mutation.target, mutation.written.version)
+      const written = await writePatchedFile(
+        ctx,
+        rollbackExec,
+        mutation.target,
+        mutation.operation.original,
+        expectedVersion,
+        sandboxPolicy,
+        expectedVersion === undefined ? undefined : { kind: 'replaceIfVersion', version: expectedVersion },
+        rollbackSignal,
+      )
+      state.set(keyFor(mutation.target), { exists: true, version: written.version })
+      ctx.emit('fs/observed', mutation.target, { kind: 'present', version: written.version }, exec)
+      return
+    }
     await ctx.fs.deleteFile(mutation.target, { version: currentVersion(mutation.target, mutation.written.version) }, rollbackSignal, sandboxPolicy)
     state.set(keyFor(mutation.target), { exists: false, version: undefined })
     ctx.emit('fs/observed', mutation.target, { kind: 'absent' }, exec)
@@ -1697,26 +1867,33 @@ async function applyPatch(ctx, exec, patch) {
   try {
     for (const operation of operations) {
       if (operation.kind === 'add') {
+        const intent = operation.overwritten === true
+          ? undefined
+          : { kind: 'createIfAbsent' }
         const written = await writePatchedFile(
           ctx, exec, operation.target, operation.content, undefined, sandboxPolicy,
-          { kind: 'createIfAbsent' },
+          intent,
         )
         mutations.push({ kind: 'add', operation, target: operation.target, written })
         runtime.set(keyFor(operation.target), { exists: true, version: written.version })
         ctx.emit('fs/observed', operation.target, { kind: 'present', version: written.version }, exec)
-        results.push({ path: operation.target.displayPath, operation: written.operation })
-        diffs.push({
-          path: operation.target.displayPath,
-          oldText: null,
-          newText: operation.content,
-          oldStart: 0,
-          oldLines: 0,
-          newStart: 1,
-          newLines: lineCount(operation.content),
-          lines: (operation.content === '' ? [] : operation.content.split('\n'))
-            .filter((line, index, all) => !(index === all.length - 1 && line === ''))
-            .map(line => '+ ' + line),
-        })
+        results.push({ path: operation.target.displayPath, operation: 'add' })
+        if (operation.overwritten === true) {
+          diffs.push(...computeHunkDiffs(operation.target.displayPath, operation.original, operation.content))
+        } else {
+          diffs.push({
+            path: operation.target.displayPath,
+            oldText: null,
+            newText: operation.content,
+            oldStart: 0,
+            oldLines: 0,
+            newStart: 1,
+            newLines: lineCount(operation.content),
+            lines: (operation.content === '' ? [] : operation.content.split('\n'))
+              .filter((line, index, all) => !(index === all.length - 1 && line === ''))
+              .map(line => '+ ' + line),
+          })
+        }
         continue
       }
       if (operation.kind === 'delete') {
@@ -1804,11 +1981,20 @@ async function applyPatch(ctx, exec, patch) {
   }
 }
 
+function patchInput(args) {
+  if (typeof args?.input === 'string') return args.input
+  if (typeof args?.patch === 'string') return args.patch
+  throw new Error('apply_patch requires a free-form patch in the input field')
+}
+
 function registerApplyPatch(ctx) {
   ctx.tools.register(defineTool({
     name: 'apply_patch',
-    description: 'The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON or add a second JSON encoding. Because dsh currently exposes function tools only, pass the exact freeform patch as the required input string property. Add, Delete, Update, and Move operations are supported; relative paths resolve from the turn cwd and absolute paths are accepted.',
-    parameters: { input: { type: 'string', required: true, description: 'The exact free-form patch text, including *** Begin Patch and *** End Patch.' } },
+    description: 'The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON or add a second JSON encoding. The exact patch text may be supplied in the input field; patch is accepted as a compatibility alias. Add, Delete, Update, and Move operations are supported; relative paths resolve from the turn cwd and absolute paths are accepted.',
+    parameters: {
+      input: { type: 'string', description: 'The exact free-form patch text, including *** Begin Patch and *** End Patch.' },
+      patch: { type: 'string', description: 'Compatibility alias for input; use input for new calls.' },
+    },
     output: {
       schema: {
         type: 'object',
@@ -1850,12 +2036,12 @@ function registerApplyPatch(ctx) {
       presentationMeta: (_args, value) => ({ diffs: value.diffs }),
     },
     async execute(args, exec) {
-      return applyPatch(ctx, exec, args.input)
+      return applyPatch(ctx, exec, patchInput(args))
     },
     presentCall(args) {
       let diffs
       try {
-        diffs = previewPatchDiffs(args.input)
+        diffs = previewPatchDiffs(patchInput(args))
       } catch (error) {
         // A malformed/absolute patch path must remain a tool error, but the
         // UI still needs the authored patch text instead of raw JSON while it
@@ -1864,7 +2050,7 @@ function registerApplyPatch(ctx) {
           card: 'generic',
           title: 'Apply patch',
           kind: 'edit',
-          rawInput: args.input,
+          rawInput: args?.input ?? args?.patch ?? '',
           content: [{ type: 'text', text: `Patch preview unavailable: ${String(error)}` }],
         }
       }
@@ -2670,6 +2856,7 @@ export function apply(ctx) {
   registerPromptBoundary(ctx)
   registerReadableDispatchLog(ctx)
   registerExecCommand(ctx)
+  registerRequestPermissions(ctx)
   registerWriteStdin(ctx)
   registerWait(ctx)
   registerApplyPatch(ctx)
@@ -2692,6 +2879,8 @@ export {
   outputFromOperation,
   outputTokenBudget,
   applyPatch,
+  applyHunks,
+  patchInput,
   pipeOutput,
   terminalOutputText,
   timeoutPromise,

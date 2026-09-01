@@ -80,3 +80,6 @@
     - id: cc-connect-runner
       name: './plugins/cc-connect-runner.mjs'
       inject: [ccConnectStartup]
+
+    - id: openai-codex-account
+      name: './plugins/openai-codex-account.mjs'

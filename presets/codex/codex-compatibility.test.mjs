@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import {
@@ -7,7 +8,9 @@ import {
   contextTokensRemaining,
   directPatchContent,
   modelToolAllowed,
+  modelInstructions,
   normalizeCodeModeSource,
+  officialRuntimeProgram,
   normalizeToolMode,
   patchWebSearchSchema,
   profileForModel,
@@ -24,11 +27,13 @@ import {
 import { approvalReason, apply as applyApproval, patchApprovalPreview } from './codex-approval.mjs'
 import {
   applyPatch,
+  applyHunks,
   collabInputContent,
   collabPromptContent,
   filesystemElement,
   outputFromOperation,
   outputTokenBudget,
+  patchInput,
   patchEnvironmentId,
   parsePatchOperations,
   permissionInstructions,
@@ -38,6 +43,8 @@ import {
   waitForTerminalOperation,
 } from './codex-surface.mjs'
 import { apply as applyCodexWebSearch, parseResponseBody, parseResponseEnvelope, requestCodexSearchForTest, searchCommands } from './codex-web-search.mjs'
+
+const agentComposition = readFileSync(new URL('./agent.cordis.yml', import.meta.url), 'utf8')
 
 const shellQuoteSplice = String.fromCharCode(39) + String.fromCharCode(34) + String.fromCharCode(39) + String.fromCharCode(34) + String.fromCharCode(39)
 const directPatch = ['*** Begin Patch', '*** Add File: direct.txt', '+direct "quoted" line', '*** End Patch'].join('\n')
@@ -196,6 +203,18 @@ test('valid Code Mode source remains byte-identical', () => {
   assert.equal(normalizeCodeModeSource(source), source)
 })
 
+test('Code Mode injects the official helper names and catches exit()', async () => {
+  const source = officialRuntimeProgram('text(\"hello\"); exit(); text(\"unreachable\");')
+  assert.match(source, /const text =/)
+  assert.match(source, /const store =/)
+  assert.match(source, /__dshCodexExit/)
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+  const logs = []
+  const run = new AsyncFunction('console', source)
+  await run({ log: value => logs.push(value) })
+  assert.deepEqual(logs, ['hello'])
+})
+
 test('raw freeform patch gets an edit preview', () => {
   assert.equal(directPatchContent(directPatch), directPatch)
   const preview = codeModePreview(directPatch)
@@ -311,7 +330,7 @@ test('terminal operation wait rejects on abort and does not wait for its timer',
   settle({ sessionStatus: { kind: 'running' } })
 })
 
-test('apply_patch rejects empty before stat and supports ordered same-target operations', async () => {
+test('apply_patch rejects empty before stat and duplicate operations like the official verifier', async () => {
   const newline = String.fromCharCode(10)
   const empty = ['*** Begin Patch', '*** End Patch'].join(newline)
   assert.deepEqual(parsePatchOperations(empty), [])
@@ -335,7 +354,7 @@ test('apply_patch rejects empty before stat and supports ordered same-target ope
   ].join(newline)
   assert.equal(patchEnvironmentId(foreignEnvironment), 'remote')
   await assert.rejects(preflightPatch(ctx, exec, foreignEnvironment), /one local environment/)
-  const sequential = [
+  const duplicate = [
     '*** Begin Patch',
     '*** Add File: same.txt',
     '+old',
@@ -350,10 +369,32 @@ test('apply_patch rejects empty before stat and supports ordered same-target ope
     '+final',
     '*** End Patch',
   ].join(newline)
-  const sequentialState = fakePatchContext({})
-  await applyPatch(sequentialState.ctx, exec, sequential)
-  assert.equal(sequentialState.files.has('same.txt'), false)
-  assert.equal(sequentialState.files.get('moved.txt')?.content, 'final\n')
+  await assert.rejects(preflightPatch(ctx, exec, duplicate), /multiple operations target same.txt/)
+})
+
+test('apply_patch Add File overwrites an existing regular file', async () => {
+  const state = fakePatchContext({ 'existing.txt': 'old content\n' })
+  const patch = [
+    '*** Begin Patch',
+    '*** Add File: existing.txt',
+    '+new content',
+    '*** End Patch',
+  ].join('\n')
+  await applyPatch(state.ctx, patchExecution(), patch)
+  assert.equal(state.files.get('existing.txt')?.content, 'new content\n')
+})
+
+test('apply_patch accepts official padded operation markers and both object aliases', () => {
+  const patch = ['*** Begin Patch', '  *** Update File: foo.txt', '@@', '-old', '+new', '*** End Patch'].join('\n')
+  const operations = parsePatchOperations(patch)
+  assert.equal(operations[0].path, 'foo.txt')
+  assert.equal(patchInput({ input: patch }), patch)
+  assert.equal(patchInput({ patch }), patch)
+})
+
+test('apply_patch tolerates the official trailing empty-line sentinel', () => {
+  const patch = ['*** Begin Patch', '*** Update File: foo.txt', '@@', ' first', ' second', '+third', ' ', '*** End Patch'].join('\n')
+  assert.equal(applyHunks('first\nsecond\n', parsePatchOperations(patch)[0].body, 'foo.txt'), 'first\nsecond\nthird\n')
 })
 
 test('legacy shell catalog rows retain unified exec and text-only web schemas are narrowed', () => {
@@ -383,15 +424,30 @@ test('CodeModeOnly retains official DirectModelOnly controls beside exec', () =>
   const luna = profileForModel('gpt-5.6-luna')
   assert.equal(modelToolAllowed({}, luna, 'request_user_input', {}, false), true)
   assert.equal(modelToolAllowed({}, luna, 'request_user_input', {}, true), false)
+  assert.equal(modelToolAllowed({}, luna, 'new_context', {}, false), true)
+  assert.equal(modelToolAllowed({}, luna, 'new_context', {}, true), false)
+  assert.equal(modelToolAllowed({}, luna, 'update_plan', {}, false), true)
+  assert.equal(modelToolAllowed({}, luna, 'update_plan', {}, true), false)
   assert.equal(modelToolAllowed({}, luna, 'multi_agent_v1__spawn_agent', {}, false), true)
   assert.equal(modelToolAllowed({}, luna, 'multi_agent_v1__spawn_agent', {}, true), false)
-  assert.equal(modelToolAllowed({}, luna, 'spawn_agent', {}, false), false)
+  assert.equal(modelToolAllowed({}, luna, 'collaboration__spawn_agent', {}, false), false)
 
   const terra = profileForModel('gpt-5.6-terra')
-  assert.equal(modelToolAllowed({}, terra, 'spawn_agent', {}, false), true)
-  assert.equal(modelToolAllowed({}, terra, 'spawn_agent', {}, true), false)
-  assert.equal(modelToolAllowed({}, terra, 'wait_agent', {}, false), true)
-  assert.equal(modelToolAllowed({}, terra, 'wait_agent', {}, true), false)
+  assert.equal(modelToolAllowed({}, terra, 'collaboration__spawn_agent', {}, false), true)
+  assert.equal(modelToolAllowed({}, terra, 'collaboration__spawn_agent', {}, true), false)
+  assert.equal(modelToolAllowed({}, terra, 'collaboration__wait_agent', {}, false), true)
+  assert.equal(modelToolAllowed({}, terra, 'collaboration__wait_agent', {}, true), false)
+})
+
+test('Codex scope hides dsh-native tool names for every selected provider', () => {
+  const profile = profileForModel('vendor/custom-coder')
+  for (const name of ['bash', 'read', 'write', 'edit', 'glob', 'grep', 'terminal_open', 'web_fetch']) {
+    assert.equal(modelToolAllowed({}, profile, name, {}, false), false, name)
+    assert.equal(modelToolAllowed({}, profile, name, {}, true), false, name)
+  }
+  assert.equal(modelToolAllowed({}, profile, 'request_permissions', {}, false), true)
+  assert.equal(modelToolAllowed({}, profile, 'update_plan', {}, false), true)
+  assert.equal(modelToolAllowed({}, profile, 'update_plan', {}, true), false)
 })
 
 test('Codex environment and never approval text retain official machine-readable facts', () => {
@@ -433,6 +489,18 @@ test('model-owned token-budget messages follow remaining capacity and reset afte
   )
   assert.match(exhaustedContext, /only 0 tokens remain/)
   assert.match(exhaustedContext, /current context window is exhausted/i)
+})
+
+test('Codex compaction stays automatic and leaves room for summary replay', () => {
+  const compaction = agentComposition.match(/- id: compaction[\s\S]*?- id: command-compact/)?.[0] ?? ''
+  assert.match(compaction, /thresholdRatio: 0\.8/)
+  assert.match(compaction, /auto: true/)
+  assert.doesNotMatch(compaction, /thresholdRatio: 0\.9/)
+})
+
+test('Codex model parity is mounted at the preset root for first-turn filtering', () => {
+  assert.match(agentComposition, /# Read the pinned official model catalog[\s\S]*?- id: codex-model-parity\n  name: '\.\/codex-model-parity\.mjs'/)
+  assert.doesNotMatch(agentComposition, /- id: codex-pty-surface[\s\S]*?\n    - id: codex-model-parity/)
 })
 
 test('official remaining-context tool is available only on token-budget routes', () => {
@@ -498,14 +566,26 @@ test('official tool_mode names preserve the combined Code Mode surface', () => {
 
 test('CodeModeOnly prompt states the direct-tool boundary while combined mode stays quiet', () => {
   assert.equal(rewriteCodeModeName('', false), '')
-  assert.match(rewriteCodeModeName('', true), /exec` and `wait` are the only tools you can call directly/)
-  assert.match(rewriteCodeModeName('`run_code` is the only tool you can call directly', true), /`exec` and `wait`/)
+  assert.match(rewriteCodeModeName('', true), /`exec`, `wait`, `new_context`, and `request_permissions` are the only tools you can call directly/)
+  assert.match(rewriteCodeModeName('`run_code` is the only tool you can call directly', true), /`exec`, `wait`/)
   assert.match(rewriteCodeModeName('', profileForModel('gpt-5.6-luna')), /`request_user_input`/)
   const lunaBoundary = rewriteCodeModeName('', profileForModel('gpt-5.6-luna'))
   assert.match(lunaBoundary, /multi_agent_v1__spawn_agent/)
   const terraBoundary = rewriteCodeModeName('', profileForModel('gpt-5.6-terra'))
-  assert.match(terraBoundary, /`spawn_agent`/)
-  assert.match(terraBoundary, /`wait_agent`/)
+  assert.match(terraBoundary, /`collaboration__spawn_agent`/)
+  assert.match(terraBoundary, /`collaboration__wait_agent`/)
+})
+
+test('CodeModeOnly persona overrides conflicting direct-tool instructions', () => {
+  const luna = profileForModel('gpt-5.6-luna')
+  const instructions = modelInstructions(luna)
+  assert.match(instructions, /<codex_code_mode_boundary>/)
+  assert.match(instructions, /`exec`, `wait`, `new_context`/)
+  assert.match(instructions, /`request_user_input`/)
+  assert.match(instructions, /top-level tool call naming any other tool/i)
+  assert.match(instructions, /await tools\.exec_command\(\.\.\.\)/)
+  assert.match(instructions, /`skill` tool is not available/i)
+  assert.equal(modelInstructions(profileForModel('gpt-5.4')), profileForModel('gpt-5.4').instructions)
 })
 
 test('V2 task names and statuses follow the canonical path/runtime boundaries', () => {
@@ -553,27 +633,27 @@ test('V2 collaboration tools resolve task names, return canonical spawn paths, a
   }
   registerV2Agents(ctx)
   const tool = name => registrations.find(item => item.name === name)
-  assert.equal(tool('spawn_agent').parameters.agent_type, undefined)
-  assert.equal(tool('spawn_agent').parameters.service_tier, undefined)
+  assert.equal(tool('collaboration__spawn_agent').parameters.agent_type, undefined)
+  assert.equal(tool('collaboration__spawn_agent').parameters.service_tier, undefined)
   const execution = { agent: parent, signal: new AbortController().signal, callId: 'v2-test' }
-  const spawned = await tool('spawn_agent').execute({ task_name: 'new_task', message: 'work', fork_turns: 'none' }, execution)
+  const spawned = await tool('collaboration__spawn_agent').execute({ task_name: 'new_task', message: 'work', fork_turns: 'none' }, execution)
   assert.deepEqual(spawned, { task_name: '/root/new_task' })
   assert.equal(started.provider, 'spawn')
   assert.deepEqual(started.request.prompt, [{ type: 'text', text: 'work' }])
-  const sent = await tool('send_message').execute({ target: 'child_task', message: 'ping' }, execution)
+  const sent = await tool('collaboration__send_message').execute({ target: 'child_task', message: 'ping' }, execution)
   assert.equal(sent.submission_id.length > 0, true)
   assert.equal(child.injected[0].content[0].text, 'ping')
-  await tool('followup_task').execute({ target: '/root/child_task', message: 'continue' }, execution)
+  await tool('collaboration__followup_task').execute({ target: '/root/child_task', message: 'continue' }, execution)
   assert.equal(followed[0], parent)
   assert.equal(followed[1], 'child-id')
   assert.deepEqual(followed[2], [{ type: 'text', text: 'continue' }])
-  const listed = await tool('list_agents').execute({}, execution)
+  const listed = await tool('collaboration__list_agents').execute({}, execution)
   assert.deepEqual(listed.agents.map(agent => agent.agent_name), ['/root', '/root/child_task'])
   parent.inbox.nextStep.push({ id: 'report', source: { kind: 'subagent-report', senderSessionId: 'child-id' } })
-  const waited = await tool('wait_agent').execute({ timeout_ms: 0 }, execution)
+  const waited = await tool('collaboration__wait_agent').execute({ timeout_ms: 0 }, execution)
   assert.equal(waited.timed_out, false)
   assert.match(waited.message, /clamped to the minimum of 10000ms/)
-  await assert.rejects(tool('wait_agent').execute({ timeout_ms: -1 }, execution), /non-negative number/)
+  await assert.rejects(tool('collaboration__wait_agent').execute({ timeout_ms: -1 }, execution), /non-negative number/)
 })
 
 test('V2 task reservations do not collide across independent root sessions', async () => {
@@ -602,7 +682,7 @@ test('V2 task reservations do not collide across independent root sessions', asy
     },
   }
   registerV2Agents(ctx)
-  const spawn = registrations.find(item => item.name === 'spawn_agent')
+  const spawn = registrations.find(item => item.name === 'collaboration__spawn_agent')
   const first = spawn.execute({ task_name: 'same_task', message: 'work', fork_turns: 'none' }, { agent: parentA, signal: new AbortController().signal })
   await firstStartedPromise
   const second = spawn.execute({ task_name: 'same_task', message: 'work', fork_turns: 'none' }, { agent: parentB, signal: new AbortController().signal })
@@ -807,7 +887,7 @@ test('apply_patch guards and restores moves with an existing destination', async
   assert.equal(state.files.get('destination.txt')?.content, 'updated\n')
 })
 
-test('apply_patch rolls back ordered mutations on one path with their latest versions', async () => {
+test('apply_patch rejects duplicate target mutations before writing', async () => {
   const state = fakePatchContext({}, { failWrite: path => path === 'moved.txt' })
   const patch = [
     '*** Begin Patch',
@@ -824,7 +904,7 @@ test('apply_patch rolls back ordered mutations on one path with their latest ver
     '+final',
     '*** End Patch',
   ].join('\n')
-  await assert.rejects(applyPatch(state.ctx, patchExecution(), patch), /injected write failure for moved.txt/)
+  await assert.rejects(applyPatch(state.ctx, patchExecution(), patch), /multiple operations target same.txt/)
   assert.equal(state.files.has('same.txt'), false)
   assert.equal(state.files.has('moved.txt'), false)
 })

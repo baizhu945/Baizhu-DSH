@@ -28,6 +28,8 @@ const RUN_CODE = 'run_code'
 const CODE_MODE_TOOL = 'exec'
 const WAIT_TOOL = 'wait'
 const GET_CONTEXT_REMAINING_TOOL = 'get_context_remaining'
+const NEW_CONTEXT_TOOL = 'new_context'
+const REQUEST_PERMISSIONS_TOOL = 'request_permissions'
 const SKILL = 'skill'
 const WEB_RUN = 'web__run'
 const WEB_SEARCH = 'web_search'
@@ -44,12 +46,38 @@ const V1_NAMES = new Set([
   'multi_agent_v1__close_agent',
 ])
 const V2_NAMES = new Set([
-  'spawn_agent',
-  'send_message',
-  'followup_task',
-  'wait_agent',
-  'interrupt_agent',
-  'list_agents',
+  'collaboration__spawn_agent',
+  'collaboration__send_message',
+  'collaboration__followup_task',
+  'collaboration__wait_agent',
+  'collaboration__interrupt_agent',
+  'collaboration__list_agents',
+])
+const DSH_NATIVE_TOOLS = new Set([
+  'ask_user_question',
+  'bash',
+  'create_goal',
+  'edit',
+  'get_goal',
+  'glob',
+  'grep',
+  'job_kill',
+  'job_list',
+  'job_output',
+  'pwsh',
+  'read',
+  'read_image',
+  'str_replace_editor',
+  'terminal_close',
+  'terminal_list',
+  'terminal_open',
+  'terminal_read',
+  'terminal_send',
+  'terminal_signal',
+  'todo_write',
+  'update_goal',
+  'web_fetch',
+  'write',
 ])
 
 // Only the preset-owned exec facade may dispatch the reserved transport. The
@@ -530,12 +558,16 @@ function isV1Tool(name) {
 function isCodeModeOnlyDirectTool(name, profile) {
   return name === CODE_MODE_TOOL
     || name === WAIT_TOOL
+    || name === NEW_CONTEXT_TOOL
+    || name === REQUEST_PERMISSIONS_TOOL
+    || name === 'update_plan'
     || name === 'request_user_input'
     || (profile?.multiAgentVersion === 'v1' && V1_NAMES.has(name))
     || (profile?.multiAgentVersion === 'v2' && V2_NAMES.has(name))
 }
 
 function modelToolAllowed(ctx, profile, name, agent, nested, toolArguments) {
+  if (DSH_NATIVE_TOOLS.has(name)) return false
   if (!nested && name === RUN_CODE) return false
   if (!nested && profile.toolMode === 'code_mode_only' && !isCodeModeOnlyDirectTool(name, profile)) return false
   if (!nested && profile.toolMode === 'native' && (name === CODE_MODE_TOOL || name === WAIT_TOOL)) return false
@@ -551,6 +583,11 @@ function modelToolAllowed(ctx, profile, name, agent, nested, toolArguments) {
   if (name === GET_CONTEXT_REMAINING_TOOL) {
     return profile.tokenBudget !== undefined && (nested || profile.toolMode !== 'code_mode_only')
   }
+  if (name === NEW_CONTEXT_TOOL) {
+    return profile.tokenBudget !== undefined && !nested
+  }
+  if (name === REQUEST_PERMISSIONS_TOOL) return !nested
+  if (name === 'update_plan') return !nested
   // The upstream handler is DirectModelOnly: it is callable by the direct
   // model surface in Plan Mode, but is intentionally absent from the nested
   // Code Mode SDK even for code_mode_only rows.
@@ -614,6 +651,55 @@ function dynamicSdk(ctx, agent, profile, fallback) {
   }
 }
 
+const CODE_MODE_RUNTIME_GUIDANCE = [
+  '## Codex Code Mode runtime',
+  'Inside `exec`, write a raw JavaScript async-function body and use the declared `tools` SDK for every tool call.',
+  'Use `text(value)` for textual output; do not use `console`, Node APIs, filesystem APIs, or network APIs directly.',
+  '`image(value)`, `audio(value)`, `generatedImage(value)`, `store(key, value)`, `load(key)`, `notify(value)`, `yield_control()`, and `exit()` are available with their Codex meanings when supported by the selected route.',
+  'The host keeps the official names and output contract, while long-running programs remain bounded by the host and may not provide a resumable cell.',
+].join('\n')
+
+function rewriteCodeModeSdk(text, profile) {
+  const rewritten = rewriteCodeModeName(text, profile)
+  if (profile.toolMode !== 'code_mode_only') return rewritten
+  return [
+    CODE_MODE_RUNTIME_GUIDANCE,
+    rewritten.replace('`console.log(...)`', '`text(...)`'),
+  ].join('\n\n')
+}
+
+function registerNewContextTool(ctx) {
+  ctx.tools.register(defineTool({
+    name: NEW_CONTEXT_TOOL,
+    description: 'Start a new context window. Does not clear, reset, or otherwise affect environment state.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          status: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.status === 'started'
+          ? 'Started a new Codex context window.'
+          : 'A new Codex context window could not be started because no compactable context was available.',
+      }],
+    },
+    async execute(_args, execution) {
+      const agent = execution.agent
+      const compaction = ctx.get('compaction')
+      if (agent === undefined || compaction === undefined || typeof compaction.compactNow !== 'function') {
+        return { status: 'unavailable' }
+      }
+      const result = await compaction.compactNow(agent, execution.signal)
+      return { status: result === null ? 'unavailable' : 'started' }
+    },
+  }))
+}
+
 function registerContextBudgetTools(ctx) {
   ctx.tools.register(defineTool({
     name: GET_CONTEXT_REMAINING_TOOL,
@@ -641,10 +727,11 @@ function registerContextBudgetTools(ctx) {
       return { tokens_left: contextTokensRemaining(ctx, agent, profile) ?? null }
     },
   }))
+  registerNewContextTool(ctx)
 }
 
 function codeModeOnlyDirectToolNames(profileOrCodeModeOnly) {
-  const names = [CODE_MODE_TOOL, WAIT_TOOL]
+  const names = [CODE_MODE_TOOL, WAIT_TOOL, NEW_CONTEXT_TOOL, REQUEST_PERMISSIONS_TOOL]
   if (profileOrCodeModeOnly !== null && typeof profileOrCodeModeOnly === 'object') {
     names.push('request_user_input')
     if (profileOrCodeModeOnly.multiAgentVersion === 'v1') names.push(...V1_NAMES)
@@ -658,6 +745,23 @@ function quotedToolList(names) {
   if (quoted.length <= 1) return quoted[0] ?? ''
   if (quoted.length === 2) return quoted[0] + ' and ' + quoted[1]
   return quoted.slice(0, -1).join(', ') + ', and ' + quoted.at(-1)
+}
+
+function modelInstructions(profile) {
+  if (profile.toolMode !== 'code_mode_only') return profile.instructions
+  const directBoundary = quotedToolList(codeModeOnlyDirectToolNames(profile))
+  const base = typeof profile.instructions === 'string' ? profile.instructions.trim() : ''
+  const boundary = [
+    '<codex_code_mode_boundary>',
+    `The selected Codex model uses Code Mode. ${directBoundary} are the only tools you can call directly.`,
+    'Do not emit a top-level tool call naming any other tool, even if that name appears in general Codex instructions.',
+    'Use `exec` with a JavaScript program, and call the other tools from inside that program through the provided `tools` SDK, for example `await tools.exec_command(...)` or `await tools.apply_patch(...)`.',
+    profile.includeSkillsUsageInstructions
+      ? 'The `skill` tool, when available, is also reached through the `tools` SDK.'
+      : 'The `skill` tool is not available for this model; do not call it directly or through the `tools` SDK.',
+    '</codex_code_mode_boundary>',
+  ].join('\n')
+  return [base, boundary].filter(text => text !== '').join('\n\n')
 }
 
 function rewriteCodeModeName(text, profileOrCodeModeOnly = false) {
@@ -1568,6 +1672,40 @@ function normalizeCodeModeSource(source) {
   return repairCodeModeStringBoundaries(legacy) ?? legacy
 }
 
+// DSH's worker runtime only supplies `tools` and a console shim. Provide the
+// official Code Mode helper names locally so the same model-authored program
+// remains executable on this transport. Image/audio delivery and resumable
+// yielding are represented textually because the host runtime has no matching
+// output-item or cell protocol.
+const CODE_MODE_RUNTIME_PRELUDE = [
+  'const __dshCodexText = (value) => {',
+  "  if (typeof value === 'string') return value;",
+  "  if (value === undefined) return 'undefined';",
+  '  try { const json = JSON.stringify(value); return json === undefined ? String(value) : json }',
+  '  catch { return String(value) }',
+  '};',
+  'const text = (value) => console.log(__dshCodexText(value));',
+  "const image = (_value) => console.log('[image output emitted by Codex compatibility runtime]');",
+  "const audio = (_value) => console.log('[audio output emitted by Codex compatibility runtime]');",
+  "const generatedImage = (_value) => console.log('[generated image output emitted by Codex compatibility runtime]');",
+  'const __dshCodexStore = Object.create(null);',
+  'const store = (key, value) => { __dshCodexStore[String(key)] = value; return value; };',
+  'const load = (key) => __dshCodexStore[String(key)];',
+  'const notify = (value) => text(value);',
+  'const yield_control = () => undefined;',
+  "const exit = () => { const error = new Error('Codex Code Mode exit'); error.__dshCodexExit = true; throw error; };",
+].join('\n')
+
+function officialRuntimeProgram(source) {
+  return CODE_MODE_RUNTIME_PRELUDE
+    + '\ntry {\n'
+    + String(source)
+    + '\n} catch (__dshCodexExitError) {\n'
+    + '  if (__dshCodexExitError?.__dshCodexExit === true) return;\n'
+    + '  throw __dshCodexExitError;\n'
+    + '}'
+}
+
 async function executeNestedCodeModeTool(ctx, execution, name, toolArguments) {
   const result = await ctx.tools.execute({
     callId: execution.callId + ':' + name,
@@ -1592,14 +1730,14 @@ function registerCodeModeAlias(ctx) {
   ctx.tools.register(defineTool({
     name: CODE_MODE_TOOL,
     description: [
-      'Execute raw JavaScript/TypeScript source in the Codex Code Mode runtime.',
-      'The required input is the body of an async function, not a JSON object or fenced code block; Node parses it with its erasable TypeScript parser.',
+      'Execute raw JavaScript source in the Codex Code Mode runtime.',
+      'The required input is the body of an async function, not a JSON object or fenced code block.',
       'For multiline shell commands, build cmd with ["line 1", "line 2"].join("\\n") instead of putting a literal newline inside a JavaScript quoted string.',
       'Nested tools.exec_command takes a JavaScript object such as { cmd: "printf hello" }; do not wrap that object in JSON.stringify or double-escape the cmd value.',
       'For shell commands containing single quotes (for example jq, awk, or parser diagnostics), prefer a double-quoted JavaScript string or an array joined with "\\n"; do not use a single-quoted JavaScript string around the whole command.',
       'Do not put Bash parameter expansions such as ${rc:-0} inside a JavaScript template literal; use an array of shell lines joined with "\\n".',
-      'Call tools as await tools.<tool_name>(arguments) and return a JSON-serializable value.',
-      'The dsh compatibility transport carries that source in the required input string property.',
+      'Call tools as await tools.<tool_name>(arguments), use text(value) for textual output, and return a JSON-serializable value.',
+      'The host transport carries that source in the required input string property.',
     ].join(' '),
     parameters: {
       input: { type: 'string', required: true, description: 'Raw JavaScript/TypeScript function body. Build multiline shell commands with an array joined by "\\n"; for commands containing shell quotes, avoid wrapping the whole command in a JavaScript string with the same quote character.' },
@@ -1638,7 +1776,7 @@ function registerCodeModeAlias(ctx) {
         const result = await executeNestedCodeModeTool(ctx, execution, 'apply_patch', { input: directPatch })
         return { logs: [], result }
       }
-      const program = normalizeCodeModeSource(args.input)
+      const program = officialRuntimeProgram(normalizeCodeModeSource(args.input))
       const callId = execution.callId + ':run_code'
       INTERNAL_RUN_CODE_CALLS.set(callId, { agent: execution.agent, parent: execution.token })
       try {
@@ -2014,7 +2152,7 @@ function registerV2Agents(ctx) {
   })
 
   ctx.tools.register(defineTool({
-    name: 'spawn_agent',
+    name: 'collaboration__spawn_agent',
     description: 'Spawns an agent to work on the specified task. Use a lowercase task_name with letters, digits, and underscores. The spawned agent inherits the current model and can spawn its own subagents. Only use this for a concrete, bounded subtask that can run independently alongside useful local work.',
     parameters: {
       task_name: { type: 'string', required: true, description: 'Task name for the new agent. Use lowercase letters, digits, and underscores.' },
@@ -2071,7 +2209,7 @@ function registerV2Agents(ctx) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'send_message',
+    name: 'collaboration__send_message',
     description: 'Send a message to an existing agent. The message is delivered promptly and does not trigger a new turn.',
     parameters: {
       target: { type: 'string', required: true, description: 'Relative or canonical task name, or the durable id returned by spawn_agent.' },
@@ -2092,7 +2230,7 @@ function registerV2Agents(ctx) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'followup_task',
+    name: 'collaboration__followup_task',
     description: 'Send a follow-up task to an existing non-root agent and trigger a turn if it is idle. If it is already running, deliver the task at a message boundary.',
     parameters: {
       target: { type: 'string', required: true, description: 'Agent id or task name returned by spawn_agent.' },
@@ -2112,7 +2250,7 @@ function registerV2Agents(ctx) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'wait_agent',
+    name: 'collaboration__wait_agent',
     description: 'Wait for a mailbox update from any live agent, including queued messages and final-status notifications. Returns a summary without the agent final content, or a timeout summary.',
     parameters: { timeout_ms: { type: 'number', description: 'Timeout in milliseconds. Defaults to 30000; minimum 10000; maximum 3600000. Values below the minimum are clamped; values above the maximum are rejected.' } },
     output: { schema: { type: 'object', additionalProperties: false, properties: { message: { type: 'string', required: true }, timed_out: { type: 'boolean', required: true } } }, ...v2JsonOutput('Agent wait') },
@@ -2147,7 +2285,7 @@ function registerV2Agents(ctx) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'interrupt_agent',
+    name: 'collaboration__interrupt_agent',
     description: "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
     parameters: { target: { type: 'string', required: true, description: 'Agent id or task name returned by spawn_agent.' } },
     output: { schema: { type: 'object', additionalProperties: false, properties: { previous_status: { ...v2AgentStatusSchema(), required: true } } }, ...v2JsonOutput('Agent interrupted') },
@@ -2164,7 +2302,7 @@ function registerV2Agents(ctx) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'list_agents',
+    name: 'collaboration__list_agents',
     description: 'List live agents in the current root thread tree. Optionally filter by task-path prefix.',
     parameters: { path_prefix: { type: 'string', description: 'Task-path prefix filter without a trailing slash. Omit to list all live agents.' } },
     output: {
@@ -2295,14 +2433,14 @@ function registerModelParity(ctx) {
       .filter(section => profile.toolMode !== 'native' || section.name !== 'tools:code-only')
       .filter(section => profile.toolMode !== 'native' || section.name !== 'tools:sdk')
       .map(section => {
-        if (section.name === 'deployment:persona') return { ...section, text: profile.instructions }
+        if (section.name === 'deployment:persona') return { ...section, text: modelInstructions(profile) }
         if (section.name === 'tools:code-only') {
           return { ...section, text: rewriteCodeModeName(section.text, profile) }
         }
         if (section.name === 'tool:web_search'
           && (profile.useResponsesLite || !profile.supportsSearchTool)) return undefined
         if (profile.toolMode !== 'native' && section.name === 'tools:sdk') {
-          return { ...section, text: rewriteCodeModeName(dynamicSdk(ctx, agent, profile, section.text), profile) }
+          return { ...section, text: rewriteCodeModeSdk(dynamicSdk(ctx, agent, profile, section.text), profile) }
         }
         return section
       })
@@ -2330,12 +2468,15 @@ export {
   contextTokensRemaining,
   directPatchContent,
   modelToolAllowed,
+  modelInstructions,
   normalizeCodeModeSource,
+  officialRuntimeProgram,
   normalizeShellType,
   normalizeToolMode,
   patchWebSearchSchema,
   profileForModel,
   registerCodeModeAlias,
+  rewriteCodeModeSdk,
   registerV2Agents,
   rewriteCodeModeName,
   truncateToolContent,

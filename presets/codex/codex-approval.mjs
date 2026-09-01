@@ -18,6 +18,7 @@ const ASK_TOOLS = new Set([
   // the authority-bearing nested command/edit calls, exactly as in native mode.
   'exec_command',
   'apply_patch',
+  'request_permissions',
 ])
 
 /** Last `approval/policy` payload, or undefined when the session has none. */
@@ -83,8 +84,9 @@ function patchApprovalPreview(input) {
 
 function approvalReason(ctx, exec) {
   const base = 'Codex tool "' + exec.name + '" requires your approval'
-  if (exec.name !== 'apply_patch' || typeof exec.arguments?.input !== 'string') return base
-  const preview = patchApprovalPreview(exec.arguments.input)
+  const patch = exec.arguments?.input ?? exec.arguments?.patch
+  if (exec.name !== 'apply_patch' || typeof patch !== 'string') return base
+  const preview = patchApprovalPreview(patch)
   if (preview === undefined) return base
   let title
   try {
