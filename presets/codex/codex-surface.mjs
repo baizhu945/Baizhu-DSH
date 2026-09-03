@@ -2321,19 +2321,19 @@ const COLLAB_INPUT_ITEM = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    type: { type: 'string', required: true, description: 'Input item type: text, image, local_image, audio, local_audio, skill, or mention.' },
+    type: { type: 'string', description: 'Input item type: text, image, local_image, audio, local_audio, skill, or mention.' },
     text: { type: 'string', description: 'Text content when type is text.' },
     image_url: { type: 'string', description: 'Image URL when type is image.' },
     audio_url: { type: 'string', description: 'Audio data URL when type is audio.' },
-    path: { type: 'string', description: 'Path for local media or skill, or a structured mention target.' },
-    name: { type: 'string', description: 'Display name for a skill or mention.' },
+    path: { type: 'string', description: 'Path when type is local_image/local_audio/skill, or structured mention target such as app://<connector-id> or plugin://<plugin-name>@<marketplace-name> when type is mention.' },
+    name: { type: 'string', description: 'Display name when type is skill or mention.' },
   },
 }
 
 const COLLAB_INPUT_ITEMS = {
   type: 'array',
   items: COLLAB_INPUT_ITEM,
-  description: 'Structured input items. Text, image data URLs, local images, skills, and mentions are supported; audio items are unavailable in the dsh message model.',
+  description: 'Structured input items. Use this to pass explicit mentions (for example app:// connector paths).',
 }
 
 function collabInputContent(message, items) {
@@ -2445,14 +2445,94 @@ function sourceFor(parent) {
   return { kind: 'coordinator', form: 'relay', senderSessionId: parent.session.id }
 }
 
-async function directChildren(ctx, parent, signal) {
-  const rows = await ctx.subagents.listChildren(parent.session.id, signal)
-  return rows.filter(row => row.kind === 'child' && row.mode === 'continuable')
+async function directChildren(ctx, parent, signal, targetIds = []) {
+  const targets = targetIds.filter(target => typeof target === 'string')
+  const rows = []
+  const unresolved = []
+
+  // The catalog read is global: one unrelated live/persisted header conflict
+  // can make every V1 control operation fail before it reaches its target.
+  // Prefer exact live-agent identity for the common same-process path.
+  for (const target of targets) {
+    const child = ctx.agents.get(target)
+    if (child === undefined) {
+      unresolved.push(target)
+      continue
+    }
+    const header = child.session?.header
+    if (header?.id !== target || header.parentSession !== parent.session.id || header.origin !== 'subagent') continue
+    const projections = ctx.get('sessionProjections')
+    if (typeof projections?.snapshot !== 'function') {
+      unresolved.push(target)
+      continue
+    }
+    try {
+      const identity = projections.snapshot(child, ['subagent']).values.subagent
+      if (identity?.mode !== 'continuable' || identity.seq < (header.seedLength ?? 0)) continue
+      rows.push({
+        kind: 'child',
+        id: target,
+        mode: 'continuable',
+        label: identity.label,
+        activity: 'running',
+        hasChildren: false,
+      })
+    } catch {
+      // An invalid live projection is not a valid target. Do not broaden the
+      // lookup to the global catalog for an already-live, unrelated agent.
+    }
+  }
+
+  if (unresolved.length === 0) return rows
+
+  // Point-read cold targets so restarting the TUI still supports durable
+  // children without exposing it to unrelated catalog conflicts.
+  const query = ctx.get('sessionQuery')
+  if (typeof query?.observeSession === 'function') {
+    for (const target of unresolved) {
+      let observation
+      try {
+        observation = await query.observeSession(target, { signal })
+      } catch (error) {
+        if (error?.code === 'SESSION_QUERY_SESSION_NOT_FOUND') continue
+        throw error
+      }
+      try {
+        const header = observation.header
+        const identity = observation.projections?.values?.subagent
+        if (header?.id !== target
+          || header.parentSession !== parent.session.id
+          || header.origin !== 'subagent'
+          || identity?.mode !== 'continuable'
+          || identity.seq < (header.seedLength ?? 0)) continue
+        rows.push({
+          kind: 'child',
+          id: target,
+          mode: 'continuable',
+          label: identity.label,
+          activity: 'inactive',
+          hasChildren: false,
+        })
+      } finally {
+        const dispose = observation?.[Symbol.dispose]
+        if (typeof dispose === 'function') dispose.call(observation)
+      }
+    }
+    return rows
+  }
+
+  // Compatibility fallback for older hosts that do not expose exact reads.
+  const listed = await ctx.subagents.listChildren(parent.session.id, signal)
+  return listed.filter(row => row.kind === 'child' && row.mode === 'continuable')
 }
 
-function renderJsonOutput(title) {
+function renderJsonOutput(_title) {
   return {
-    render: (_args, value) => [{ type: 'text', text: humanizeValue(value, title) }],
+    // The rendered value is the model-facing tool result. Keep it canonical
+    // JSON: humanizing object keys turns UUIDs such as `a-b-c` into `a-B-C`,
+    // which makes a later target lookup fail. UI presenters humanize their
+    // copy separately, so this does not give up readable TUI cards.
+    render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
   }
 }
 
@@ -2540,6 +2620,7 @@ function registerReportDelivery(ctx) {
 /** Luna's upstream catalog selects the V1 collaboration surface. */
 function registerAgents(ctx) {
   // Codex V1 close/resume semantics over dsh's durable continuable sessions.
+  const knownAgentIds = new Set()
   const closedAgents = new Set()
   const settlements = new Map()
 
@@ -2613,8 +2694,8 @@ function registerAgents(ctx) {
         type: 'object',
         additionalProperties: false,
         properties: {
-          agent_id: { type: 'string', required: true },
-          nickname: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
+          agent_id: { type: 'string', required: true, description: 'Thread identifier for the spawned agent.' },
+          nickname: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }], description: 'User-facing nickname for the spawned agent when available.' },
         },
       },
       ...renderJsonOutput('Agent spawned'),
@@ -2645,6 +2726,7 @@ function registerAgents(ctx) {
         },
         signal: exec.signal,
       })
+      knownAgentIds.add(child.childId)
       closedAgents.delete(child.childId)
       return { agent_id: child.childId, nickname: null }
     },
@@ -2655,16 +2737,16 @@ function registerAgents(ctx) {
     // Upstream text: multi_agents_spec.rs send_input V1.
     description: 'Send a message to an existing agent. Use interrupt=true to redirect work immediately. You should reuse the agent by send_input if you believe your assigned task is highly dependent on the context of a previous task.',
     parameters: {
-      target: { type: 'string', required: true, description: 'Exact agent_id returned by spawn_agent. Never invent a placeholder id.' },
-      message: { type: 'string', description: 'Plain-text message to send to the agent. Use either message or items.' },
+      target: { type: 'string', required: true, description: 'Agent id to message (from spawn_agent).' },
+      message: { type: 'string', description: 'Legacy plain-text message to send to the agent. Use either message or items.' },
       items: COLLAB_INPUT_ITEMS,
-      interrupt: { type: 'boolean', description: 'True interrupts the current turn before queueing this message.' },
+      interrupt: { type: 'boolean', description: 'True interrupts the current task and handles this message immediately; false or omitted queues it.' },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { submission_id: { type: 'string', required: true } },
+        properties: { submission_id: { type: 'string', required: true, description: 'Identifier for the queued input submission.' } },
       },
       ...renderJsonOutput('Input queued'),
     },
@@ -2676,13 +2758,6 @@ function registerAgents(ctx) {
     },
     async execute(args, exec) {
       const parent = agentOf(exec)
-      const rows = await directChildren(ctx, parent, exec.signal)
-      if (!rows.some(row => row.id === args.target)) {
-        throw new Error(`unknown subagent "${args.target}"; use the exact agent_id returned by spawn_agent`)
-      }
-      if (closedAgents.has(args.target)) {
-        throw new Error(`subagent "${args.target}" is closed; call resume_agent before send_input`)
-      }
       const content = await collabPromptContent(ctx, parent, args.message, args.items, exec.signal)
       if (args.interrupt === true) {
         ctx.subagents.interrupt(args.target, { kind: 'ancestor', agent: parent })
@@ -2701,8 +2776,8 @@ function registerAgents(ctx) {
     name: 'multi_agent_v1__resume_agent',
     // Upstream text: multi_agents_spec.rs resume_agent V1, plus this host's
     // automatic cold-resume behavior so the model is not surprised by it.
-    description: 'Resume a previously closed agent by id so it can receive send_input and wait_agent calls. This host also cold-resumes an agent automatically when input is sent to it.',
-    parameters: { id: { type: 'string', required: true, description: 'Exact agent_id returned by spawn_agent.' } },
+    description: 'Resume a previously closed agent by id so it can receive send_input and wait_agent calls.',
+    parameters: { id: { type: 'string', required: true, description: 'Agent id to resume.' } },
     output: {
       schema: {
         type: 'object',
@@ -2719,8 +2794,11 @@ function registerAgents(ctx) {
     },
     async execute(args, exec) {
       const parent = agentOf(exec)
-      const rows = await directChildren(ctx, parent, exec.signal)
-      if (!rows.some(row => row.id === args.id)) return { status: 'not_found' }
+      const known = knownAgentIds.has(args.id) || settlements.has(args.id)
+      if (!known) {
+        const rows = await directChildren(ctx, parent, exec.signal, [args.id])
+        if (!rows.some(row => row.id === args.id)) return { status: 'not_found' }
+      }
       closedAgents.delete(args.id)
       const live = ctx.agents.get(args.id)
       return { status: live?.status === 'running' ? 'running' : { completed: null } }
@@ -2732,8 +2810,8 @@ function registerAgents(ctx) {
     // Upstream text: multi_agents_spec.rs wait_agent V1.
     description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status.",
     parameters: {
-      targets: { type: 'array', required: true, items: { type: 'string' }, description: 'Exact agent_id values returned by spawn_agent. Multiple ids wait for whichever finishes first.' },
-      timeout_ms: { type: 'number', description: 'Timeout in milliseconds. Defaults to 30000; minimum 10000; maximum 3600000.' },
+      targets: { type: 'array', required: true, items: { type: 'string' }, description: 'Agent ids to wait on. Pass multiple ids to wait for whichever finishes first.' },
+      timeout_ms: { type: 'number', description: 'Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000. Prefer longer waits (minutes) to avoid busy polling.' },
     },
     output: {
       schema: {
@@ -2743,9 +2821,10 @@ function registerAgents(ctx) {
           status: {
             type: 'object',
             required: true,
+            description: 'Final statuses keyed by agent id.',
             additionalProperties: true,
           },
-          timed_out: { type: 'boolean', required: true },
+          timed_out: { type: 'boolean', required: true, description: 'Whether the wait call returned due to timeout before any agent reached a final status.' },
         },
       },
       ...renderJsonOutput('Agent status'),
@@ -2766,8 +2845,12 @@ function registerAgents(ctx) {
       const timeoutMs = requestedTimeout === undefined
         ? AGENT_WAIT_DEFAULT_MS
         : Math.min(AGENT_WAIT_MAX_MS, Math.max(AGENT_WAIT_MIN_MS, requestedTimeout))
-      const rows = await directChildren(ctx, parent, exec.signal)
-      const known = new Set(rows.map(row => row.id))
+      const known = new Set(args.targets.filter(target => knownAgentIds.has(target) || settlements.has(target)))
+      const unresolved = args.targets.filter(target => !known.has(target))
+      if (unresolved.length > 0) {
+        const rows = await directChildren(ctx, parent, exec.signal, unresolved)
+        for (const row of rows) known.add(row.id)
+      }
       const unknown = args.targets.filter(target => !known.has(target))
       if (unknown.length > 0) {
         return { status: Object.fromEntries(unknown.map(target => [target, 'not_found'])), timed_out: false }
@@ -2801,13 +2884,19 @@ function registerAgents(ctx) {
     name: 'multi_agent_v1__close_agent',
     // Upstream phrasing (multi_agents_spec.rs close_agent V1) with this
     // host's durable-session fact kept explicit.
-    description: "Close an agent and its current turn when it is no longer needed, and return its previous status before shutdown was requested. Don't keep agents open for too long if they are not needed anymore; a later send_input to the same id resumes its durable session.",
-    parameters: { target: { type: 'string', required: true, description: 'Exact agent_id returned by spawn_agent.' } },
+    description: "Close an agent and any open descendants when they are no longer needed, and return the target agent's previous status before shutdown was requested. Completed agents remain open and count toward the concurrency limit until closed. Don't keep agents open for too long if they are not needed anymore.",
+    parameters: { target: { type: 'string', required: true, description: 'Agent id to close (from spawn_agent).' } },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { previous_status: { ...agentStatusSchema(), required: true } },
+        properties: {
+          previous_status: {
+            ...agentStatusSchema(),
+            required: true,
+            description: 'The agent status observed before shutdown was requested.',
+          },
+        },
       },
       ...renderJsonOutput('Agent stopped'),
     },
@@ -2819,9 +2908,12 @@ function registerAgents(ctx) {
     },
     async execute(args, exec) {
       const parent = agentOf(exec)
-      const rows = await directChildren(ctx, parent, exec.signal)
-      if (!rows.some(row => row.id === args.target)) {
-        throw new Error(`unknown subagent "${args.target}"; use the exact agent_id returned by spawn_agent`)
+      const known = knownAgentIds.has(args.target) || settlements.has(args.target)
+      if (!known) {
+        const rows = await directChildren(ctx, parent, exec.signal, [args.target])
+        if (!rows.some(row => row.id === args.target)) {
+          throw new Error(`unknown subagent "${args.target}"; use the exact agent_id returned by spawn_agent`)
+        }
       }
       const previousStatus = visibleStatus(args.target, true)
       ctx.subagents.interrupt(args.target, { kind: 'ancestor', agent: parent })
@@ -2867,6 +2959,7 @@ export {
   boundedOutput,
   collabInputContent,
   collabPromptContent,
+  directChildren,
   filesystemElement,
   patchEnvironmentId,
   parsePatchOperations,
@@ -2881,4 +2974,5 @@ export {
   terminalOutputText,
   timeoutPromise,
   waitForTerminalOperation,
+  registerAgents,
 }

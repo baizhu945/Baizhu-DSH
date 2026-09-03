@@ -126,6 +126,7 @@ in
 
   imports = [
     ./skills.nix
+    ./tui.nix
     ./presets/codex/dsh-codex.nix
   ];
 
@@ -196,6 +197,7 @@ in
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval" \
       "$HOME/.dsh/profiles/web/node_modules/dsh-openai-account-ui" \
       "$HOME/.dsh/profiles/node_modules/@deepseek-ai"
+
     run install -m 644 ${./profiles/headless/plugins/cc-connect-startup.mjs} \
       "$HOME/.dsh/profiles/headless/plugins/cc-connect-startup.mjs"
     run install -m 644 ${./profiles/headless/plugins/cc-connect-runner.mjs} \

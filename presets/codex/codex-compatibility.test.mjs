@@ -32,6 +32,7 @@ import {
   applyHunks,
   collabInputContent,
   collabPromptContent,
+  directChildren,
   filesystemElement,
   outputFromOperation,
   outputTokenBudget,
@@ -43,6 +44,7 @@ import {
   pipeOutput,
   terminalOutputText,
   waitForTerminalOperation,
+  registerAgents,
 } from './codex-surface.mjs'
 import { apply as applyCodexWebSearch, parseResponseBody, parseResponseEnvelope, requestCodexSearchForTest, searchCommands } from './codex-web-search.mjs'
 import { apply as applyCodexPermissions, CODEX_PROFILES, commonDirectory, normalizePermissionRequest } from './codex-permissions.mjs'
@@ -557,6 +559,152 @@ test('Codex environment and never approval text retain official machine-readable
   const managed = filesystemElement({ mode: 'workspace-write', workspaceRoot: '/repo' })
   assert.match(managed, /<entry access="write"><path>\/repo<\/path><\/entry>/)
   assert.match(permissionInstructions({ mode: 'danger-full-access' }, 'never'), /`sandbox_permissions`/)
+})
+
+test('V1 collaboration target checks do not scan a conflicting global session catalog', async () => {
+  const parent = { session: { id: 'parent' } }
+  const child = {
+    session: {
+      header: {
+        id: 'child',
+        parentSession: 'parent',
+        origin: 'subagent',
+        seedLength: 1,
+      },
+    },
+  }
+  let listed = false
+  const ctx = {
+    agents: { get: id => id === 'child' ? child : undefined },
+    get: name => name === 'sessionProjections' ? {
+      snapshot: () => ({ values: { subagent: { mode: 'continuable', label: 'task', seq: 1 } } }),
+    } : undefined,
+    subagents: {
+      listChildren: async () => {
+        listed = true
+        throw new Error('global catalog must not be read')
+      },
+    },
+  }
+  const rows = await directChildren(ctx, parent, new AbortController().signal, ['child'])
+  assert.deepEqual(rows.map(row => row.id), ['child'])
+  assert.equal(listed, false)
+})
+
+test('V1 collaboration target checks point-read cold children', async () => {
+  const parent = { session: { id: 'parent' } }
+  let disposed = false
+  const observation = {
+    header: {
+      id: 'cold-child',
+      parentSession: 'parent',
+      origin: 'subagent',
+      seedLength: 1,
+    },
+    projections: { values: { subagent: { mode: 'continuable', label: 'cold task', seq: 1 } } },
+    [Symbol.dispose]() { disposed = true },
+  }
+  let listed = false
+  const ctx = {
+    agents: { get: () => undefined },
+    get: name => name === 'sessionQuery' ? {
+      observeSession: async () => observation,
+    } : undefined,
+    subagents: {
+      listChildren: async () => {
+        listed = true
+        throw new Error('global catalog must not be read')
+      },
+    },
+  }
+  const rows = await directChildren(ctx, parent, new AbortController().signal, ['cold-child'])
+  assert.deepEqual(rows.map(row => row.id), ['cold-child'])
+  assert.equal(rows[0].activity, 'inactive')
+  assert.equal(disposed, true)
+  assert.equal(listed, false)
+})
+
+test('V1 send_input matches Codex and sends immediately after spawn', async () => {
+  const registrations = []
+  const parent = { id: 'parent', session: { id: 'parent', header: { id: 'parent' } } }
+  let followed
+  const ctx = {
+    on: () => undefined,
+    tools: { register: tool => registrations.push(tool) },
+    agents: { get: () => undefined },
+    get: () => undefined,
+    subagents: {
+      list: () => [],
+      listChildren: async () => { throw new Error('send_input must not scan the global catalog') },
+      interrupt: () => undefined,
+      followup: async (...args) => {
+        followed = args
+        return 'submission-id'
+      },
+    },
+  }
+  registerAgents(ctx)
+  const tool = registrations.find(item => item.name === 'multi_agent_v1__send_input')
+  assert.ok(tool)
+  assert.equal(tool.parameters.properties.target.description, 'Agent id to message (from spawn_agent).')
+  assert.equal(tool.parameters.properties.message.description, 'Legacy plain-text message to send to the agent. Use either message or items.')
+  assert.equal(tool.parameters.properties.items.description, 'Structured input items. Use this to pass explicit mentions (for example app:// connector paths).')
+  assert.equal(tool.parameters.properties.items.items.properties.path.description, 'Path when type is local_image/local_audio/skill, or structured mention target such as app://<connector-id> or plugin://<plugin-name>@<marketplace-name> when type is mention.')
+  assert.equal(tool.parameters.properties.interrupt.description, 'True interrupts the current task and handles this message immediately; false or omitted queues it.')
+  const waitTool = registrations.find(item => item.name === 'multi_agent_v1__wait_agent')
+  assert.deepEqual(waitTool.output.render({}, { status: { 'a-b-c': 'not_found' }, timed_out: false }), [
+    { type: 'text', text: '{"status":{"a-b-c":"not_found"},"timed_out":false}' },
+  ])
+  const result = await tool.execute(
+    { target: 'child-id', message: 'continue the task' },
+    { agent: parent, signal: new AbortController().signal },
+  )
+  assert.deepEqual(result, { submission_id: 'submission-id' })
+  assert.equal(followed[0], parent)
+  assert.equal(followed[1], 'child-id')
+  assert.deepEqual(followed[2], [{ type: 'text', text: 'continue the task' }])
+})
+
+test('V1 lifecycle controls use an established child without a catalog race', async () => {
+  const registrations = []
+  const parent = { id: 'parent', session: { id: 'parent', header: { id: 'parent' } } }
+  const child = {
+    id: 'child-id',
+    status: 'idle',
+    session: { id: 'child-id', header: { id: 'child-id', parentSession: 'parent', origin: 'subagent' } },
+  }
+  let live = false
+  let globalCatalogCalls = 0
+  const ctx = {
+    on: () => undefined,
+    tools: { register: tool => registrations.push(tool) },
+    agents: { get: id => live && id === 'child-id' ? child : undefined },
+    get: () => undefined,
+    subagents: {
+      list: () => ['spawn'],
+      listChildren: async () => {
+        globalCatalogCalls += 1
+        throw new Error('lifecycle controls must not scan the global catalog')
+      },
+      startContinuable: async () => {
+        live = true
+        return { childId: 'child-id' }
+      },
+      followup: async () => 'unused',
+      interrupt: () => undefined,
+    },
+  }
+  registerAgents(ctx)
+  const tool = name => registrations.find(item => item.name === name)
+  const execution = { agent: parent, signal: new AbortController().signal }
+  await tool('multi_agent_v1__spawn_agent').execute({ message: 'task' }, execution)
+  const waited = await tool('multi_agent_v1__wait_agent').execute({ targets: ['child-id'], timeout_ms: 1 }, execution)
+  const closed = await tool('multi_agent_v1__close_agent').execute({ target: 'child-id' }, execution)
+  const resumed = await tool('multi_agent_v1__resume_agent').execute({ id: 'child-id' }, execution)
+  assert.deepEqual(waited, { status: { 'child-id': { completed: null } }, timed_out: false })
+  assert.deepEqual(closed, { previous_status: { completed: null } })
+  assert.deepEqual(resumed, { status: { completed: null } })
+  assert.equal(globalCatalogCalls, 0)
 })
 
 test('search tool routing matches Responses Lite capability boundaries', () => {

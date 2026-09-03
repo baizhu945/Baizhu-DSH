@@ -1,0 +1,185 @@
+diff --git a/cordis.patch.yml b/cordis.patch.yml
+--- a/cordis.patch.yml
++++ b/cordis.patch.yml
+@@ -385,9 +385,8 @@
+         # Edit/Write diff 呈现：auto（≥110 列双栏对照，窄屏统一式）/
+         # split（强制双栏）/ unified（强制统一式）。/settings 屏可实时改。
+         # diffLayout: auto
+-        # 每个请求实际生效的推理强度，按当前路由的 adapter 档位校验
+-        #（deepseek: off/low/high/max）；非法值回落 adapter 默认。
+-        effort: max
++        # Leave effort unset so the adapter default is used on first launch and
++        # the TUI's persisted /effort choice can win on later launches.
+         # Shift+Tab session-mode cycle (array order IS the cycle order;
+         # absent → the built-in default/plan/full trio below). Each entry
+         # may declare any subset of the plan (on/off), sandbox (read-only/
+diff --git a/cordis.yml b/cordis.yml
+--- a/cordis.yml
++++ b/cordis.yml
+@@ -61,11 +61,8 @@
+     # wl-copy/xclip/xsel 兜底）、滚轮滚动、双击选词/三击选行。false 则退回
+     # inline 渲染, 鼠标交给终端模拟器原生选择。
+     fullscreen: true
+-    # Reasoning effort applied to every request, validated against the live
+-    # route's adapter levels. An unlisted level falls back to the adapter
+-    # default; this wins over the persisted /effort choice and seeds the
+-    # startup header/statusline.
+-    effort: max
++    # Leave effort unset so the adapter default is used on first launch and
++    # the TUI's persisted /effort choice can win on later launches.
+     # Shift+Tab 会话模式循环（数组顺序即循环顺序；缺省为下面三档）。
+     # 每档可声明 plan（计划模式开/关）、sandbox（read-only/
+     # workspace-write/danger-full-access）、approval（ask/never）三个
+diff --git a/src/dsh-adapter/channel.ts b/src/dsh-adapter/channel.ts
+--- a/src/dsh-adapter/channel.ts
++++ b/src/dsh-adapter/channel.ts
+@@ -64,6 +64,7 @@ import {
+ import { writeActivityFrames } from '../activityPrefs.js'
+ import { isPathLikeQuery, rankFileCandidates, type FileCandidate } from '../utils/fileSuggestions.js'
+ import { readEffortPref, writeEffortPref } from '../effortPrefs.js'
++import { readPermissionPref, writePermissionPref } from '../permissionPrefs.js'
+ import { readModelPref, writeModelPref } from '../modelPrefs.js'
+ import { explicitModelRoute, recordedModelRoute, resolveModelRoute, validateModelRoute } from '../modelRoute.js'
+ import type { OAuthProviderStatus, OAuthSetupHost, ProfilePathOp, ProviderSetupHost } from './providerWizard.js'
+@@ -201,6 +202,7 @@ type PermissionPresetService = {
+   names?: unknown
+   current?: (events: readonly SessionEvent[]) => unknown
+   optionOf?: (name: string) => unknown
++  set?: (session: { events: readonly SessionEvent[] }, name: string) => void
+ }
+ 
+ function isRecord(value: unknown): value is Record<string, unknown> {
+@@ -2012,6 +2014,9 @@ export function createChannel(
+     configuredActivityFrames?: string
+     /** The preset the initial agent's session runs under (from resolveAgent). */
+     agentPreset?: string
++    /** Apply the persisted permission preset to a brand-new session; resumed
++     *  sessions keep the permission events recorded in their own history. */
++    freshSession?: boolean
+     /** Shift+Tab session-mode cycle from cordis.yml `modes`; undefined →
+      *  the built-in default/plan/full cycle (sessionModes.ts). */
+     modes?: readonly SessionModeSpec[]
+@@ -2022,6 +2027,33 @@ export function createChannel(
+   let agent = initialAgent
+   let currentHandle: AgentHandle | undefined = options.handle
+   const themeHost = getHostThemes(ctx.get('tuiThemes') as TuiThemeRuntime | undefined)
++  let applyingPreferredPermission = false
++
++  /** Apply the last `/permission` choice only to fresh sessions. Resumed
++   *  sessions already carry their own durable permission events, while the
++   *  host service's `defaultPreset` is a deployment fallback rather than the
++   *  user's last interactive choice. */
++  const applyPreferredPermission = (target: Agent, freshSession = false): void => {
++    if (options.freshSession !== true && !freshSession) return
++    const preferred = readPermissionPref()
++    if (preferred === undefined) return
++    let service: PermissionPresetService | undefined
++    try {
++      service = ctx.get('permissionPresets') as PermissionPresetService | undefined
++    } catch {
++      return
++    }
++    if (!Array.isArray(service?.names) || !service.names.includes(preferred) || typeof service.set !== 'function') return
++    applyingPreferredPermission = true
++    try {
++      service.set(target.session, preferred)
++    } catch {
++      // A stale preset or an unavailable host writer must not prevent boot;
++      // the service's configured default remains in force for this session.
++    } finally {
++      applyingPreferredPermission = false
++    }
++  }
+ 
+   // ── agent view (CC's `claude agents`) internal state ──────────────────────
+   // Handles of background sessions this channel dispatched or backgrounded.
+@@ -5247,6 +5279,7 @@ export function createChannel(
+       const previousSessionId = String(agent.session.id)
+       agent = handle.agent
+       currentHandle = handle
++      applyPreferredPermission(agent, true)
+       bindAgent()
+       refreshCommandList()
+       void refreshLoadedContext()
+@@ -8516,6 +8549,10 @@ ${output}
+         // Mode-affecting atoms fold into the Shift+Tab mode indicator the
+         // moment they land (whether appended by cycleMode or by hand).
+         const eventType = (event as { type: string }).type
++        if (eventType === 'permission/preset' && !applyingPreferredPermission) {
++          const preset = (event.data as unknown as { preset?: unknown }).preset
++          if (typeof preset === 'string' && preset.trim() !== '') writePermissionPref(preset)
++        }
+         if (eventType === 'plan/mode' || eventType === 'sandbox/mode' || eventType === 'approval/policy') {
+           refreshMode()
+         }
+@@ -8619,6 +8656,7 @@ ${output}
+       model: state.model,
+     }
+   })
++  applyPreferredPermission(agent)
+   bindAgent()
+   // Cordis owns the Channel lifetime. Rebinding handles the common case;
+   // this effect closes the final timer when the Channel's context unloads.
+diff --git a/src/dsh-adapter/plugin.ts b/src/dsh-adapter/plugin.ts
+--- a/src/dsh-adapter/plugin.ts
++++ b/src/dsh-adapter/plugin.ts
+@@ -521,6 +521,9 @@ export async function startTui(
+     // persisted `/preset` choice; undefined adopts the roster default.
+     configuredPreset: config.preset,
+     agentPreset,
++    // Only a newly created launch session may adopt the last interactive
++    // permission choice; --resume must keep the session's own durable state.
++    freshSession: launchSessionId === undefined,
+     // Shift+Tab session-mode cycle (undefined → the built-in default/
+     // plan/full cycle in sessionModes.ts).
+     modes: config.modes,
+diff --git a/src/permissionPrefs.ts b/src/permissionPrefs.ts
+new file mode 100644
+--- /dev/null
++++ b/src/permissionPrefs.ts
+@@ -0,0 +1,45 @@
++/**
++ * Persisted permission-preset preference (`~/.dsh-tui/permission.json`). The
++ * selected preset is a user default for fresh sessions; resumed sessions keep
++ * the permission events recorded in their own history. The file is best
++ * effort: a missing, corrupt, or no-longer-advertised preset falls back to
++ * the host's configured permission default.
++ */
++
++import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
++import { join } from 'node:path'
++import { DATA_DIR } from './utils/paths.js'
++
++const PREFS_DIR = DATA_DIR
++
++/**
++ * Read the persisted permission-preset id, or undefined when unset/invalid.
++ * @param dir - Preferences directory (injectable for tests).
++ * @returns The stored preset id, if present.
++ */
++export function readPermissionPref(dir: string = PREFS_DIR): string | undefined {
++  try {
++    const parsed: unknown = JSON.parse(readFileSync(join(dir, 'permission.json'), 'utf8'))
++    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
++    const preset = (parsed as Record<string, unknown>).preset
++    return typeof preset === 'string' && preset.trim() !== '' ? preset : undefined
++  } catch {
++    return undefined
++  }
++}
++
++/**
++ * Persist the selected permission-preset id (best effort).
++ * @param preset - Host-advertised preset id to persist.
++ * @param dir - Prefs directory (injectable for tests).
++ * @returns True when the file was written, false on failure.
++ */
++export function writePermissionPref(preset: string, dir: string = PREFS_DIR): boolean {
++  try {
++    mkdirSync(dir, { recursive: true })
++    writeFileSync(join(dir, 'permission.json'), JSON.stringify({ preset }, null, 2))
++    return true
++  } catch {
++    return false
++  }
++}
