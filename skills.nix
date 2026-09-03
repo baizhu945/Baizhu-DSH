@@ -25,8 +25,6 @@ let
   superpowers-repo = builtins.fetchGit {
     url = "https://github.com/obra/superpowers.git";
     ref = "main";
-    # rev = "b36e0829c6d0140e93cfef2ca599b1b07d4a7797"; # 2026-08-12
-    # narHash = "sha256-EsGNO0dULWf5Bx6bGrCv2kI2Z8aKH0kRvGiuN23wChQ=";
   };
 in
 {

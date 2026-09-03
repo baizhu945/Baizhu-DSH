@@ -1,84 +1,46 @@
 /**
  * Provider-independent web search for the normal DSH Web profile.
  *
- * The shipped `web-search-deepseek` provider sends the chat model's
- * DEEPSEEK_API_KEY to a separate Anthropic Messages endpoint. That couples a
- * model-facing tool to one vendor and makes a non-DeepSeek chat route fail.
- * This provider keeps the model-facing `web_search` tool unchanged. The normal
- * Web profile always uses its local SearXNG Bing route, so search does not
- * depend on the selected chat model or that model vendor's search feature.
- * Exa MCP and Tavily remain outage fallbacks. Bing RSS is deliberately not
- * used: its RSS endpoint can return a successful but unrelated result set for
- * Chinese queries, which must never be treated as a valid search hit.
+ * This is the DSH adapter for OpenCode's local web-search design. The model
+ * still calls DSH's native `web_search` tool; this plugin only implements the
+ * provider behind `ctx.web`. Search is therefore independent of the chat
+ * provider and never sends the selected model's API key to a second vendor.
  *
- * This is intentionally a dependency-free host plugin. The only dsh import is
- * the provider-neutral WebError type, resolved from the same runtime tree as
- * the built-in web packages.
+ * OpenCode selects one provider per session and calls its MCP HTTP endpoint:
+ * Exa's `web_search_exa` or Parallel's `web_search`. Both endpoints work
+ * without a key. Optional EXA_API_KEY/PARALLEL_API_KEY values are forwarded in
+ * the same way as OpenCode when the user supplies them.
  */
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { WebError } from '@deepseek-ai/dsh-web'
 
 export const name = 'dsh-web-search-keyless'
-export const inject = ['web', 'credentials', 'agents', 'settings']
+export const inject = ['web', 'agents']
 export const PROVIDER_ID = 'simple-search'
 
-const TAVILY_SEARCH_URL = 'https://api.tavily.com/search'
-const OPENAI_RESPONSES_URL = 'https://api.openai.com/v1/responses'
-const OPENAI_SEARCH_MODEL = 'gpt-4.1-mini'
-const OPENAI_PROVIDER_ID = 'openai'
-const LLM_PI_AI_SETTINGS = 'llm-pi-ai'
-const MIMO_PROVIDER_ID = 'xiaomi'
-const MIMO_DEFAULT_BASE_URL = 'https://api.xiaomimimo.com/v1'
-const MIMO_SEARCH_MODELS = new Set(['mimo-v2.5', 'mimo-v2.5-pro'])
-const SEARXNG_SEARCH_URL = 'http://127.0.0.1:8765/search'
-const EXA_MCP_URL = 'https://mcp.exa.ai/mcp?tools=web_search_exa'
-const EXA_MCP_TOOL = 'web_search_exa'
-// The dsh-tool-web search call has its own deadline. Keep backend attempts
-// shorter so a slow optional backend can fall through to Bing before the
-// model-facing tool is cancelled by its outer deadline.
-const SEARCH_TIMEOUT_MS = 10_000
-const DEFAULT_MAX_RESULTS = 5
+export const EXA_MCP_URL = 'https://mcp.exa.ai/mcp'
+export const PARALLEL_MCP_URL = 'https://search.parallel.ai/mcp'
+export const EXA_PROVIDER = 'exa'
+export const PARALLEL_PROVIDER = 'parallel'
+
+const DEFAULT_MAX_RESULTS = 8
 const MAX_RESULTS = 20
-const MAX_ERROR_CHARS = 240
+const SEARCH_TIMEOUT_MS = 25_000
+const MAX_RESPONSE_BYTES = 256 * 1024
+const MAX_ERROR_BYTES = 32 * 1024
 const MAX_SNIPPET_CHARS = 4_000
-const MAX_ANSWER_CHARS = 8_000
-
-/**
- * A custom endpoint is useful for a self-hosted Tavily-compatible gateway, but
- * the built-in endpoint is pinned above so a copied configuration remains
- * reproducible and zero-config.
- */
-function searchEndpoint() {
-  const configured = process.env.DSH_WEB_SEARCH_ENDPOINT?.trim()
-  const value = configured === undefined || configured === '' ? TAVILY_SEARCH_URL : configured
-  try {
-    const url = new URL(value)
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
-    if (url.username !== '' || url.password !== '') return undefined
-    return url.toString()
-  } catch {
-    return undefined
-  }
-}
-
-function maxResults(value) {
-  if (!Number.isFinite(value)) return DEFAULT_MAX_RESULTS
-  return Math.max(1, Math.min(MAX_RESULTS, Math.floor(value)))
-}
-
-function requestSignal(signal) {
-  const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS)
-  return signal === undefined ? timeout : AbortSignal.any([signal, timeout])
-}
-
-function isAborted(error, signal) {
-  return signal?.aborted === true
-    || error?.code === 'WEB_ABORTED'
-}
+const MAX_CONTENT_CHARS = 50_000
+const USER_AGENT = 'deepseek-harness/0.1.2-alpha.3'
 
 function errorText(error) {
   const text = error instanceof Error ? error.message : String(error)
-  return text.replaceAll(/\s+/g, ' ').trim().slice(0, MAX_ERROR_CHARS)
+  return text.replaceAll(/\s+/g, ' ').trim().slice(0, 240)
+}
+
+function optionalText(value, maxChars = MAX_SNIPPET_CHARS) {
+  if (typeof value !== 'string') return undefined
+  const text = value.trim()
+  if (text === '') return undefined
+  return text.length > maxChars ? `${text.slice(0, maxChars - 3)}...` : text
 }
 
 function sourceUrl(value) {
@@ -92,53 +54,44 @@ function sourceUrl(value) {
   }
 }
 
-function optionalText(value, maxChars = MAX_SNIPPET_CHARS) {
-  if (typeof value !== 'string') return undefined
-  const text = value.trim()
-  if (text === '') return undefined
-  return text.length > maxChars ? `${text.slice(0, maxChars - 3)}...` : text
+function maxResults(value) {
+  if (!Number.isFinite(value)) return DEFAULT_MAX_RESULTS
+  return Math.max(1, Math.min(MAX_RESULTS, Math.floor(value)))
 }
 
-function withStatus(error, statusCode) {
-  error.statusCode = statusCode
-  return error
+function isTruthy(name) {
+  return /^(1|true|yes|on)$/i.test(process.env[name]?.trim() ?? '')
 }
 
-function statusCodeOf(error) {
-  return typeof error?.statusCode === 'number' ? error.statusCode : undefined
-}
-
-function shouldFallback(error) {
-  if (isAborted(error)) return false
-  const status = statusCodeOf(error)
-  return status === undefined || status === 408 || status === 429 || status >= 500
-}
-
-function hasExplicitTavilyRoute() {
-  return (process.env.TAVILY_API_KEY?.trim() ?? '') !== ''
-    || (process.env.DSH_WEB_SEARCH_ENDPOINT?.trim() ?? '') !== ''
-}
-
-function openAiEndpoint(baseURL) {
-  const configured = process.env.DSH_WEB_SEARCH_OPENAI_ENDPOINT?.trim()
-  const value = configured === undefined || configured === '' ? baseURL ?? OPENAI_RESPONSES_URL : configured
-  try {
-    const url = new URL(value)
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
-    if (url.username !== '' || url.password !== '') return undefined
-    const path = url.pathname.replace(/\/+$/, '')
-    if (!path.endsWith('/responses')) {
-      url.pathname = path === '' || path === '/' ? '/v1/responses' : `${path}/responses`
-    }
-    return url.toString()
-  } catch {
-    return undefined
+function checksum(value) {
+  if (typeof value !== 'string' || value === '') return undefined
+  // This is OpenCode's checksum implementation: FNV-1a over UTF-16 code
+  // units, rendered in base36. Keeping it identical makes provider choice
+  // stable for a resumed session and comparable across the two applications.
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
   }
+  return (hash >>> 0).toString(36)
 }
 
-function openAiModel() {
-  const configured = process.env.DSH_WEB_SEARCH_OPENAI_MODEL?.trim()
-  return configured === undefined || configured === '' ? OPENAI_SEARCH_MODEL : configured
+/** Select the same stable, provider-independent route as OpenCode. */
+export function selectSearchProvider(sessionId) {
+  const override = process.env.DSH_WEB_SEARCH_BACKEND?.trim()
+    || process.env.OPENCODE_WEBSEARCH_PROVIDER?.trim()
+  if (override === EXA_PROVIDER || override === PARALLEL_PROVIDER) return override
+
+  if (isTruthy('DSH_WEB_SEARCH_PREFER_PARALLEL')
+    || isTruthy('OPENCODE_ENABLE_PARALLEL')
+    || isTruthy('OPENCODE_EXPERIMENTAL_PARALLEL')) return PARALLEL_PROVIDER
+  if (isTruthy('DSH_WEB_SEARCH_PREFER_EXA')
+    || isTruthy('OPENCODE_ENABLE_EXA')
+    || isTruthy('OPENCODE_EXPERIMENTAL_EXA')) return EXA_PROVIDER
+
+  return Number.parseInt(checksum(sessionId) ?? '0', 36) % 2 === 0
+    ? EXA_PROVIDER
+    : PARALLEL_PROVIDER
 }
 
 function activeAgent(ctx) {
@@ -149,126 +102,205 @@ function activeAgent(ctx) {
   }
 }
 
-function activeAgentRoute(ctx) {
+function activeSessionContext(ctx) {
   const agent = activeAgent(ctx)
-  if (agent === undefined) return undefined
-  // Agent.options is only the creation-time default. Once a session has
-  // selected a model, dsh records the exact assembled route in its request
-  // header; this is the same route that produced the current tool call.
-  const routed = agent.session?.requestHeader?.()?.config
-  const provider = routed?.provider ?? agent.options?.provider
-  const model = routed?.model ?? agent.options?.model
-  return typeof provider === 'string' && provider !== '' ? { provider, model } : undefined
-}
-
-function activeOpenAiProfile(ctx) {
-  const route = activeAgentRoute(ctx)
-  if (route?.provider !== OPENAI_PROVIDER_ID) return undefined
-  let settings
+  const sessionId = typeof agent?.id === 'string' && agent.id !== '' ? agent.id : 'dsh-anonymous'
+  let route = agent?.options
   try {
-    settings = ctx.get('settings')?.get(LLM_PI_AI_SETTINGS)
+    route = agent?.session?.requestHeader?.()?.config ?? route
   } catch {
-    settings = undefined
+    // An agentless/direct seam call has no request header; use its defaults.
   }
-  const profile = settings?.providers?.[route.provider]
-  if (profile !== null && typeof profile === 'object' && profile.api !== undefined && profile.api !== 'openai-responses') {
-    return undefined
-  }
-  const apiKeyEnv = profile !== null && typeof profile === 'object' && typeof profile.apiKeyEnv === 'string'
-    && profile.apiKeyEnv.trim() !== '' ? profile.apiKeyEnv.trim() : 'OPENAI_API_KEY'
-  const baseURL = profile !== null && typeof profile === 'object' && typeof profile.baseURL === 'string'
-    && profile.baseURL.trim() !== '' ? profile.baseURL.trim() : undefined
-  return { apiKeyEnv, baseURL, model: route.model }
-}
-
-async function resolveApiKey(ctx, apiKeyEnv, signal) {
-  if (signal?.aborted === true) throw new WebError('web search aborted', 'WEB_ABORTED')
-  try {
-    const resolved = await ctx.get('credentials')?.resolve(credentialRef(apiKeyEnv))
-    const value = resolved?.value?.trim()
-    if (value !== undefined && value !== '') return value
-  } catch {
-    // A missing/unavailable credential service only disables this optional route.
-  }
-  const ambient = process.env[apiKeyEnv]?.trim()
-  return ambient === undefined || ambient === '' ? undefined : ambient
-}
-
-async function activeOpenAiRoute(ctx, signal) {
-  const profile = activeOpenAiProfile(ctx)
-  if (profile === undefined) return undefined
-  const apiKey = await resolveApiKey(ctx, profile.apiKeyEnv, signal)
-  const endpoint = openAiEndpoint(profile.baseURL)
-  if (apiKey === undefined || endpoint === undefined) return undefined
-  return { apiKey, endpoint, model: openAiModel() }
-}
-
-function chatCompletionsEndpoint(baseURL) {
-  const value = baseURL ?? MIMO_DEFAULT_BASE_URL
-  try {
-    const url = new URL(value)
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
-    if (url.username !== '' || url.password !== '') return undefined
-    const path = url.pathname.replace(/\/+$/, '')
-    if (!path.endsWith('/chat/completions')) {
-      url.pathname = path === '' || path === '/' ? '/v1/chat/completions' : `${path}/chat/completions`
-    }
-    return url.toString()
-  } catch {
-    return undefined
+  return {
+    sessionId,
+    ...typeof route?.model === 'string' && route.model !== '' ? { modelName: route.model } : {},
   }
 }
 
-function activeMimoProfile(ctx) {
-  const route = activeAgentRoute(ctx)
-  if (route?.provider !== MIMO_PROVIDER_ID || !MIMO_SEARCH_MODELS.has(route.model)) return undefined
-  let settings
-  try {
-    settings = ctx.get('settings')?.get(LLM_PI_AI_SETTINGS)
-  } catch {
-    settings = undefined
-  }
-  const profile = settings?.providers?.[MIMO_PROVIDER_ID]
-  if (profile !== null && typeof profile === 'object' && profile.api !== undefined && profile.api !== 'openai-completions') {
-    return undefined
-  }
-  const apiKeyEnv = profile !== null && typeof profile === 'object' && typeof profile.apiKeyEnv === 'string'
-    && profile.apiKeyEnv.trim() !== '' ? profile.apiKeyEnv.trim() : 'XIAOMI_API_KEY'
-  const baseURL = profile !== null && typeof profile === 'object' && typeof profile.baseURL === 'string'
-    && profile.baseURL.trim() !== '' ? profile.baseURL.trim() : undefined
-  return { apiKeyEnv, baseURL, model: route.model }
-}
-
-async function activeMimoRoute(ctx, signal) {
-  const profile = activeMimoProfile(ctx)
-  if (profile === undefined) return undefined
-  const apiKey = await resolveApiKey(ctx, profile.apiKeyEnv, signal)
-  const endpoint = chatCompletionsEndpoint(profile.baseURL)
-  if (apiKey === undefined || endpoint === undefined) return undefined
-  return { apiKey, endpoint, model: profile.model }
-}
-
-function cleanSourceUrl(value) {
-  const rawUrl = sourceUrl(value)
-  if (rawUrl === undefined) return undefined
-  const url = new URL(rawUrl)
-  if (url.searchParams.get('utm_source') === 'openai') url.searchParams.delete('utm_source')
+function exaUrl() {
+  const url = new URL(EXA_MCP_URL)
+  const apiKey = process.env.EXA_API_KEY?.trim()
+  if (apiKey !== undefined && apiKey !== '') url.searchParams.set('exaApiKey', apiKey)
   return url.toString()
 }
 
-function citationSnippet(text, start, end) {
-  if (typeof text !== 'string' || text === '' || typeof start !== 'number' || typeof end !== 'number') return ''
-  const snippet = text.slice(Math.max(0, start - 120), Math.min(text.length, end + 120))
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .trim()
-  return snippet.length > 300 ? `${snippet.slice(0, 297)}...` : snippet
+function parallelHeaders() {
+  const headers = { 'User-Agent': USER_AGENT }
+  const apiKey = process.env.PARALLEL_API_KEY?.trim()
+  return apiKey === undefined || apiKey === ''
+    ? headers
+    : { ...headers, Authorization: `Bearer ${apiKey}` }
 }
 
-function addOpenAiSource(sources, byUrl, rawUrl, rawTitle, rawSnippet, rawPublishedAt) {
-  const url = cleanSourceUrl(rawUrl)
+function jsonRpcRequest(tool, args) {
+  return {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: { name: tool, arguments: args },
+  }
+}
+
+/**
+ * Parse the MCP response shape used by OpenCode. Exa normally answers as SSE,
+ * while Parallel normally answers as one JSON document; accepting both is
+ * important because either endpoint may switch transports at the edge.
+ */
+export function parseMcpResponse(body) {
+  function parsePayload(payload) {
+    const trimmed = payload.trim()
+    if (!trimmed.startsWith('{')) return undefined
+    let parsed
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      return undefined
+    }
+    if (parsed?.error !== undefined) {
+      throw new Error(parsed.error?.message ?? 'MCP web search returned an error')
+    }
+    const content = parsed?.result?.content
+    if (!Array.isArray(content)) return undefined
+    return content.find(item => typeof item?.text === 'string' && item.text.trim() !== '')?.text
+  }
+
+  const direct = parsePayload(String(body).trim())
+  if (direct !== undefined) return direct
+
+  for (const line of String(body).split(/\r?\n/)) {
+    if (!line.startsWith('data: ')) continue
+    const data = parsePayload(line.slice(6))
+    if (data !== undefined) return data
+  }
+  return undefined
+}
+
+async function readBoundedText(response, maxBytes) {
+  if (response.body === null) {
+    const text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > maxBytes) {
+      throw new Error(`response exceeded ${maxBytes} bytes`)
+    }
+    return text
+  }
+
+  const reader = response.body.getReader()
+  const chunks = []
+  let total = 0
+  try {
+    while (true) {
+      const next = await reader.read()
+      if (next.done) break
+      total += next.value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel()
+        throw new Error(`response exceeded ${maxBytes} bytes`)
+      }
+      chunks.push(next.value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const bytes = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(bytes)
+}
+
+function requestSignal(parentSignal) {
+  const timeoutController = new AbortController()
+  const timer = setTimeout(() => timeoutController.abort(), SEARCH_TIMEOUT_MS)
+  const signal = parentSignal === undefined
+    ? timeoutController.signal
+    : AbortSignal.any([parentSignal, timeoutController.signal])
+  return {
+    signal,
+    timedOut: () => timeoutController.signal.aborted,
+    dispose: () => clearTimeout(timer),
+  }
+}
+
+function withStatus(error, statusCode) {
+  error.statusCode = statusCode
+  return error
+}
+
+async function responseDetail(response) {
+  try {
+    const text = await readBoundedText(response, MAX_ERROR_BYTES)
+    if (text.trim() === '') return `HTTP ${response.status}`
+    try {
+      const parsed = JSON.parse(text)
+      return optionalText(parsed?.error?.message ?? parsed?.message ?? parsed?.detail, 240)
+        ?? `HTTP ${response.status}`
+    } catch {
+      return `HTTP ${response.status}: ${text.replaceAll(/\s+/g, ' ').trim().slice(0, 240)}`
+    }
+  } catch {
+    return `HTTP ${response.status}`
+  }
+}
+
+async function callMcp({ url, tool, args, headers = {}, signal }) {
+  const request = requestSignal(signal)
+  try {
+    let response
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        redirect: 'error',
+        headers: {
+          accept: 'application/json, text/event-stream',
+          'content-type': 'application/json',
+          ...headers,
+        },
+        body: JSON.stringify(jsonRpcRequest(tool, args)),
+        signal: request.signal,
+      })
+    } catch (error) {
+      if (signal?.aborted === true) {
+        throw new WebError('web search aborted', 'WEB_ABORTED', { cause: error })
+      }
+      if (request.timedOut()) {
+        throw new WebError(`${tool} request timed out after ${SEARCH_TIMEOUT_MS / 1000} seconds`, 'WEB_PROVIDER_ERROR', { cause: error })
+      }
+      throw new WebError(`${tool} search request failed: ${errorText(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+    }
+
+    if (!response.ok) {
+      throw withStatus(
+        new WebError(`${tool} search failed: ${await responseDetail(response)}`, 'WEB_PROVIDER_ERROR'),
+        response.status,
+      )
+    }
+
+    const body = await readBoundedText(response, MAX_RESPONSE_BYTES)
+    const text = parseMcpResponse(body)
+    if (text === undefined) throw new Error('MCP response contained no text result')
+    return text
+  } catch (error) {
+    if (signal?.aborted === true) {
+      throw new WebError('web search aborted', 'WEB_ABORTED', { cause: error })
+    }
+    if (error instanceof WebError) throw error
+    if (request.timedOut()) {
+      throw new WebError(`${tool} request timed out after ${SEARCH_TIMEOUT_MS / 1000} seconds`, 'WEB_PROVIDER_ERROR', { cause: error })
+    }
+    throw new WebError(`${tool} search returned invalid content: ${errorText(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+  } finally {
+    request.dispose()
+  }
+}
+
+function addSource(sources, byUrl, rawUrl, rawTitle, rawSnippet, rawPublishedAt) {
+  const url = sourceUrl(rawUrl)
   if (url === undefined) return
   const title = optionalText(rawTitle, 500)
-  const snippet = optionalText(rawSnippet, 1_000)
+  const snippet = optionalText(rawSnippet)
   const publishedAt = optionalText(rawPublishedAt, 120)
   const existing = byUrl.get(url)
   if (existing !== undefined) {
@@ -287,531 +319,135 @@ function addOpenAiSource(sources, byUrl, rawUrl, rawTitle, rawSnippet, rawPublis
   sources.push(source)
 }
 
-function mapMimoResponse(payload) {
-  const root = payload !== null && typeof payload === 'object' ? payload : {}
-  const message = root.choices?.[0]?.message
-  const content = optionalText(message?.content ?? root.choices?.[0]?.content, MAX_ANSWER_CHARS)
+function result(sources, content) {
+  return {
+    ...content === undefined ? {} : { content },
+    sources,
+    truncated: false,
+  }
+}
+
+function labelledSection(block, label) {
+  const lines = block.split(/\r?\n/)
+  const index = lines.findIndex(line => line.trim() === `${label}:`)
+  if (index === -1) return undefined
+  const end = lines.slice(index + 1).findIndex(line => /^---\s*$/.test(line) || /^Title:\s/.test(line))
+  const body = end === -1 ? lines.slice(index + 1) : lines.slice(index + 1, index + 1 + end)
+  return body.join('\n').trim() || undefined
+}
+
+/** Convert Exa's textual MCP result into DSH's structured source shape. */
+export function mapExaText(text) {
   const sources = []
   const byUrl = new Map()
-  const annotations = message?.annotations ?? root.choices?.[0]?.annotations
-  if (Array.isArray(annotations)) {
-    for (const annotation of annotations) {
-      if (annotation === null || typeof annotation !== 'object') continue
-      addOpenAiSource(
-        sources,
-        byUrl,
-        annotation.url,
-        annotation.title ?? annotation.site_name,
-        annotation.summary,
-        annotation.publish_time,
-      )
-    }
-  }
-  if (content === undefined && sources.length === 0) {
-    throw new Error('MiMo web search returned no answer or sources')
-  }
-  return {
-    ...content === undefined ? {} : { content },
-    sources,
-    truncated: false,
-  }
-}
-
-function mapOpenAiResponse(payload) {
-  const root = payload !== null && typeof payload === 'object' ? payload : {}
-  const output = Array.isArray(root.output) ? root.output : []
-  const sources = []
-  const byUrl = new Map()
-  const answerParts = []
-
-  // Cited URLs in the answer come first and receive their title/snippet from
-  // the annotation; action.sources fills any remaining search results.
-  for (const item of output) {
-    if (item?.type !== 'message' || !Array.isArray(item.content)) continue
-    for (const part of item.content) {
-      if (typeof part?.text === 'string' && part.text.trim() !== '') answerParts.push(part.text)
-      if (!Array.isArray(part?.annotations)) continue
-      for (const annotation of part.annotations) {
-        if (annotation?.type !== 'url_citation') continue
-        addOpenAiSource(
-          sources,
-          byUrl,
-          annotation.url,
-          annotation.title,
-          citationSnippet(part.text, annotation.start_index, annotation.end_index),
-        )
-      }
-    }
-  }
-
-  for (const item of output) {
-    if (item?.type !== 'web_search_call') continue
-    const action = item.action
-    const groups = [action?.sources, item.sources, item.results]
-    for (const group of groups) {
-      if (!Array.isArray(group)) continue
-      for (const source of group) {
-        addOpenAiSource(
-          sources,
-          byUrl,
-          source?.url ?? source?.source_website_url,
-          source?.title ?? source?.caption,
-          source?.snippet ?? source?.description,
-        )
-      }
-    }
-  }
-
-  const content = optionalText(answerParts.join('\n').trim(), MAX_ANSWER_CHARS)
-  if (content === undefined && sources.length === 0) {
-    throw new Error('OpenAI web search returned no answer or sources')
-  }
-  return {
-    ...content === undefined ? {} : { content },
-    sources,
-    truncated: false,
-  }
-}
-
-async function searchOpenAi(request, signal, route) {
-  const endpoint = route.endpoint
-  if (endpoint === undefined) {
-    throw new WebError('DSH_WEB_SEARCH_OPENAI_ENDPOINT must be an HTTP(S) URL', 'WEB_PROVIDER_ERROR')
-  }
-
-  let response
-  try {
-    response = await fetch(endpoint, {
-      method: 'POST',
-      redirect: 'error',
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${route.apiKey}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: route.model,
-        instructions: 'Search the web and answer concisely using only current web results. Include source citations when available.',
-        input: [{ role: 'user', content: [{ type: 'input_text', text: request.query }] }],
-        tools: [{ type: 'web_search' }],
-        include: ['web_search_call.action.sources'],
-        store: false,
-        tool_choice: 'required',
-      }),
-      signal: requestSignal(signal),
-    })
-  } catch (error) {
-    if (isAborted(error, signal)) {
-      throw new WebError('web search aborted', 'WEB_ABORTED', { cause: error })
-    }
-    throw new WebError(`OpenAI web search request failed: ${errorText(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
-  }
-
-  if (!response.ok) {
-    let detail = `HTTP ${response.status}`
-    try {
-      const body = await response.text()
-      const parsed = JSON.parse(body)
-      detail = optionalText(parsed?.error?.message ?? parsed?.message, MAX_ERROR_CHARS) ?? detail
-    } catch {
-      // Keep the status as the stable diagnostic when the gateway body is not JSON.
-    }
-    throw withStatus(
-      new WebError(`OpenAI web search failed: ${detail}`, 'WEB_PROVIDER_ERROR'),
-      response.status,
-    )
-  }
-
-  try {
-    return mapOpenAiResponse(await response.json())
-  } catch (error) {
-    if (isAborted(error, signal)) {
-      throw new WebError('web search aborted', 'WEB_ABORTED', { cause: error })
-    }
-    throw new WebError(`OpenAI web search returned invalid content: ${errorText(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
-  }
-}
-
-async function searchMimo(request, signal, route) {
-  let response
-  try {
-    response = await fetch(route.endpoint, {
-      method: 'POST',
-      redirect: 'error',
-      headers: {
-        accept: 'application/json',
-        'api-key': route.apiKey,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: route.model,
-        messages: [{ role: 'user', content: request.query }],
-        tools: [{
-          type: 'web_search',
-          max_keyword: 3,
-          force_search: true,
-          limit: maxResults(request.maxResults),
-          user_location: { type: 'approximate', country: 'China' },
-        }],
-        max_completion_tokens: 2_048,
-        stream: false,
-        thinking: { type: 'disabled' },
-      }),
-      signal: requestSignal(signal),
-    })
-  } catch (error) {
-    if (isAborted(error, signal)) {
-      throw new WebError('web search aborted', 'WEB_ABORTED', { cause: error })
-    }
-    throw new WebError(`MiMo web search request failed: ${errorText(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
-  }
-
-  if (!response.ok) {
-    let detail = `HTTP ${response.status}`
-    try {
-      const body = await response.text()
-      const parsed = JSON.parse(body)
-      detail = optionalText(parsed?.error?.message ?? parsed?.message, MAX_ERROR_CHARS) ?? detail
-    } catch {
-      // Keep the status as the stable diagnostic when the gateway body is not JSON.
-    }
-    if (response.status === 400 && /webSearchEnabled\s+is\s+false/i.test(detail)) {
-      detail += '; enable MiMo Web Search in Console → Plugin Management'
-    }
-    throw withStatus(
-      new WebError(`MiMo web search failed: ${detail}`, 'WEB_PROVIDER_ERROR'),
-      response.status,
-    )
-  }
-
-  try {
-    return mapMimoResponse(await response.json())
-  } catch (error) {
-    if (isAborted(error, signal)) {
-      throw new WebError('web search aborted', 'WEB_ABORTED', { cause: error })
-    }
-    throw new WebError(`MiMo web search returned invalid content: ${errorText(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
-  }
-}
-
-/** Map Tavily's response to dsh-web's stable provider-neutral result shape. */
-export function mapTavilyResponse(payload) {
-  const root = payload !== null && typeof payload === 'object' ? payload : {}
-  const sources = []
-  const seen = new Set()
-  const hits = Array.isArray(root.results) ? root.results : []
-
-  for (const hit of hits) {
-    if (hit === null || typeof hit !== 'object') continue
-    const url = sourceUrl(hit.url)
-    if (url === undefined || seen.has(url)) continue
-    seen.add(url)
-    const title = optionalText(hit.title, 500)
-    const snippet = optionalText(hit.content)
-    const publishedAt = optionalText(hit.published_date, 120)
-    sources.push({
-      url,
-      ...title === undefined ? {} : { title },
-      ...snippet === undefined ? {} : { snippet },
-      ...publishedAt === undefined ? {} : { publishedAt },
-    })
-  }
-
-  const content = optionalText(root.answer, 8_000)
-  return {
-    ...content === undefined ? {} : { content },
-    sources,
-    truncated: false,
-  }
-}
-
-async function parseErrorResponse(response) {
-  try {
-    const body = await response.text()
-    if (body === '') return `HTTP ${response.status}`
-    try {
-      const parsed = JSON.parse(body)
-      const detail = parsed?.detail ?? parsed?.message ?? parsed?.error
-      return optionalText(detail, MAX_ERROR_CHARS) ?? `HTTP ${response.status}`
-    } catch {
-      return `HTTP ${response.status}: ${body.replaceAll(/\s+/g, ' ').slice(0, MAX_ERROR_CHARS)}`
-    }
-  } catch {
-    return `HTTP ${response.status}`
-  }
-}
-
-async function searchTavily(request, signal) {
-  const endpoint = searchEndpoint()
-  if (endpoint === undefined) {
-    throw new WebError('DSH_WEB_SEARCH_ENDPOINT must be an HTTP(S) URL', 'WEB_PROVIDER_ERROR')
-  }
-
-  const apiKey = process.env.TAVILY_API_KEY?.trim()
-  const headers = {
-    accept: 'application/json',
-    'content-type': 'application/json',
-    ...apiKey === undefined || apiKey === ''
-      ? { 'x-tavily-access-mode': 'keyless' }
-      : { authorization: `Bearer ${apiKey}` },
-  }
-
-  let response
-  try {
-    response = await fetch(endpoint, {
-      method: 'POST',
-      redirect: 'error',
-      headers,
-      body: JSON.stringify({
-        query: request.query,
-        search_depth: 'basic',
-        max_results: maxResults(request.maxResults),
-        include_answer: false,
-        include_raw_content: false,
-        include_images: false,
-      }),
-      signal: requestSignal(signal),
-    })
-  } catch (error) {
-    if (isAborted(error, signal)) {
-      throw new WebError('web search aborted', 'WEB_ABORTED', { cause: error })
-    }
-    throw new WebError(`web search request failed: ${errorText(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
-  }
-
-  if (!response.ok) {
-    const message = await parseErrorResponse(response)
-    throw withStatus(
-      new WebError(`web search failed: ${message}`, 'WEB_PROVIDER_ERROR'),
-      response.status,
-    )
-  }
-
-  try {
-    return mapTavilyResponse(await response.json())
-  } catch (error) {
-    if (isAborted(error, signal)) {
-      throw new WebError('web search aborted', 'WEB_ABORTED', { cause: error })
-    }
-    throw new WebError(`web search returned invalid JSON: ${errorText(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
-  }
-}
-
-function mapSearxngResponse(payload) {
-  const root = payload !== null && typeof payload === 'object' ? payload : {}
-  const sources = []
-  const seen = new Set()
-  const hits = Array.isArray(root.results) ? root.results : []
-  for (const hit of hits) {
-    if (hit === null || typeof hit !== 'object') continue
-    const url = sourceUrl(hit.url)
-    if (url === undefined || seen.has(url)) continue
-    seen.add(url)
-    const title = optionalText(hit.title, 500)
-    const snippet = optionalText(hit.content ?? hit.snippet)
-    const publishedAt = optionalText(hit.publishedDate ?? hit.published_date, 120)
-    sources.push({
-      url,
-      ...title === undefined ? {} : { title },
-      ...snippet === undefined ? {} : { snippet },
-      ...publishedAt === undefined ? {} : { publishedAt },
-    })
-  }
-  const answers = Array.isArray(root.answers)
-    ? root.answers.map(answer => optionalText(answer, 8_000)).filter(answer => answer !== undefined)
-    : []
-  return {
-    ...answers.length === 0 ? {} : { content: answers.join('\n\n') },
-    sources,
-    truncated: false,
-  }
-}
-
-async function searchSearxng(request, signal) {
-  const url = new URL(SEARXNG_SEARCH_URL)
-  url.searchParams.set('q', request.query)
-  url.searchParams.set('format', 'json')
-  // Do not use SearXNG's `auto` locale here. It leaves Bing's market
-  // implicit, and the current Bing endpoint can answer with unrelated
-  // default-market results. The deployment is mainland-China based, so pin
-  // Bing's supported Chinese market explicitly.
-  url.searchParams.set('language', 'zh-CN')
-  url.searchParams.set('safesearch', '0')
-
-  let response
-  try {
-    response = await fetch(url, {
-      headers: { accept: 'application/json' },
-      signal: requestSignal(signal),
-    })
-  } catch (error) {
-    if (isAborted(error, signal)) {
-      throw new WebError('web search aborted', 'WEB_ABORTED', { cause: error })
-    }
-    throw new WebError(`local SearXNG request failed: ${errorText(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
-  }
-
-  if (!response.ok) {
-    const message = await parseErrorResponse(response)
-    throw withStatus(
-      new WebError(`local SearXNG search failed: ${message}`, 'WEB_PROVIDER_ERROR'),
-      response.status,
-    )
-  }
-
-  try {
-    const result = mapSearxngResponse(await response.json())
-    if (result.sources.length === 0 && result.content === undefined) {
-      throw new Error('local SearXNG returned no results')
-    }
-    return result
-  } catch (error) {
-    if (isAborted(error, signal)) {
-      throw new WebError('web search aborted', 'WEB_ABORTED', { cause: error })
-    }
-    throw new WebError(`local SearXNG returned invalid content: ${errorText(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
-  }
-}
-
-function parseExaResults(text) {
-  const blocks = text.split(/(?=^Title: )/m).filter(block => block.trim() !== '')
-  const sources = []
-  const seen = new Set()
-
+  const blocks = String(text).split(/(?=^Title:\s)/m).filter(block => block.trim() !== '')
   for (const block of blocks) {
-    const url = sourceUrl(block.match(/^URL: (.+)$/m)?.[1])
-    if (url === undefined || seen.has(url)) continue
-    seen.add(url)
-    const title = optionalText(block.match(/^Title: (.+)$/m)?.[1], 500)
-    const published = optionalText(block.match(/^Published: (.+)$/m)?.[1], 120)
-    const publishedAt = published === undefined || published === 'N/A' ? undefined : published
-    const highlight = block.match(/\nHighlights:\s*\n([\s\S]*)$/m)?.[1]
-    const textContent = block.match(/\nText:\s*\n([\s\S]*)$/m)?.[1]
-    const snippet = optionalText((textContent ?? highlight)?.replace(/\n---\s*$/, ''))
-    sources.push({
-      url,
-      ...title === undefined ? {} : { title },
-      ...snippet === undefined ? {} : { snippet },
-      ...publishedAt === undefined ? {} : { publishedAt },
-    })
+    addSource(
+      sources,
+      byUrl,
+      block.match(/^URL:\s*(.+)$/m)?.[1],
+      block.match(/^Title:\s*(.+)$/m)?.[1],
+      labelledSection(block, 'Text') ?? labelledSection(block, 'Highlights'),
+      block.match(/^Published:\s*(.+)$/m)?.[1],
+    )
   }
-
-  return { sources, truncated: false }
+  return result(sources, sources.length === 0 ? optionalText(text, MAX_CONTENT_CHARS) : undefined)
 }
 
-function exaEnvelope(body) {
-  const dataLines = body.split(/\r?\n/).filter(line => line.startsWith('data:'))
-  for (const line of dataLines) {
-    const value = line.slice(5).trim()
-    if (value === '' || value === '[DONE]') continue
-    try {
-      const parsed = JSON.parse(value)
-      if (parsed?.result !== undefined || parsed?.error !== undefined) return parsed
-    } catch {
-      // Ignore SSE comments and non-JSON diagnostics.
-    }
-  }
-
+/** Convert Parallel's JSON-in-MCP-text result into DSH's structured shape. */
+export function mapParallelText(text) {
+  let payload
   try {
-    return JSON.parse(body)
+    payload = JSON.parse(text)
   } catch {
     return undefined
   }
+  if (payload === null || typeof payload !== 'object') return undefined
+
+  const sources = []
+  const byUrl = new Map()
+  const hits = Array.isArray(payload.results) ? payload.results : []
+  for (const hit of hits) {
+    if (hit === null || typeof hit !== 'object') continue
+    const excerpts = Array.isArray(hit.excerpts)
+      ? hit.excerpts.filter(item => typeof item === 'string').join('\n\n')
+      : undefined
+    addSource(
+      sources,
+      byUrl,
+      hit.url ?? hit.link,
+      hit.title,
+      excerpts ?? hit.snippet ?? hit.description,
+      hit.publish_date ?? hit.publishedAt,
+    )
+  }
+  const content = optionalText(
+    typeof payload.answer === 'string'
+      ? payload.answer
+      : typeof payload.summary === 'string'
+        ? payload.summary
+        : typeof payload.content === 'string' ? payload.content : undefined,
+    MAX_CONTENT_CHARS,
+  )
+  if (sources.length === 0 && content === undefined && !Array.isArray(payload.results)) return undefined
+  return result(sources, content)
+}
+
+/** Map either OpenCode search backend's inner MCP text to the DSH seam. */
+export function mapSearchText(text) {
+  const parallel = mapParallelText(text)
+  if (parallel !== undefined) return parallel
+  return mapExaText(text)
 }
 
 async function searchExa(request, signal) {
-  let response
-  try {
-    response = await fetch(EXA_MCP_URL, {
-      method: 'POST',
-      redirect: 'error',
-      headers: {
-        accept: 'application/json, text/event-stream',
-        'content-type': 'application/json',
-        'x-exa-source': 'dsh-web-search',
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: {
-          name: EXA_MCP_TOOL,
-          arguments: { query: request.query, numResults: maxResults(request.maxResults) },
-        },
-      }),
-      signal: requestSignal(signal),
-    })
-  } catch (error) {
-    if (isAborted(error, signal)) {
-      throw new WebError('web search aborted', 'WEB_ABORTED', { cause: error })
-    }
-    throw new WebError(`fallback web search request failed: ${errorText(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
-  }
-
-  if (!response.ok) {
-    const message = await parseErrorResponse(response)
-    throw withStatus(
-      new WebError(`fallback web search failed: ${message}`, 'WEB_PROVIDER_ERROR'),
-      response.status,
-    )
-  }
-
-  try {
-    const envelope = exaEnvelope(await response.text())
-    if (envelope === undefined) throw new Error('Exa MCP returned an empty response')
-    if (envelope.error !== undefined) {
-      throw new Error(envelope.error.message ?? 'Exa MCP returned an error')
-    }
-    if (envelope.result?.isError === true) {
-      const message = envelope.result.content
-        ?.find(item => item?.type === 'text' && typeof item.text === 'string')
-        ?.text?.trim()
-      throw new Error(message || 'Exa MCP returned an error')
-    }
-    const text = envelope.result?.content
-      ?.find(item => item?.type === 'text' && typeof item.text === 'string' && item.text.trim() !== '')
-      ?.text
-    if (typeof text !== 'string') throw new Error('Exa MCP returned empty content')
-    return parseExaResults(text)
-  } catch (error) {
-    if (isAborted(error, signal)) {
-      throw new WebError('web search aborted', 'WEB_ABORTED', { cause: error })
-    }
-    throw new WebError(`fallback web search returned invalid content: ${errorText(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
-  }
+  const text = await callMcp({
+    url: exaUrl(),
+    tool: 'web_search_exa',
+    args: {
+      query: request.query,
+      type: 'auto',
+      numResults: maxResults(request.maxResults),
+      livecrawl: 'fallback',
+    },
+    signal,
+  })
+  return mapSearchText(text)
 }
 
-async function searchWithFallback(ctx, request, signal) {
-  // Keep the normal Web profile's search backend independent of the selected
-  // chat model. In particular, do not call a model-owned OpenAI/MiMo search
-  // API here: the model is already the consumer of this tool, and those
-  // optional routes can spend the whole tool deadline before Bing is tried.
-  const routes = []
-  // Bing through the local SearXNG service is the primary route for every
-  // model. Exa/Tavily are only outage fallbacks and never the normal path.
-  routes.push(...(hasExplicitTavilyRoute()
-    ? [[searchTavily, false], [searchSearxng, false], [searchExa, false]]
-    : [[searchSearxng, false], [searchExa, false], [searchTavily, false]]))
-  const failures = []
-  for (const [route, native] of routes) {
-    try {
-      return await route(request, signal)
-    } catch (error) {
-      if (isAborted(error, signal)) throw error
-      failures.push(errorText(error))
-      if (!native && !shouldFallback(error)) throw error
-    }
-  }
-  throw new WebError(`web search failed: ${failures.join('; ')}`, 'WEB_PROVIDER_ERROR')
+async function searchParallel(request, signal, context) {
+  const text = await callMcp({
+    url: PARALLEL_MCP_URL,
+    tool: 'web_search',
+    args: {
+      objective: request.query,
+      search_queries: [request.query],
+      session_id: context.sessionId,
+      ...context.modelName === undefined ? {} : { model_name: context.modelName },
+    },
+    headers: parallelHeaders(),
+    signal,
+  })
+  return mapSearchText(text)
+}
+
+async function search(request, signal, ctx) {
+  const context = activeSessionContext(ctx)
+  const provider = selectSearchProvider(context.sessionId)
+  // OpenCode intentionally selects exactly one route per session. Do not make
+  // backend order a hidden priority chain: a failure is surfaced as the
+  // provider error, while the next tool call can be retried by the model.
+  return provider === EXA_PROVIDER
+    ? searchExa(request, signal)
+    : searchParallel(request, signal, context)
 }
 
 export function apply(ctx) {
   ctx.web.registerSearchProvider({
     id: PROVIDER_ID,
-    // Keyless mode means search remains available regardless of the selected
-    // chat provider or whether any model-specific API key is present.
-    // The local Bing route does not depend on Tavily endpoint/key state.
+    // Both MCP services have a keyless public route, so availability must not
+    // be coupled to the selected chat model or any vendor-specific key.
     available: () => true,
-    search: (request, signal) => searchWithFallback(ctx, request, signal),
+    search: (request, signal) => search(request, signal, ctx),
   })
 }

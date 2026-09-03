@@ -1,45 +1,6 @@
 { config, pkgs, lib, ... }:
 
 let
-  # Local SearXNG is the no-vendor-quota search backend. The service is bound
-  # to loopback and uses SearXNG's Bing engine. Do not override Bing's default
-  # www.bing.com base URL with cn.bing.com: the current SearXNG Bing parser
-  # expects the www endpoint's result markup. dsh's provider plugin talks to
-  # it over HTTP JSON. This is generated into the Nix store, so no mutable
-  # hand-written config is required on the host.
-  dshSearxngSettings = (pkgs.formats.yaml { }).generate "dsh-local-searxng-settings.yml" {
-    use_default_settings = {
-      engines = {
-        keep_only = [ "bing" ];
-      };
-    };
-    general = {
-      instance_name = "dsh-local-search";
-      enable_metrics = false;
-    };
-    search = {
-      formats = [ "json" ];
-      default_lang = "auto";
-    };
-    server = {
-      bind_address = "127.0.0.1";
-      port = 8765;
-      limiter = false;
-      public_instance = false;
-      secret_key = "dsh-local-search-secret-v1";
-      method = "GET";
-    };
-    outgoing = {
-      request_timeout = 5.0;
-      max_request_timeout = 10.0;
-    };
-    engines = [
-      # Keep the engine's default https://www.bing.com base_url. Overriding
-      # this with cn.bing.com makes SearXNG report a Bing parsing error.
-      { name = "bing"; disabled = false; }
-    ];
-  };
-
   # deepseek-harness v0.1.2-alpha.3
   dshSrc = pkgs.fetchFromGitHub {
     owner = "deepseek-ai";
@@ -79,11 +40,14 @@ let
       ./patches/tool-bottom-collapse.patch
       ./patches/bash-command-hscroll.patch
       ./patches/durable-session-lease.patch
+
       # Optional trusted terminal/FS seams used only by the Codex preset.
       # Existing callers omit the new fields/methods and retain upstream behavior.
       ./presets/codex/patches/codex-runtime-parity.patch
+
       # Codex-scoped UI patches keep live, replay, and trajectory rendering together.
       ./presets/codex/patches/codex-readable-tools.patch
+
       # Promote only marked Codex Code Mode children to native tool rows.
       ./presets/codex/patches/codex-native-display.patch
     ];
@@ -162,7 +126,6 @@ in
 
   home.packages = [
     dsh
-    pkgs.searxng
     # dsh 运行时依赖(必须):
     pkgs.nodejs_22 # dsh 子进程/spawn helper 需要 node 在 PATH
     pkgs.ripgrep   # dsh-tool-fs-search 通过 ctx.subprocess 调用 rg
@@ -173,26 +136,6 @@ in
     # 用法:dsh-web [port]  (默认 3080;浏览器可用 DSH_BROWSER 覆盖)
     (pkgs.writeShellScriptBin "dsh-web" (builtins.readFile ./dsh-web.sh))
   ];
-
-  systemd.user.services.dsh-searxng = {
-    Unit = {
-      Description = "Local SearXNG search backend for dsh web_search";
-      After = [ "network-online.target" ];
-      Wants = [ "network-online.target" ];
-    };
-    Service = {
-      ExecStart = "${pkgs.searxng}/bin/searxng-run";
-      Environment = [
-        "SEARXNG_SETTINGS_PATH=${dshSearxngSettings}"
-        "SEARXNG_DISABLE_ETC_SETTINGS=1"
-      ];
-      Restart = "on-failure";
-      RestartSec = 5;
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
 
   home.file = {
     ".dsh/AGENTS.md".source = ../agent-context.md;
