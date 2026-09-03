@@ -40,6 +40,7 @@ let
       ./patches/tool-bottom-collapse.patch
       ./patches/bash-command-hscroll.patch
       ./patches/durable-session-lease.patch
+      ./patches/web-fetch-clash-fake-ip.patch
 
       # Optional trusted terminal/FS seams used only by the Codex preset.
       # Existing callers omit the new fields/methods and retain upstream behavior.
@@ -97,6 +98,10 @@ let
       mkdir -p $out/bin
       cat > $out/bin/dsh <<EOF
       #!/bin/sh
+      # Clash/Mihomo TUN resolves public hostnames to 198.18.0.0/15 fake IPs.
+      # The patched fetch provider accepts this synthetic range only for DNS
+      # hostnames; callers can opt out with DSH_WEB_FETCH_ALLOW_FAKE_IP=0.
+      export DSH_WEB_FETCH_ALLOW_FAKE_IP="''${DSH_WEB_FETCH_ALLOW_FAKE_IP:-1}"
       exec ${pkgs.nodejs_22}/bin/node --expose-internals $out/apps/cli/lib/bin.js "\$@"
       EOF
       chmod +x $out/bin/dsh

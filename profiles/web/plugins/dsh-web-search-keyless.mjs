@@ -76,7 +76,12 @@ function checksum(value) {
   return (hash >>> 0).toString(36)
 }
 
-/** Select the same stable, provider-independent route as OpenCode. */
+/**
+ * Select a provider-independent route using OpenCode's stable session rule.
+ * Anonymous Exa is deliberately excluded: its free MCP quota is shared and
+ * is exhausted quickly by agent sessions. Exa remains available when the user
+ * supplies a key or explicitly forces it for diagnostics.
+ */
 export function selectSearchProvider(sessionId) {
   const override = process.env.DSH_WEB_SEARCH_BACKEND?.trim()
     || process.env.OPENCODE_WEBSEARCH_PROVIDER?.trim()
@@ -88,6 +93,8 @@ export function selectSearchProvider(sessionId) {
   if (isTruthy('DSH_WEB_SEARCH_PREFER_EXA')
     || isTruthy('OPENCODE_ENABLE_EXA')
     || isTruthy('OPENCODE_EXPERIMENTAL_EXA')) return EXA_PROVIDER
+
+  if ((process.env.EXA_API_KEY?.trim() ?? '') === '') return PARALLEL_PROVIDER
 
   return Number.parseInt(checksum(sessionId) ?? '0', 36) % 2 === 0
     ? EXA_PROVIDER
@@ -431,22 +438,35 @@ async function searchParallel(request, signal, context) {
   return mapSearchText(text)
 }
 
+function isExaRateLimited(error) {
+  if (error?.code === 'WEB_ABORTED') return false
+  if (error?.statusCode === 429) return true
+  const message = error instanceof Error ? error.message : String(error)
+  return /exa.*(?:rate limit|too many requests)|free MCP rate limit/i.test(message)
+}
+
 async function search(request, signal, ctx) {
   const context = activeSessionContext(ctx)
   const provider = selectSearchProvider(context.sessionId)
-  // OpenCode intentionally selects exactly one route per session. Do not make
-  // backend order a hidden priority chain: a failure is surfaced as the
-  // provider error, while the next tool call can be retried by the model.
-  return provider === EXA_PROVIDER
-    ? searchExa(request, signal)
-    : searchParallel(request, signal, context)
+  if (provider === PARALLEL_PROVIDER) return searchParallel(request, signal, context)
+
+  try {
+    return await searchExa(request, signal)
+  } catch (error) {
+    // The anonymous Exa MCP quota is the one expected transient failure in
+    // this provider. Fall through to the keyless Parallel route so a normal
+    // search call does not expose an avoidable Exa vendor error to the model.
+    if (!isExaRateLimited(error)) throw error
+    return searchParallel(request, signal, context)
+  }
 }
 
 export function apply(ctx) {
   ctx.web.registerSearchProvider({
     id: PROVIDER_ID,
     // Both MCP services have a keyless public route, so availability must not
-    // be coupled to the selected chat model or any vendor-specific key.
+    // be coupled to the selected chat model or any vendor-specific key. The
+    // route selector still avoids anonymous Exa's shared free quota.
     available: () => true,
     search: (request, signal) => search(request, signal, ctx),
   })

@@ -15,9 +15,9 @@
           - terminal_send
 
     # Replace the DeepSeek-only search provider with OpenCode-compatible,
-    # provider-independent MCP search. Exa/Parallel are selected stably per
-    # session and both have a keyless public route. Optional EXA_API_KEY or
-    # PARALLEL_API_KEY values are supported for the same endpoints.
+    # provider-independent MCP search. Anonymous sessions use keyless Parallel
+    # to avoid Exa's shared free MCP quota; Exa is used when keyed or explicitly
+    # forced, with automatic Parallel fallback on Exa rate-limit responses.
     - id: dsh-web-search-keyless
       name: './plugins/dsh-web-search-keyless.mjs'
 

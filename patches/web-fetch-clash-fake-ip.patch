@@ -1,0 +1,47 @@
+# Clash/Mihomo TUN uses 198.18.0.0/15 as a synthetic DNS answer range. Keep
+# the public-network SSRF policy strict by allowing that range only when the
+# dsh launcher explicitly opts in, and only for hostnames (never IP literals).
+
+--- a/packages/web/web-fetch-http/src/network.ts
++++ b/packages/web/web-fetch-http/src/network.ts
+@@ -37,4 +37,28 @@ const RFC6052_PREFIX_LENGTHS = [32, 40, 48, 56, 64, 96] as const
+ const IPV4ONLY_DISCOVERY_HOST = 'ipv4only.arpa'
+ const IPV4ONLY_SENTINELS = new Set(['192.0.0.170', '192.0.0.171'])
++/** RFC 2544 range used by Clash/Mihomo fake-IP DNS under an explicit opt-in. */
++const CLASH_FAKE_IP_FIRST_OCTET = 198
++const CLASH_FAKE_IP_SECOND_OCTETS = new Set([18, 19])
++
++/** Whether an IPv4/IPv4-mapped address belongs to the local fake-IP range. */
++function isClashFakeIpAddress(input: string): boolean {
++  let parsed: ipaddr.IPv4 | ipaddr.IPv6
++  try {
++    parsed = ipaddr.parse(stripIpv6Brackets(input))
++  } catch {
++    return false
++  }
++  const ipv4 = parsed instanceof ipaddr.IPv4
++    ? parsed
++    : parsed.isIPv4MappedAddress() ? parsed.toIPv4Address() : undefined
++  if (ipv4 === undefined) return false
++  const octets = ipv4.toByteArray()
++  return octets[0] === CLASH_FAKE_IP_FIRST_OCTET && CLASH_FAKE_IP_SECOND_OCTETS.has(octets[1] as number)
++}
++
++/** Preserve strict public-IP checks unless the local fake-IP compatibility is enabled. */
++function isAllowedDestination(input: string, allowClashFakeIp: boolean): boolean {
++  return isPublicIpAddress(input) || (allowClashFakeIp && isClashFakeIpAddress(input))
++}
+ 
+ interface Nat64Prefix {
+@@ -79,4 +103,8 @@ export async function resolvePublicAddresses(
+   const unbracketed = stripIpv6Brackets(hostname)
+   const literalFamily = isIP(unbracketed)
++  // The fake-IP exception is deliberately hostname-only: a caller cannot use
++  // the opt-in to fetch an arbitrary 198.18/15 literal without DNS ownership.
++  const allowClashFakeIp = literalFamily === 0
++    && /^(1|true|yes|on)$/i.test(process.env.DSH_WEB_FETCH_ALLOW_FAKE_IP?.trim() ?? '')
+   const resolved = literalFamily === 0
+     ? await raceWithSignal(resolver(unbracketed, { all: true, order: 'verbatim' }), signal)
+@@ -99,1 +127,1 @@
+-    if (!isPublicIpAddress(entry.address)) {
++    if (!isAllowedDestination(entry.address, allowClashFakeIp)) {
