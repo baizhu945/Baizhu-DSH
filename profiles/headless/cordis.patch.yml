@@ -68,6 +68,18 @@
 # dsh's launcher adds the installed system preset root when this row exists;
 # the agent-presets package appends ~/.dsh/.agent-presets for user presets.
 - insert:
+    # Host services required by the optional shipped `cordis` preset. The
+    # preset's tool-cordis row is agent-scoped, but its dynamic plugin runner
+    # and inspect registry must remain process-wide in the Host.
+    - id: cordis-host-runner
+      name: '@deepseek-ai/dsh-cordis-host-runner'
+
+    # Host-owned setting sampled by standard's model-selectable subagent tool.
+    # This must stay outside the preset realm: the tool explicitly requires
+    # this service in Host scope when modelSelectionSettings is enabled.
+    - id: subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+
     - id: agent-presets
       name: '@deepseek-ai/dsh-agent-presets'
       config:
