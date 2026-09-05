@@ -340,6 +340,11 @@ let
   dshTuiProfilePatch = ./profiles/dsh-tui/cordis.patch.yml;
   dshTuiProfileWorkspace = ./profiles/dsh-tui/pnpm-workspace.yaml;
 
+  dshTuiManagedPluginPaths = pkgs.writeText "dsh-tui-managed-plugin-paths" ''
+    plugins/confirm-writes.mjs
+    plugins/openai-codex-account.mjs
+  '';
+
   dshTuiLauncher = pkgs.writeShellScriptBin "dsh-tui" ''
     exec ${pkgs.nodejs_22}/bin/node ${dshTui}/package/bin/dsh-tui.js "$@"
   '';
@@ -355,11 +360,26 @@ in
   ];
 
   home.activation.dshTui = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
+    tuiProfile="$HOME/.dsh/profiles/dsh-tui"
+    tuiManagedPluginManifest="$tuiProfile/.home-manager-managed-plugin-paths"
+
+    if [ -f "$tuiManagedPluginManifest" ]; then
+      while IFS= read -r rel; do
+        case "$rel" in
+          plugins/*)
+            target="$tuiProfile/$rel"
+            if [ -L "$target" ] || [ -f "$target" ]; then
+              run /run/current-system/sw/bin/remove-without-permission -f "$target"
+            fi
+            ;;
+        esac
+      done < "$tuiManagedPluginManifest"
+    fi
+
     run mkdir -p \
       "$HOME/.dsh/profiles/dsh-tui/node_modules/@deepseek-harness-tui" \
       "$HOME/.dsh/profiles/dsh-tui/plugins"
 
-    tuiProfile="$HOME/.dsh/profiles/dsh-tui"
     if [ -e "$tuiProfile/node_modules" ] || [ -L "$tuiProfile/node_modules" ]; then
       run /run/current-system/sw/bin/remove-without-permission -rf "$tuiProfile/node_modules"
     fi
@@ -378,6 +398,7 @@ in
       "$tuiProfile/plugins/confirm-writes.mjs"
     run install -m 644 ${./profiles/dsh-tui/plugins/openai-codex-account.mjs} \
       "$tuiProfile/plugins/openai-codex-account.mjs"
+    run install -m 644 ${dshTuiManagedPluginPaths} "$tuiManagedPluginManifest"
 
     # Remove only the preset previously materialized by dsh-TUI itself. A
     # matching unmarked path is user-owned and is intentionally preserved.

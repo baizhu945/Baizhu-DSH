@@ -120,6 +120,23 @@ let
     };
   };
 
+  # Files copied by dshPlugins rather than linked through home.file. The
+  # previous manifest lets activation remove only files it owned when a
+  # managed plugin is later removed from this list.
+  dshManagedPluginPaths = pkgs.writeText "dsh-managed-plugin-paths" ''
+    profiles/headless/plugins/cc-connect-startup.mjs
+    profiles/headless/plugins/cc-connect-runner.mjs
+    profiles/headless/plugins/openai-codex-account.mjs
+    profiles/web/plugins/dsh-web-search-keyless.mjs
+    profiles/web/plugins/openai-codex-account.mjs
+    profiles/web/node_modules/dsh-baizhu-approval/package.json
+    profiles/web/node_modules/dsh-baizhu-approval/index.mjs
+    profiles/web/node_modules/dsh-baizhu-approval/client.js
+    profiles/web/node_modules/dsh-openai-account-ui/package.json
+    profiles/web/node_modules/dsh-openai-account-ui/index.mjs
+    profiles/web/node_modules/dsh-openai-account-ui/client.js
+  '';
+
 in
 {
   _module.args.dsh = dsh;
@@ -191,6 +208,60 @@ in
   # 文件真实拷贝到 ~/.dsh(linkGeneration 之后运行,install 会原子替换
   # 旧的符号链接)。
   home.activation.dshPlugins = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
+    removeManagedPluginPath() {
+      rel="$1"
+      case "$rel" in
+        profiles/headless/plugins/*|profiles/web/plugins/*|\
+        profiles/web/node_modules/dsh-baizhu-approval/*|\
+        profiles/web/node_modules/dsh-openai-account-ui/*)
+          ;;
+        *) return 0 ;;
+      esac
+      target="$HOME/.dsh/$rel"
+      if [ -L "$target" ] || [ -f "$target" ]; then
+        run /run/current-system/sw/bin/remove-without-permission -f "$target"
+      fi
+    }
+
+    managedPluginManifest="$HOME/.dsh/.home-manager-dsh-plugin-paths"
+    if [ -f "$managedPluginManifest" ]; then
+      while IFS= read -r rel; do
+        [ -n "$rel" ] && removeManagedPluginPath "$rel"
+      done < "$managedPluginManifest"
+    fi
+
+    # dsh heals the current dependency closure into these node_modules
+    # directories, but older releases are not removed by its healer. Remove
+    # only symlinks into an old dsh store path; user files and links to other
+    # packages remain untouched.
+    removeStaleDshStoreLink() {
+      link="$1"
+      [ -L "$link" ] || return 0
+      target="$(readlink "$link" 2>/dev/null || true)"
+      case "$target" in
+        /nix/store/*-dsh-*)
+          resolved="$(readlink -f "$link" 2>/dev/null || true)"
+          case "$resolved" in
+            "${dsh}"/*) ;;
+            *) run /run/current-system/sw/bin/remove-without-permission -f "$link" ;;
+          esac
+          ;;
+      esac
+    }
+
+    cleanDshNodeModules() {
+      root="$1"
+      [ -d "$root" ] || return 0
+      find "$root" -type l -print | while IFS= read -r link; do
+        removeStaleDshStoreLink "$link"
+      done
+    }
+
+    find "$HOME/.dsh/profiles" -type d -name node_modules -print 2>/dev/null \
+      | while IFS= read -r nodeModules; do
+          cleanDshNodeModules "$nodeModules"
+        done
+
     run mkdir -p \
       "$HOME/.dsh/profiles/headless/plugins" \
       "$HOME/.dsh/profiles/web/plugins" \
@@ -241,5 +312,7 @@ in
         run ln -s "${dsh}/packages/terminal/''${package#dsh-}" "$target"
       fi
     done
+
+    run install -m 644 ${dshManagedPluginPaths} "$managedPluginManifest"
   '';
 }
