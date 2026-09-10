@@ -8,7 +8,7 @@
 - **Web 与 headless 双 profile**：Web profile 面向交互式浏览器；headless profile 面向脚本和 `cc-connect`，两者共享模型、技能、会话和权限语义。
 - **第四种 Confirm 权限模式**：保留 DSH 原有的 Read Only、Workspace Write、Full Access，另加默认的 `confirm`：使用完整访问范围，但每次文件写入或命令执行都先询问。
 - **Codex-compatible preset**：`Codex Mode` 把 DSH 的底层能力映射为 `exec_command`、`apply_patch`、Plan、图片查看、用户提问和 Luna V1 子代理等 Codex 形状的工具，同时仍由主机统一掌管沙箱、审批、文件系统和会话持久化。
-- **面向长任务的会话保护**：`durable-session-lease.patch` 为持久化日志增加跨进程租约和 revision guard，避免 headless 审批、恢复或多个进程同时写入同一个 session 时产生交错事件和序号回退。
+- **面向长任务的会话保护**：使用上游 `session-persistence-jsonl` 的 kernel-level `session.lock`，由操作系统负责跨进程写入排他和进程退出后的自动释放。
 - **声明式的插件化扩展**：权限询问、审批面板、OpenAI 账号、headless JSONL runner 和 skills 都通过 profile/preset 注入，而不是长期维护一份分叉的 DSH 源码。
 
 ## 分层结构
@@ -94,7 +94,7 @@ headless 的权限映射是：Read Only = `read-only + ask`，Workspace Write = 
 | `router-spec` | 按任务分类注入 persona 和完整 prompt sections，强调 deep-think-first。 |
 | `codex` | Codex persona、环境与 `AGENTS.md`、Code Mode、沙箱 shell、`apply_patch`、Skills、Plan Mode、用户提问、图片查看、时间和 Luna V1 子代理。 |
 
-Codex preset 只改变选中该 preset 的 session 的 model-facing surface：SSH 等主机额外工具会被隐藏，但沙箱、审批、附件、文件系统、模型路由和 durable session 仍由 DSH 主机服务提供。NixOS 不保证 `/bin/bash` 存在，因此 `dsh-codex.nix` 会把 Codex PTY 的 bash 路径替换为 nixpkgs 中的 `bashInteractive`。
+Codex preset 只改变选中该 preset 的 session 的 model-facing surface：SSH 等主机额外工具会被隐藏，但沙箱、审批、附件、文件系统、模型路由和 session persistence 仍由 DSH 主机服务提供。NixOS 不保证 `/bin/bash` 存在，因此 `dsh-codex.nix` 会把 Codex PTY 的 bash 路径替换为 nixpkgs 中的 `bashInteractive`。
 
 ## 模型、账号与 UI 修复
 
@@ -110,6 +110,6 @@ Codex preset 只改变选中该 preset 的 session 的 model-facing surface：SS
 
 ## 维护提示
 
-修改 `dsh.nix` 的源码 revision、`pnpm-lock.yaml` 对应依赖或 patches 后，需要重新确认 fixed-output hash，并检查 `node-pty`、loader 和模型目录补丁是否仍适配新版本。跨进程 session 的写入问题应优先通过 `durable-session-lease.patch` 的租约/revision 设计排查，而不是直接删除日志。
+修改 `dsh.nix` 的源码 revision、`pnpm-lock.yaml` 对应依赖或 patches 后，需要重新确认 fixed-output hash，并检查 `node-pty`、native/system、loader 和模型目录补丁是否仍适配新版本。跨进程 session 写入由上游 `session.lock` 管理；升级时应先停止旧版 dsh 进程，再恢复或写入已有 session。
 
 当前 `skills.nix` 的几个外部 `builtins.fetchGit` 使用 `main` 而未固定 `rev`/hash；这与本目录其余固定源码的可复现目标不完全一致，若追求严格复现，升级技能时应一并固定它们。

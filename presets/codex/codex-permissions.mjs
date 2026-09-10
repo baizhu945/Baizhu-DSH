@@ -49,9 +49,16 @@ function effectiveSandboxMode(events) {
   return undefined
 }
 
+/** Read a stable session snapshot across released dsh session APIs. */
+function sessionEvents(session) {
+  if (typeof session.snapshotEvents === 'function') return session.snapshotEvents()
+  return Array.isArray(session.events) ? session.events : []
+}
+
 function turnKey(session) {
-  for (let index = session.events.length - 1; index >= 0; index -= 1) {
-    const event = session.events[index]
+  const events = sessionEvents(session)
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
     if (event?.type === 'turn/start') return event.data?.turn ?? event.seq
   }
   return undefined
@@ -131,9 +138,10 @@ function policyForTargets(agent, standing, targets) {
 function currentProfile(agent, permissionPresets, sandboxPolicy, approval) {
   const current = permissionPresets?.current?.(agent.session)
   if (typeof current === 'string' && current !== 'custom' && CODEX_PROFILES[current] !== undefined) return CODEX_PROFILES[current].name
-  const sandbox = effectiveSandboxMode(agent.session.events)
+  const events = sessionEvents(agent.session)
+  const sandbox = effectiveSandboxMode(events)
     ?? sandboxPolicy?.resolve?.({ session: agent.session })?.mode
-  const policy = effectiveApprovalPolicy(agent.session.events)
+  const policy = effectiveApprovalPolicy(events)
     ?? approval?.config?.policy
   const match = Object.keys(CODEX_PROFILES).find(name => {
     const profile = CODEX_PROFILES[name]
@@ -155,7 +163,7 @@ export function apply(ctx) {
     async request(agent, execution, permissions, reason) {
       const normalized = normalizePermissionRequest(agent, permissions)
       const approver = ctx.get('approval')
-      const policy = effectiveApprovalPolicy(agent.session.events)
+      const policy = effectiveApprovalPolicy(sessionEvents(agent.session))
         ?? approver?.effectivePolicy?.(agent.session)
         ?? approver?.config?.policy
       if (policy === 'never') {

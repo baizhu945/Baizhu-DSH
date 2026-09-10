@@ -20,6 +20,12 @@ const ASK_TOOLS = new Set([
   'apply_patch',
 ])
 
+/** Read a stable session snapshot across released dsh session APIs. */
+function sessionEvents(session) {
+  if (typeof session.snapshotEvents === 'function') return session.snapshotEvents()
+  return Array.isArray(session.events) ? session.events : []
+}
+
 /** Last `approval/policy` payload, or undefined when the session has none. */
 function effectiveApprovalPolicy(events) {
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -102,7 +108,7 @@ export function apply(ctx) {
   ctx.on('tools/pre-execute', async (exec, next) => {
     if (!ASK_TOOLS.has(exec.name)) return next()
     if (exec.agent === undefined) return { kind: 'deny', reason: 'Codex tool requires a live agent' }
-    const events = exec.agent.session.events
+    const events = sessionEvents(exec.agent.session)
 
     // Primary path: fold the session knobs directly (profile-independent).
     let policy

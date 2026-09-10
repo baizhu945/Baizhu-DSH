@@ -56,24 +56,32 @@ tokenURL() {
   [ -r "$HOME/.dsh-web.log" ] || return 1
   candidate="$(sed -n 's#^dsh web: ##p' "$HOME/.dsh-web.log" | tail -1)"
   case "$candidate" in
-    "http://127.0.0.1:${PORT}/"*) printf '%s\n' "$candidate"; return 0 ;;
+    "http://127.0.0.1:${PORT}/?token="*) printf '%s\n' "$candidate"; return 0 ;;
     *) return 1 ;;
   esac
+}
+
+waitForTokenURL() {
+  local candidate
+  for _ in $(seq 1 30); do
+    candidate="$(tokenURL || true)"
+    if [ -n "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    kill -0 "${WEB_PID}" 2>/dev/null || return 1
+    sleep 1
+  done
+  return 1
 }
 
 # 端口无实例时由本次运行启动服务,并记录 PID 供退出时回收
 if ! httpReady "$URL"; then
   dsh web --no-open --port "${PORT}" > "${HOME}/.dsh-web.log" 2>&1 &
   WEB_PID=$!
-  for _ in $(seq 1 30); do
-    candidate="$(tokenURL || true)"
-    if [ -n "$candidate" ]; then OPEN_URL="$candidate"; fi
-    httpReady "$OPEN_URL" && break
-    kill -0 "${WEB_PID}" 2>/dev/null || break
-    sleep 1
-  done
-  if ! httpReady "$OPEN_URL"; then
-    echo "dsh-web: 服务未能启动,请查看日志: ~/.dsh-web.log" >&2
+  OPEN_URL="$(waitForTokenURL || true)"
+  if [ -z "$OPEN_URL" ] || ! httpReady "$OPEN_URL"; then
+    echo "dsh-web: 未获取到当前服务的 token URL,请查看日志: ~/.dsh-web.log" >&2
     kill "${WEB_PID}" 2>/dev/null || true
     WEB_PID=""
     exit 1
@@ -81,7 +89,11 @@ if ! httpReady "$URL"; then
   echo "dsh-web: 服务已启动 ${OPEN_URL} (pid ${WEB_PID})"
 else
   candidate="$(tokenURL || true)"
-  if [ -n "$candidate" ]; then OPEN_URL="$candidate"; fi
+  if [ -z "$candidate" ] || ! httpReady "$candidate"; then
+    echo "dsh-web: 已有服务但找不到有效 token URL;请运行 dsh --profile=web --no-open 并打开其打印的完整 URL" >&2
+    exit 1
+  fi
+  OPEN_URL="$candidate"
   echo "dsh-web: 复用已有实例 ${OPEN_URL}(关闭页面不会停止已有实例)"
 fi
 

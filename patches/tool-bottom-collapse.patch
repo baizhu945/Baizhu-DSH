@@ -1,8 +1,8 @@
 diff --git a/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css b/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
-index 2d7cbe8f0..8342000ac 100644
+index 489d43123..ad6e5fd5a 100644
 --- a/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
 +++ b/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
-@@ -78,6 +78,27 @@
+@@ -98,6 +98,27 @@
    word-break: break-word;
  }
  
@@ -31,18 +31,18 @@ index 2d7cbe8f0..8342000ac 100644
    .root[data-state='running'] .row::after {
      animation: none;
 diff --git a/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx b/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
-index 1f5fba56b..b155b8d7e 100644
+index bc7859b36..9e2375e4e 100644
 --- a/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
 +++ b/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
 @@ -1,6 +1,6 @@
  /** Assistant reasoning disclosure, independent of Tool-call presentation. */
- import { useEffect, useRef, useState } from 'react'
+ import { useState } from 'react'
 -import { DisclosureRow, IconThinkOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 +import { DisclosureRow, IconChevronUpOutline14, IconThinkOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
  import type { ChatViewSlotProps } from '../contract/slots.ts'
- import { useThrottledVisualUpdate } from './use-throttled-visual-update.ts'
  import a11yCss from './accessibility.module.css'
-@@ -59,6 +59,14 @@ export function ReasoningRow({ text, running, t }: { text: string; running: bool
+ import css from './ReasoningRow.module.css'
+@@ -58,6 +58,14 @@ export function ReasoningRow({ text, running, t }: { text: string; running: bool
          )}
        >
          <div className={css.thinkBody}>{text}</div>
@@ -58,10 +58,10 @@ index 1f5fba56b..b155b8d7e 100644
      </div>
    )
 diff --git a/packages/client/ui-chat/src/client/locale.ts b/packages/client/ui-chat/src/client/locale.ts
-index f10a9ced2..ab701c99d 100644
+index fcae47bce..b95e55469 100644
 --- a/packages/client/ui-chat/src/client/locale.ts
 +++ b/packages/client/ui-chat/src/client/locale.ts
-@@ -112,6 +112,7 @@ export const zh = {
+@@ -105,6 +105,7 @@ export const zh = {
    'command.title': '指令',
    'row.running': '运行中',
    'row.failed': '失败',
@@ -69,7 +69,7 @@ index f10a9ced2..ab701c99d 100644
    'json.truncated': '… 已截断，共 {total} 字符',
    'clock.md': '{m}月{d}日',
    'clock.ymd': '{y}年{m}月{d}日',
-@@ -229,6 +230,7 @@ export const en = {
+@@ -215,6 +216,7 @@ export const en = {
    'command.title': 'Command',
    'row.running': 'Running',
    'row.failed': 'Failed',
@@ -78,10 +78,10 @@ index f10a9ced2..ab701c99d 100644
    'clock.md': '{m}/{d}',
    'clock.ymd': '{y}-{m}-{d}',
 diff --git a/packages/client/ui-conversation/src/client/locales.ts b/packages/client/ui-conversation/src/client/locales.ts
-index 296f95b33..2db5315c9 100644
+index 4aeb75598..938e0d7f3 100644
 --- a/packages/client/ui-conversation/src/client/locales.ts
 +++ b/packages/client/ui-conversation/src/client/locales.ts
-@@ -91,6 +91,7 @@ export const zh = {
+@@ -104,6 +104,7 @@ export const zh = {
    'row.input': '输入',
    'row.output': '输出',
    'row.inspect': '查看',
@@ -89,7 +89,7 @@ index 296f95b33..2db5315c9 100644
    'tool.title.search': '搜索',
    'tool.title.read': '读取',
    'tool.title.bash': 'Bash',
-@@ -241,6 +242,7 @@ export const en = {
+@@ -270,6 +271,7 @@ export const en = {
    'row.input': 'IN',
    'row.output': 'OUT',
    'row.inspect': 'Inspect',
@@ -98,10 +98,10 @@ index 296f95b33..2db5315c9 100644
    'tool.title.read': 'Read',
    'tool.title.bash': 'Bash',
 diff --git a/packages/client/ui-skill/src/client/SkillRow.module.css b/packages/client/ui-skill/src/client/SkillRow.module.css
-index 05c3388aa..bb21f2b59 100644
+index 4dd75f849..5662090f1 100644
 --- a/packages/client/ui-skill/src/client/SkillRow.module.css
 +++ b/packages/client/ui-skill/src/client/SkillRow.module.css
-@@ -189,6 +189,27 @@
+@@ -190,6 +190,27 @@
    color: var(--dsw-alias-label-primary);
  }
  
@@ -172,10 +172,10 @@ index d7a9b9422..42368a009 100644
    'menu.userOnly': 'user-only',
  } satisfies Record<SkillKey, string>
 diff --git a/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css b/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
-index 2f344ac0d..c19270c19 100644
+index f1933dc06..0f992ada4 100644
 --- a/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
 +++ b/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
-@@ -196,6 +196,27 @@
+@@ -197,6 +197,27 @@
    color: var(--dsw-alias-label-primary);
  }
  
@@ -204,7 +204,7 @@ index 2f344ac0d..c19270c19 100644
     and the terminal card scroll INSIDE their own surface instead, so the
     scrollbar sits within the rounded card. */
 diff --git a/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx b/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
-index 06029777a..9b7f40136 100644
+index ca5becec3..641a23076 100644
 --- a/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
 +++ b/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
 @@ -1,7 +1,7 @@
@@ -215,8 +215,8 @@ index 06029777a..9b7f40136 100644
 +  CodeBlock, DiffBlock, DisclosureRow, IconChevronUpOutline14, IconInspectOutline12, ReadBlock, SearchBlock, StateDot, TerminalBlock, WebBlock,
    diffTotals,
  } from '@deepseek-ai/dsh-client-ui-primitives'
- import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-@@ -279,6 +279,14 @@ export function ToolRow({
+ import type { PropsRenderSlots, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+@@ -328,6 +328,14 @@ export function ToolRow({
                {t('row.inspect')}
              </button>
            )}
@@ -232,10 +232,10 @@ index 06029777a..9b7f40136 100644
        </DisclosureRow>
      </div>
 diff --git a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
-index 4c1d7b18b..bd628069e 100644
+index ab93cbbae..27d71ddd0 100644
 --- a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
 +++ b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
-@@ -240,6 +240,27 @@
+@@ -241,6 +241,27 @@
    color: var(--dsw-alias-label-primary);
  }
  
@@ -264,7 +264,7 @@ index 4c1d7b18b..bd628069e 100644
  .visuallyHidden {
    position: absolute;
 diff --git a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
-index c291a733a..36fd5796a 100644
+index e5380979b..af8d3c688 100644
 --- a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
 +++ b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
 @@ -2,7 +2,7 @@ import { useMemo, useState, type KeyboardEvent } from 'react'
@@ -288,10 +288,10 @@ index c291a733a..36fd5796a 100644
        )}
      </div>
 diff --git a/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css b/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
-index fdc2ebbf5..5493eca81 100644
+index 7390f9a0d..b7d179bf9 100644
 --- a/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
 +++ b/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
-@@ -281,6 +281,27 @@
+@@ -282,6 +282,27 @@
    color: var(--dsw-alias-label-primary);
  }
  

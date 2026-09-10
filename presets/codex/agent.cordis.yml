@@ -92,7 +92,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: |
+    prefix: |
 @codexPrompt@
     includeRuntimeContext: true
 

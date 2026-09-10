@@ -28,8 +28,6 @@
   disabled: true
 - id: tool-fs-search
   disabled: true
-- id: tool-str-replace-editor
-  disabled: true
 - id: skill-filesystem
   disabled: true
 - id: tool-skill
@@ -64,6 +62,12 @@
   disabled: true
 - id: tool-web
   disabled: true
+
+# Profile 根 package.json 是 Home Manager 的私有 manifest，没有 version；
+# inventory 只提供诊断元数据，不能阻断 headless 请求准备。
+- id: plugin-package-inventory-deepseek
+  config:
+    enabled: false
 
 # dsh's launcher adds the installed system preset root when this row exists;
 # the agent-presets package appends ~/.dsh/.agent-presets for user presets.

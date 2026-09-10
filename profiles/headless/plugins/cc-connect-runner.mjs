@@ -74,15 +74,22 @@ function applyMode(session, mode) {
   appendable.append('approval/policy', { policy: knobs.approval })
 }
 
+/** Read a stable session snapshot across released dsh session APIs. */
+function sessionEvents(session) {
+  if (typeof session.snapshotEvents === 'function') return session.snapshotEvents()
+  return Array.isArray(session.events) ? session.events : []
+}
+
 /** A dsh session becomes preset-locked once its first turn starts. */
 function isBlankSession(session) {
-  return !session.events.some(event => event.type === 'turn/start')
+  return !sessionEvents(session).some(event => event.type === 'turn/start')
 }
 
 /** Read the session's newest recorded preset without relying on the removed helper export. */
 function resolveRecordedPreset(session) {
-  for (let index = session.events.length - 1; index >= 0; index -= 1) {
-    const event = session.events[index]
+  const events = sessionEvents(session)
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
     if (event?.type === 'agent-preset/selected') return event.data.agentPreset
   }
   return session.header?.agentPreset
@@ -93,14 +100,14 @@ function resolveRecordedPreset(session) {
  * while the session is still blank. The dsh roster owns validation and
  * persistence; this runner only supplies the session-specific lifecycle.
  */
-async function applyAgentPreset(ctx, agentCtx, requested, defaultPreset) {
+async function applyAgentPreset(ctx, agentCtx, agent, requested, defaultPreset) {
   const presets = ctx.get('agentPresets')
   if (presets === undefined) {
     if (requested !== undefined) throw new Error('agent presets are not enabled in the headless profile')
     return
   }
 
-  const session = agentCtx.agent?.session
+  const session = agent?.session
   if (session === undefined) throw new Error('headless agent setup has no session')
   const recorded = resolveRecordedPreset(session)
   const target = requested ?? recorded ?? defaultPreset
@@ -155,6 +162,18 @@ function emitSessionEvent(io, event, toolNames) {
     }
     default:
       break
+  }
+}
+
+/** Map the current process-local assistant stream into the legacy JSONL wire. */
+function emitAssistantStream(io, frame) {
+  if (frame?.type === 'chunk') {
+    const chunk = frame.chunk
+    if (chunk.type === 'text-delta' && chunk.text !== '') {
+      io.stdout.write(`${JSON.stringify({ type: 'text', text: chunk.text })}\n`)
+    } else if (chunk.type === 'reasoning-delta' && chunk.text !== '') {
+      io.stdout.write(`${JSON.stringify({ type: 'thinking', text: chunk.text })}\n`)
+    }
   }
 }
 
@@ -294,10 +313,10 @@ async function run(ctx, config, io) {
   }
   const sessionId = SessionId(config.sessionId !== undefined && config.sessionId !== '' ? config.sessionId : `session-${randomUUID()}`)
   const agentOptions = { provider: selection.provider, model: selection.model }
-  const setup = async (agentCtx) => {
+  const setup = async (agentCtx, agent) => {
     const selected = { current: selection, assembled: undefined }
     installModelSelection(agentCtx, selected)
-    await applyAgentPreset(ctx, agentCtx, requestedPreset, defaultPreset)
+    await applyAgentPreset(ctx, agentCtx, agent, requestedPreset, defaultPreset)
   }
 
   let agent
@@ -342,6 +361,10 @@ async function run(ctx, config, io) {
       if (session.id !== agent.session.id) return
       emitSessionEvent(io, event, toolNames)
     })
+    ctx.on('agent/assistant-stream', ({ agent: subject, frame }) => {
+      if (subject !== agent) return
+      emitAssistantStream(io, frame)
+    })
 
     // 唯一终局应答者:sandbox 升级与 confirm 模式工具询问都经 ctx.approval。
     ctx.on('approval/request', (req) => {
@@ -383,7 +406,7 @@ async function run(ctx, config, io) {
   }))
   await agent.whenIdle()
   await sessions.flush(agent.session)
-  const outcome = summarize(agent.session.events, firstSeq)
+  const outcome = summarize(sessionEvents(agent.session), firstSeq)
   if (jsonl) {
     io.stdout.write(`${JSON.stringify({ type: 'result', text: outcome.text })}\n`)
     io.stdout.write(`${JSON.stringify({ type: 'done', success: outcome.reason?.kind === 'completed', sessionId: String(sessionId) })}\n`)

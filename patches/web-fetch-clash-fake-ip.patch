@@ -1,10 +1,13 @@
-# Clash/Mihomo TUN uses 198.18.0.0/15 as a synthetic DNS answer range. Keep
-# the public-network SSRF policy strict by allowing that range only when the
-# dsh launcher explicitly opts in, and only for hostnames (never IP literals).
-
+patching file packages/web/web-fetch-http/src/network.ts
+Hunk #1 succeeded at 38 (offset 1 line).
+Hunk #2 succeeded at 104 (offset 1 line).
+Hunk #3 succeeded at 128 (offset 1 line).
+diff --git a/packages/web/web-fetch-http/src/network.ts b/packages/web/web-fetch-http/src/network.ts
+index f14bf276b..61b76137a 100644
 --- a/packages/web/web-fetch-http/src/network.ts
 +++ b/packages/web/web-fetch-http/src/network.ts
-@@ -37,4 +37,28 @@ const RFC6052_PREFIX_LENGTHS = [32, 40, 48, 56, 64, 96] as const
+@@ -37,6 +37,30 @@ export type AddressResolver = (hostname: string, options: { all: true; order: 'v
+ const RFC6052_PREFIX_LENGTHS = [32, 40, 48, 56, 64, 96] as const
  const IPV4ONLY_DISCOVERY_HOST = 'ipv4only.arpa'
  const IPV4ONLY_SENTINELS = new Set(['192.0.0.170', '192.0.0.171'])
 +/** RFC 2544 range used by Clash/Mihomo fake-IP DNS under an explicit opt-in. */
@@ -33,7 +36,9 @@
 +}
  
  interface Nat64Prefix {
-@@ -79,4 +103,8 @@ export async function resolvePublicAddresses(
+   readonly bytes: readonly number[]
+@@ -79,6 +103,10 @@ export async function resolvePublicAddresses(
+ ): Promise<PublicAddress[]> {
    const unbracketed = stripIpv6Brackets(hostname)
    const literalFamily = isIP(unbracketed)
 +  // The fake-IP exception is deliberately hostname-only: a caller cannot use
@@ -42,6 +47,13 @@
 +    && /^(1|true|yes|on)$/i.test(process.env.DSH_WEB_FETCH_ALLOW_FAKE_IP?.trim() ?? '')
    const resolved = literalFamily === 0
      ? await raceWithSignal(resolver(unbracketed, { all: true, order: 'verbatim' }), signal)
-@@ -99,1 +127,1 @@
+     : [{ address: unbracketed, family: literalFamily }]
+@@ -97,7 +125,7 @@ export async function resolvePublicAddresses(
+     if ((entry.family !== 4 && entry.family !== 6) || isIP(entry.address) !== entry.family) {
+       throw new WebError(`hostname "${hostname}" resolved to an invalid IP address`, 'WEB_PROVIDER_ERROR')
+     }
 -    if (!isPublicIpAddress(entry.address)) {
 +    if (!isAllowedDestination(entry.address, allowClashFakeIp)) {
+       throw new WebError(`URL hostname "${hostname}" resolves to a non-public IP address`, 'WEB_BLOCKED_URL')
+     }
+     const translatedIpv4 = translatedIpv4Address(entry.address, nat64Prefixes)

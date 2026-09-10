@@ -132,7 +132,7 @@ function registerReadableDispatchLog(ctx) {
     const content = decision.content ?? result.content
     return { ...decision, content: humanizeBlocks(content) }
   })
-  ctx.on('tools/code-dispatch-log', async (dispatch, next) => {
+  ctx.on('tools/ptc-dispatch-log', async (dispatch, next) => {
     const content = await next()
     return rawOutputTools.has(dispatch.name) ? content : humanizeBlocks(content)
   })
@@ -285,7 +285,7 @@ function registerPromptBoundary(ctx) {
       const agent = context.agent
       if (agent === undefined) return ''
       const policy = ctx.sandboxPolicy.resolve({ session: agent.session })
-      return permissionInstructions(policy, effectiveApprovalPolicy(agent.session.events))
+      return permissionInstructions(policy, effectiveApprovalPolicy(sessionEvents(agent.session)))
     },
   })
 }
@@ -302,6 +302,12 @@ function effectiveApprovalPolicy(events) {
     if (event.type === 'approval/policy') return event.data?.policy
   }
   return undefined
+}
+
+/** Read a stable session snapshot across released dsh session APIs. */
+function sessionEvents(session) {
+  if (typeof session.snapshotEvents === 'function') return session.snapshotEvents()
+  return Array.isArray(session.events) ? session.events : []
 }
 
 function pathIsWithin(root, candidate) {
@@ -367,7 +373,7 @@ async function execSandboxPolicy(ctx, args, exec) {
   if (typeof args.justification !== 'string' || args.justification.trim() === '') {
     throw new Error(`justification is required with sandbox_permissions=${requested}`)
   }
-  if (effectiveApprovalPolicy(agent.session.events) === 'never') {
+  if (effectiveApprovalPolicy(sessionEvents(agent.session)) === 'never') {
     throw new Error('approval policy is never; escalated permissions cannot be requested')
   }
   if (standing.mode === 'danger-full-access') {
@@ -2883,7 +2889,7 @@ function registerAgents(ctx) {
   ctx.tools.register(defineTool({
     name: 'multi_agent_v1__close_agent',
     // Upstream phrasing (multi_agents_spec.rs close_agent V1) with this
-    // host's durable-session fact kept explicit.
+    // host's session-persistence fact kept explicit.
     description: "Close an agent and any open descendants when they are no longer needed, and return the target agent's previous status before shutdown was requested. Completed agents remain open and count toward the concurrency limit until closed. Don't keep agents open for too long if they are not needed anymore.",
     parameters: { target: { type: 'string', required: true, description: 'Agent id to close (from spawn_agent).' } },
     output: {

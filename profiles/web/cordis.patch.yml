@@ -14,13 +14,6 @@
           - pwsh
           - terminal_send
 
-    # Replace the DeepSeek-only search provider with OpenCode-compatible,
-    # provider-independent MCP search. Anonymous sessions use keyless Parallel
-    # to avoid Exa's shared free MCP quota; Exa is used when keyed or explicitly
-    # forced, with automatic Parallel fallback on Exa rate-limit responses.
-    - id: dsh-web-search-keyless
-      name: './plugins/dsh-web-search-keyless.mjs'
-
     # 审批面板插件(approval-always-allow + approval-keyboard 两个源码补丁
     # 的插件迁移):内置面板仍可工作,本插件以 composer chain 更高优先级
     # 接管审批 UI,提供「总是允许」第三按钮与 Esc/Ctrl+Enter 快捷键。
@@ -41,15 +34,12 @@
     - id: openai-account-ui
       name: 'dsh-openai-account-ui'
 
-# Keep the model-facing dsh-tool-web schema and renderer, but route its stable
-# ctx.web seam to the OpenCode-compatible keyless provider. Codex preset
-# web_search/web.run is agent-scoped and remains its separate implementation.
-- id: web
+# inventory 扩展会把 profile 根 package.json 作为本地插件的所属 manifest；
+# 该文件没有 version，导致请求在发出前失败。
+# 这是可选的诊断元数据，不影响 Web 对话或工具能力。
+- id: plugin-package-inventory-deepseek
   config:
-    searchProvider: simple-search
-
-- id: web-search-deepseek
-  disabled: true
+    enabled: false
 
 # ── 权限预设表 ──────────────────────────────────────────────────────────
 # dsh 三个内置模式保持原样(Read Only / Workspace Write / Full Access);

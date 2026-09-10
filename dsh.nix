@@ -1,12 +1,12 @@
 { config, pkgs, lib, ... }:
 
 let
-  # deepseek-harness v0.1.2-alpha.3
+  # deepseek-harness v0.1.5-rc.1
   dshSrc = pkgs.fetchFromGitHub {
     owner = "deepseek-ai";
     repo = "deepseek-harness";
-    rev = "dd6322d604e00eec1ba5e0c8541159906a21094a";
-    hash = "sha256-emUzEU1phOvCAYzTepfe7RkOUP8IObpX9Xw+wL3OfqM=";
+    rev = "aa8262ec091698bae9a6b04773a6b5b06ad4aef2";
+    hash = "sha256-YK90nsdspruObQLaR0kVT8cfZX4tSZ28iOEx8sELyJE=";
   };
 
   # 声明式 pnpm 依赖(fetchPnpmDeps 为 fixed-output 派生,沙箱内可联网下载;
@@ -26,12 +26,12 @@ let
       pnpm config set network-concurrency 4
     '';
 
-    hash = "sha256-KK34f9oTm/ofvAR9VV/FGnR1jJAQUyFzQMz7a/Xv6VE=";
+    hash = "sha256-/VnxXqJ3MUXIPB4rXOKu5FtArYVjyEry4ptRNHxYnrc=";
   };
 
   dsh = pkgs.stdenv.mkDerivation {
     pname = "dsh";
-    version = "0.1.2-alpha.3";
+    version = "0.1.5-rc.1";
     src = dshSrc;
 
     pnpmDeps = dshPnpmDeps;
@@ -39,7 +39,6 @@ let
     patches = [
       ./patches/tool-bottom-collapse.patch
       ./patches/bash-command-hscroll.patch
-      ./patches/durable-session-lease.patch
       ./patches/web-fetch-clash-fake-ip.patch
 
       # Optional trusted terminal/FS seams used only by the Codex preset.
@@ -59,6 +58,7 @@ let
       pkgs.pnpmConfigHook # 离线恢复 pnpm store 并执行 pnpm install
       pkgs.python3   # node-gyp 编译 node-pty 原生模块所需
       pkgs.node-gyp
+      pkgs.stdenv.cc # dsh 0.1.5+ 编译 native/system 的 flock addon
     ];
 
     __structuredAttrs = true;
@@ -78,7 +78,7 @@ let
       runHook preBuild
       # node-pty 的 pty.node 由 install script 用 node-gyp 编译(--ignore-scripts 跳过)
       cd node_modules/node-pty && node-gyp rebuild && cd ../..
-      export DSH_CLIENT_COMMIT_HASH=dd6322d604e00eec1ba5e0c8541159906a21094a
+      export DSH_CLIENT_COMMIT_HASH=aa8262ec091698bae9a6b04773a6b5b06ad4aef2
       npm run build
       runHook postBuild
       # pi-ai 的 OpenAI API 与 OpenAI Codex 目录都把 GPT-5.6 的
@@ -127,7 +127,6 @@ let
     profiles/headless/plugins/cc-connect-startup.mjs
     profiles/headless/plugins/cc-connect-runner.mjs
     profiles/headless/plugins/openai-codex-account.mjs
-    profiles/web/plugins/dsh-web-search-keyless.mjs
     profiles/web/plugins/openai-codex-account.mjs
     profiles/web/node_modules/dsh-baizhu-approval/package.json
     profiles/web/node_modules/dsh-baizhu-approval/index.mjs
@@ -143,8 +142,8 @@ in
 
   imports = [
     ./skills.nix
-    ./tui.nix
     ./presets/codex/dsh-codex.nix
+    ./tui.nix
   ];
 
   home.packages = [
@@ -154,6 +153,7 @@ in
     pkgs.ripgrep   # dsh-tool-fs-search 通过 ctx.subprocess 调用 rg
     pkgs.bubblewrap # dsh sandbox-local 的 Linux 沙箱后端(workspace-write/read-only 模式需要;
                     # 探测方式:spawnSync('bwrap', ...);缺它则报 "no sandbox backend usable")
+    pkgs.curl       # dsh-web.sh 的 HTTP ready/token 检测
 
     # 便捷启动(生命周期与浏览器窗口绑定,脚本主体见 ./dsh-web.sh):
     # 用法:dsh-web [port]  (默认 3080;浏览器可用 DSH_BROWSER 覆盖)
@@ -273,8 +273,6 @@ in
       "$HOME/.dsh/profiles/headless/plugins/cc-connect-startup.mjs"
     run install -m 644 ${./profiles/headless/plugins/cc-connect-runner.mjs} \
       "$HOME/.dsh/profiles/headless/plugins/cc-connect-runner.mjs"
-    run install -m 644 ${./profiles/web/plugins/dsh-web-search-keyless.mjs} \
-      "$HOME/.dsh/profiles/web/plugins/dsh-web-search-keyless.mjs"
     run install -m 644 ${./profiles/web/node_modules/dsh-baizhu-approval/package.json} \
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval/package.json"
     run install -m 644 ${./profiles/web/node_modules/dsh-baizhu-approval/index.mjs} \

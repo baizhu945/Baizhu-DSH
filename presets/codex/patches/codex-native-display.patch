@@ -1,10 +1,10 @@
 diff --git a/packages/client/ui-tool/src/client/tool/ToolCallTree.module.css b/packages/client/ui-tool/src/client/tool/ToolCallTree.module.css
-index b33fb477c..9a43933ec 100644
+index ed3e1cc94..d66c73108 100644
 --- a/packages/client/ui-tool/src/client/tool/ToolCallTree.module.css
 +++ b/packages/client/ui-tool/src/client/tool/ToolCallTree.module.css
 @@ -10,3 +10,9 @@
    padding-left: 8px;
-   border-left: 1px solid var(--dsw-alias-border-l2);
+   border-left: 0.5px solid var(--dsw-alias-border-l2);
  }
 +
 +.codexSubCalls {
@@ -13,7 +13,7 @@ index b33fb477c..9a43933ec 100644
 +  gap: 4px;
 +}
 diff --git a/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx b/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx
-index 2a1194807..187c68b1a 100644
+index 2212278bd..64e0b6af8 100644
 --- a/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx
 +++ b/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx
 @@ -10,6 +10,11 @@ function callName(node: ToolCallBlock): string {
@@ -27,8 +27,8 @@ index 2a1194807..187c68b1a 100644
 +
  /** One atomic call dispatched through the Tool-owned keyed slot. */
  const ToolCall = memo(function ToolCall({
-   renderSlot, callId, toolName, block, openFile, selected, cwd, home, inspectCall, t, children,
-@@ -52,6 +57,33 @@ const ToolCallBranch = memo(function ToolCallBranch({
+   renderSlot, callId, toolName, block, openFile, cwd, home, inspectCall, loadImage, t, children,
+@@ -51,6 +56,32 @@ const ToolCallBranch = memo(function ToolCallBranch({
    block: ToolCallBlock
    home?: string | undefined
  }) {
@@ -37,11 +37,11 @@ index 2a1194807..187c68b1a 100644
 +      key={child.callId}
 +      renderSlot={renderSlot}
 +      block={child}
-+      selectedCallId={selectedCallId}
 +      cwd={cwd}
 +      home={home}
 +      openFile={openFile}
 +      inspectCall={inspectCall}
++      loadImage={loadImage}
 +      t={t}
 +    />
 +  ))
@@ -51,9 +51,8 @@ index 2a1194807..187c68b1a 100644
 +        className={css.codexSubCalls}
 +        data-subcalls
 +        data-codex-transport
-+        data-chat-anchor-key={'call:' + block.callId}
++        data-chat-anchor-key={`call:${block.callId}`}
 +        data-chat-call-id={block.callId}
-+        data-selected={block.callId === selectedCallId || undefined}
 +      >
 +        {childRows}
 +      </div>
@@ -62,8 +61,8 @@ index 2a1194807..187c68b1a 100644
    return (
      <ToolCall
        renderSlot={renderSlot}
-@@ -65,23 +97,7 @@ const ToolCallBranch = memo(function ToolCallBranch({
-       inspectCall={inspectCall}
+@@ -64,23 +95,7 @@ const ToolCallBranch = memo(function ToolCallBranch({
+       loadImage={loadImage}
        t={t}
      >
 -      {block.subCalls.length > 0 ? (
@@ -73,11 +72,11 @@ index 2a1194807..187c68b1a 100644
 -              key={child.callId}
 -              renderSlot={renderSlot}
 -              block={child}
--              selectedCallId={selectedCallId}
 -              cwd={cwd}
 -              home={home}
 -              openFile={openFile}
 -              inspectCall={inspectCall}
+-              loadImage={loadImage}
 -              t={t}
 -            />
 -          ))}
@@ -88,10 +87,10 @@ index 2a1194807..187c68b1a 100644
    )
  })
 diff --git a/packages/client/ui-trajectory/src/client/layout.ts b/packages/client/ui-trajectory/src/client/layout.ts
-index a811e915f..16fedb42d 100644
+index fd361899d..1ba30d551 100644
 --- a/packages/client/ui-trajectory/src/client/layout.ts
 +++ b/packages/client/ui-trajectory/src/client/layout.ts
-@@ -60,6 +60,7 @@ interface LaidCell {
+@@ -61,6 +61,7 @@ interface LaidCell {
    toolName?: string
    callId?: string
    subCalls?: readonly ToolCallBlock[]
@@ -99,7 +98,7 @@ index a811e915f..16fedb42d 100644
  }
  
  interface LaidGroup {
-@@ -109,6 +110,11 @@ function layoutEntryOrder(entry: OrderedLayoutEntry): number {
+@@ -111,6 +112,11 @@ function layoutEntryOrder(entry: OrderedLayoutEntry): number {
      : entry.seq
  }
  
@@ -111,7 +110,7 @@ index a811e915f..16fedb42d 100644
  function inputCellDetail(node: InputNode, t: TrajectoryTranslate): Pick<
    TrajectoryCellProps,
    | 'text'
-@@ -438,11 +444,12 @@ export function deriveTrajectoryLayout(
+@@ -450,11 +456,12 @@ export function deriveTrajectoryLayout(
        if (!emittedCallIds.has(node.callId)) {
          const toolName = node.call?.name
          const resultPreview = summarizeResult(node, t)
@@ -125,7 +124,7 @@ index a811e915f..16fedb42d 100644
            cell: {
              index: ++index,
              kind: 'tool',
-@@ -459,11 +466,8 @@ export function deriveTrajectoryLayout(
+@@ -471,11 +478,8 @@ export function deriveTrajectoryLayout(
              timeSeconds: durationSeconds(node.time, node.callTime),
              startedAt: finiteTime(node.callTime),
            },
@@ -139,7 +138,7 @@ index a811e915f..16fedb42d 100644
          pushStep(0, 1, laidList)
        }
        prevAbsTime = finiteTime(node.time) ?? prevAbsTime
-@@ -494,11 +498,12 @@ export function deriveTrajectoryLayout(
+@@ -506,11 +510,12 @@ export function deriveTrajectoryLayout(
    const seenCalls = collectCallIds(turns)
    for (const call of runningCalls) {
      if (seenCalls.has(call.callId)) continue
@@ -153,7 +152,7 @@ index a811e915f..16fedb42d 100644
        cell: {
          index: ++index,
          kind: 'tool',
-@@ -508,11 +513,8 @@ export function deriveTrajectoryLayout(
+@@ -520,11 +525,8 @@ export function deriveTrajectoryLayout(
          timeSeconds: null,
          startedAt: finiteTime(call.time),
        },
@@ -167,7 +166,7 @@ index a811e915f..16fedb42d 100644
      if (call.step > 0) pushStep(call.turn, call.step, laidList)
      else for (const laid of laidList) pushMessage(call.turn, laid)
    }
-@@ -762,6 +764,7 @@ function expandAssistant(
+@@ -774,6 +776,7 @@ function expandAssistant(
        toolName: block.name,
        callId: block.callId,
        ...(call === undefined ? {} : { subCalls: call.subCalls }),
@@ -175,7 +174,7 @@ index a811e915f..16fedb42d 100644
        cell: {
          index: ++index, kind: 'tool',
          ...summarizeCall(block.name, block.argsRaw),
-@@ -981,6 +984,13 @@ function withSubCalls(laidList: LaidCell[], t: TrajectoryTranslate): LaidCell[]
+@@ -997,6 +1000,13 @@ function withSubCalls(laidList: LaidCell[], t: TrajectoryTranslate): LaidCell[]
    const out: LaidCell[] = []
    let index = laidList[0] !== undefined ? laidList[0].cell.index - 1 : 0
    for (const laid of laidList) {
@@ -189,7 +188,7 @@ index a811e915f..16fedb42d 100644
      out.push({ ...laid, cell: { ...laid.cell, index: ++index } })
      for (const sub of expandSubCalls(laid.subCalls, index, t)) {
        out.push(sub)
-@@ -995,6 +1005,7 @@ function expandSubCalls(
+@@ -1011,6 +1021,7 @@ function expandSubCalls(
    subs: readonly ToolCallBlock[] | undefined,
    startIndex: number,
    t: TrajectoryTranslate,
@@ -197,7 +196,7 @@ index a811e915f..16fedb42d 100644
  ): LaidCell[] {
    if (subs === undefined || subs.length === 0) return []
    const out: LaidCell[] = []
-@@ -1008,7 +1019,7 @@ function expandSubCalls(
+@@ -1024,7 +1035,7 @@ function expandSubCalls(
        callId: sub.callId,
        cell: {
          index: ++index,
