@@ -60,23 +60,5 @@ in
       source = "${anthropics-skills-repo}/skills/canvas-design";
       recursive = true;
     };
-
-    # ---- anbeime/skill ----
-    ".dsh/skills/media-processor" = {
-      source = "${anbeime-skills-repo}/skills/media-processor/media-processor";
-      recursive = true;
-    };
-
-    # ---- addyosmani/agent-skills ----
-    ".dsh/skills/idea-refine" = {
-      source = "${agent-skills-repo}/skills/idea-refine";
-      recursive = true;
-    };
-
-    # ---- superpowers ----
-    ".dsh/skills/superpowers" = {
-      source = "${superpowers-repo}/skills";
-      recursive = true;
-    };
   };
 }

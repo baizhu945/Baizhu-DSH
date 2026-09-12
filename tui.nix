@@ -1,22 +1,15 @@
 { config, pkgs, lib, ... }:
 
 let
-  # Keep the TUI and its nested auth bundle on immutable commits.  The
+  # Keep the TUI and its vendored std dependency on immutable commits.  The
   # submodules are materialized below because GitHub source archives contain
   # only empty submodule directories.
   dshTuiVersion = "0.10.0";
   dshTuiSrc = pkgs.fetchFromGitHub {
     owner = "baizhu945";
     repo = "dsh-TUI";
-    rev = "8d4dd0a05de0dfc5a66f2efb9e9c7e70e80e0007";
-    hash = "sha256-VXWUrj72NKe5hqk1NI68fRXmNJzht/8WrvVplOT90AY=";
-  };
-
-  dshAuthSrc = pkgs.fetchFromGitHub {
-    owner = "baizhu945";
-    repo = "dsh-auth";
-    rev = "beb5ecb4b828ad7e22ef7d844f76a1f0ec5de785";
-    hash = "sha256-yL1ruV86qvi4RWfph9ANKcBrHi5p+ZpRPP5O/Q4PBJA=";
+    rev = "86d183884012421daa6d8035e26f3cf46be5584e";
+    hash = "sha256-wiImdXn20drwu69vll61Ib1JOjmL1IbOKwgaP8XLsvY=";
   };
 
   dshEcosystemSpecSrc = pkgs.fetchFromGitHub {
@@ -37,8 +30,7 @@ let
     mkdir -p $out
     cp -r ${dshTuiSrc}/. $out/
     chmod -R u+w $out
-    mkdir -p $out/dsh-auth $out/dsh-ecosystem-spec $out/vendor/dsh-std
-    cp -r ${dshAuthSrc}/. $out/dsh-auth/
+    mkdir -p $out/dsh-ecosystem-spec $out/vendor/dsh-std
     cp -r ${dshEcosystemSpecSrc}/. $out/dsh-ecosystem-spec/
     cp -r ${dshStdSrc}/. $out/vendor/dsh-std/
   '';
@@ -57,12 +49,6 @@ let
     pname = "dsh-std";
     src = dshStdSrc;
     hash = "sha256-6b+GkosWdqzXbYypLghuCpB6ioMSdA4Jcr9XUs5XNX8=";
-  });
-
-  dshAuthPnpmDeps = pkgs.fetchPnpmDeps (fetchPnpmDepsArgs // {
-    pname = "dsh-auth";
-    src = dshAuthSrc;
-    hash = "sha256-+kj3H8dbEwL2ale+iQef0S+SXJgZ37qtvhjPs2Njxic=";
   });
 
   dshTuiPnpmDeps = pkgs.fetchPnpmDeps (fetchPnpmDepsArgs // {
@@ -114,19 +100,11 @@ let
       }
 
       stdStore=$TMPDIR/dsh-std-store
-      authStore=$TMPDIR/dsh-auth-store
       restorePnpmStore ${dshStdPnpmDeps} "$stdStore"
-      restorePnpmStore ${dshAuthPnpmDeps} "$authStore"
 
       (
         cd "$root/vendor/dsh-std"
         pnpm --offline --store-dir "$stdStore" \
-          --config.confirmModulesPurge=false \
-          install --ignore-scripts --frozen-lockfile
-      )
-      (
-        cd "$root/dsh-auth"
-        pnpm --offline --store-dir "$authStore" \
           --config.confirmModulesPurge=false \
           install --ignore-scripts --frozen-lockfile
       )
@@ -144,7 +122,6 @@ let
         )
       done
 
-      pnpm --dir dsh-auth run build
       node scripts/clean-lib.mjs
       "$root/node_modules/.bin/tsc" -p tsconfig.json
       runHook postBuild
@@ -311,14 +288,18 @@ in
 
     run mkdir -p "$tuiScope" "$tuiPlugins"
 
-    # Replace only the two packages owned by this deployment.  Other files in
+    # Replace only the package owned by this deployment. Other files in
     # the profile (including a user's cordis patch and extra plugins) survive.
-    for package in dsh-tui dsh-auth; do
-      target="$tuiScope/$package"
-      if [ -e "$target" ] || [ -L "$target" ]; then
-        run /run/current-system/sw/bin/remove-without-permission -rf "$target"
-      fi
-    done
+    target="$tuiScope/dsh-tui"
+    if [ -e "$target" ] || [ -L "$target" ]; then
+      run /run/current-system/sw/bin/remove-without-permission -rf "$target"
+    fi
+    # Remove the old bundled auth package from profiles created by the prior
+    # module revision. Only the exact package owned by dsh-tui is targeted.
+    tuiAuth="$tuiScope/dsh-auth"
+    if [ -e "$tuiAuth" ] || [ -L "$tuiAuth" ]; then
+      run /run/current-system/sw/bin/remove-without-permission -rf "$tuiAuth"
+    fi
     run cp -rL ${dshTui}/node_modules/. "$tuiModules/"
     run cp -rL ${dshTui}/package "$tuiScope/dsh-tui"
     # The profile patch below references a local plugin. Keep it a real file
@@ -328,6 +309,16 @@ in
       run /run/current-system/sw/bin/remove-without-permission -f "$tuiPlugins/confirm-writes.mjs"
     fi
     run install -m 644 ${./profiles/web/plugins/confirm-writes.mjs} "$tuiPlugins/confirm-writes.mjs"
+
+    # The lean fork no longer ships Liangshen. Remove only a prior dsh-tui
+    # managed copy; an unmanaged user preset with the same id is untouched.
+    tuiLiangshen="$HOME/.dsh/.agent-presets/liangshen"
+    if [ -f "$tuiLiangshen/.dsh-tui-managed.json" ] \
+      && ${pkgs.jq}/bin/jq -e \
+        '(.owner == "@deepseek-harness-tui/dsh-tui" and .preset == "liangshen")' \
+        "$tuiLiangshen/.dsh-tui-managed.json" >/dev/null 2>&1; then
+      run /run/current-system/sw/bin/remove-without-permission -rf "$tuiLiangshen"
+    fi
 
     if [ -L "$tuiManifest" ]; then
       run /run/current-system/sw/bin/remove-without-permission -f "$tuiManifest"
