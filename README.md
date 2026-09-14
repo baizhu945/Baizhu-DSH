@@ -99,8 +99,8 @@ Codex preset 只改变选中该 preset 的 session 的 model-facing surface：SS
 ## 模型、账号与 UI 修复
 
 - 修正 pi-ai 将 GPT-5.6 的价格分层阈值误当成上下文上限的问题，相关 OpenAI/Codex 条目使用约 105 万上下文窗口。
-- `openai-codex-account.mjs` 复用 pi-ai 的 OAuth 流程，支持 ChatGPT Plus/Pro token plan；凭据保存为 `~/.dsh/openai-codex-credentials.json`（权限 0600），并在请求前自动刷新 access token。
-- Web 中可使用 `/openai-login`、`/openai-logout`、`/openai-status`，也可在设置页的 **OpenAI 账号** 分节操作。
+- 从 dsh-TUI 的 `dsh-auth` 子模块（固定提交 `cc6ec522…`）构建订阅 OAuth provider；ChatGPT/Codex、Claude 和 Grok 共用 `~/.dsh/dsh-auth/credentials.json`，凭据原子保存并在请求前自动刷新。
+- Web、TUI 和 headless profile 都挂载 `dsh-auth`；交互入口为 `/auth login openai-codex`、`/auth logout openai-codex`、`/auth status`，浏览器登录会自动打开系统默认浏览器，并保留设备码/手动回退路径。
 - `tool-bottom-collapse.patch` 在长卡片底部提供折叠按钮；`bash-command-hscroll.patch` 保留长命令原文并让状态/复制控件固定可见。
 
 ## 持久化与技能

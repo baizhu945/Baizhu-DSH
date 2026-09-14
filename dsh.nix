@@ -29,6 +29,29 @@ let
     hash = "sha256-/VnxXqJ3MUXIPB4rXOKu5FtArYVjyEry4ptRNHxYnrc=";
   };
 
+  # dsh-TUI 的 dsh-auth 子模块：提供 ChatGPT/Codex、Claude 和 Grok
+  # 订阅账号 OAuth 登录、凭据存储/刷新与 provider 路由。固定到 TUI
+  # 主仓库当前引用的子模块提交，避免跟随 main 分支漂移。
+  dshAuthSrc = pkgs.fetchFromGitHub {
+    owner = "ccch1mneyyy";
+    repo = "dsh-auth";
+    rev = "cc6ec5224b62b6e6508c0109ef19e93b0a5c0a0e";
+    hash = "sha256-yL1ruV86qvi4RWfph9ANKcBrHi5p+ZpRPP5O/Q4PBJA=";
+  };
+
+  dshAuthPnpmDeps = pkgs.fetchPnpmDeps {
+    pname = "dsh-auth";
+    src = dshAuthSrc;
+    fetcherVersion = 4;
+    prePnpmInstall = ''
+      export NIX_NPM_REGISTRY=https://registry.npmmirror.com
+      pnpm config set fetch-timeout 600000
+      pnpm config set fetch-retries 5
+      pnpm config set network-concurrency 4
+    '';
+    hash = "sha256-+kj3H8dbEwL2ale+iQef0S+SXJgZ37qtvhjPs2Njxic=";
+  };
+
   dsh = pkgs.stdenv.mkDerivation {
     pname = "dsh";
     version = "0.1.5-rc.1";
@@ -120,25 +143,67 @@ let
     };
   };
 
+  dshAuth = pkgs.stdenv.mkDerivation {
+    pname = "dsh-auth";
+    version = "0.1.0";
+    src = dshAuthSrc;
+    pnpmDeps = dshAuthPnpmDeps;
+
+    nativeBuildInputs = [
+      pkgs.nodejs_22
+      pkgs.pnpm_11
+      pkgs.pnpmConfigHook
+      pkgs.typescript
+    ];
+
+    __structuredAttrs = true;
+    strictDeps = true;
+    pnpmInstallFlags = [ "--frozen-lockfile" "--shamefully-hoist" ];
+
+    postPatch = ''
+      # pnpm 11's Nix hook verifies the dependency tree before every run;
+      # the fixed pnpmDeps already performed that check during installation.
+      echo 'verifyDepsBeforeRun: false' >> pnpm-workspace.yaml
+    '';
+
+    buildPhase = ''
+      runHook preBuild
+      pnpm run build
+      runHook postBuild
+    '';
+
+    installPhase = ''
+      runHook preInstall
+      mkdir -p $out
+      cp -r lib dsh-plugin.json cordis.patch.yml package.json README.md LICENSE $out/
+      runHook postInstall
+    '';
+
+    dontFixup = true;
+
+    meta = {
+      description = "Subscription OAuth provider routes for DeepSeek Harness";
+      homepage = "https://github.com/ccch1mneyyy/dsh-auth";
+      license = lib.licenses.mit;
+      mainProgram = "dsh-auth";
+    };
+  };
+
   # Files copied by dshPlugins rather than linked through home.file. The
   # previous manifest lets activation remove only files it owned when a
   # managed plugin is later removed from this list.
   dshManagedPluginPaths = pkgs.writeText "dsh-managed-plugin-paths" ''
     profiles/headless/plugins/cc-connect-startup.mjs
     profiles/headless/plugins/cc-connect-runner.mjs
-    profiles/headless/plugins/openai-codex-account.mjs
-    profiles/web/plugins/openai-codex-account.mjs
     profiles/web/node_modules/dsh-baizhu-approval/package.json
     profiles/web/node_modules/dsh-baizhu-approval/index.mjs
     profiles/web/node_modules/dsh-baizhu-approval/client.js
-    profiles/web/node_modules/dsh-openai-account-ui/package.json
-    profiles/web/node_modules/dsh-openai-account-ui/index.mjs
-    profiles/web/node_modules/dsh-openai-account-ui/client.js
   '';
 
 in
 {
   _module.args.dsh = dsh;
+  _module.args.dshAuth = dshAuth;
 
   imports = [
     ./skills.nix
@@ -198,6 +263,43 @@ in
     seedRuntimePatch "$HOME/.dsh/profiles/web/cordis.patch.yml" "${./profiles/web/cordis.patch.yml}"
   '';
 
+  # The old account bridge used to leave Codex model selections under the
+  # non-existent `openai` route. Migrate only that exact stale shape once;
+  # other providers and later user choices are left untouched.
+  home.activation.dshOpenAICodexMigration = lib.hm.dag.entryAfter [ "dshRuntimePatches" ] ''
+    settings="$HOME/.dsh/settings.yaml"
+    marker="$HOME/.dsh/.home-manager-openai-codex-migrated"
+    if [ ! -e "$marker" ] && [ -f "$settings" ]; then
+      provider="$(${pkgs.gawk}/bin/awk '
+        /^agent-default-model:$/ { section = 1; next }
+        section && /^[^[:space:]]/ { exit }
+        section && /^  provider: / { print $2; exit }
+      ' "$settings")"
+      model="$(${pkgs.gawk}/bin/awk '
+        /^agent-default-model:$/ { section = 1; next }
+        section && /^[^[:space:]]/ { exit }
+        section && /^  model: / { print $2; exit }
+      ' "$settings")"
+      case "$provider:$model" in
+        openai:gpt-5.3-codex-spark|\
+        openai:gpt-5.4|\
+        openai:gpt-5.4-mini|\
+        openai:gpt-5.5|\
+        openai:gpt-5.6-*|\
+        openai:gpt-6-astra)
+          run ${pkgs.gawk}/bin/awk '
+            /^agent-default-model:$/ { section = 1 }
+            section && /^[^[:space:]]/ && $0 !~ /^agent-default-model:$/ { section = 0 }
+            section && /^  provider: openai$/ { sub(/^  provider: openai$/, "  provider: openai-codex") }
+            { print }
+          ' "$settings" > "$settings.tmp"
+          run mv "$settings.tmp" "$settings"
+          run touch "$marker"
+          ;;
+      esac
+    fi
+  '';
+
   # 插件文件的真实文件部署
   #
   # home.file 的所有产物(含 .text)都是符号链接;Node ESM 加载插件时会
@@ -228,6 +330,22 @@ in
       while IFS= read -r rel; do
         [ -n "$rel" ] && removeManagedPluginPath "$rel"
       done < "$managedPluginManifest"
+    fi
+
+    # Migrate away from the old hand-written OpenAI bridge. The paths are
+    # explicit so the migration also works after the old ownership manifest
+    # has already been replaced by a newer generation.
+    for rel in \
+      profiles/headless/plugins/openai-codex-account.mjs \
+      profiles/web/plugins/openai-codex-account.mjs \
+      profiles/web/node_modules/dsh-openai-account-ui/package.json \
+      profiles/web/node_modules/dsh-openai-account-ui/index.mjs \
+      profiles/web/node_modules/dsh-openai-account-ui/client.js; do
+      removeManagedPluginPath "$rel"
+    done
+    legacyOpenAIUi="$HOME/.dsh/profiles/web/node_modules/dsh-openai-account-ui"
+    if [ -e "$legacyOpenAIUi" ] || [ -L "$legacyOpenAIUi" ]; then
+      run /run/current-system/sw/bin/remove-without-permission -rf "$legacyOpenAIUi"
     fi
 
     # dsh heals the current dependency closure into these node_modules
@@ -266,7 +384,6 @@ in
       "$HOME/.dsh/profiles/headless/plugins" \
       "$HOME/.dsh/profiles/web/plugins" \
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval" \
-      "$HOME/.dsh/profiles/web/node_modules/dsh-openai-account-ui" \
       "$HOME/.dsh/profiles/node_modules/@deepseek-ai"
 
     run install -m 644 ${./profiles/headless/plugins/cc-connect-startup.mjs} \
@@ -279,19 +396,28 @@ in
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval/index.mjs"
     run install -m 644 ${./profiles/web/node_modules/dsh-baizhu-approval/client.js} \
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval/client.js"
-    run install -m 644 ${./profiles/web/node_modules/dsh-openai-account-ui/package.json} \
-      "$HOME/.dsh/profiles/web/node_modules/dsh-openai-account-ui/package.json"
-    run install -m 644 ${./profiles/web/node_modules/dsh-openai-account-ui/index.mjs} \
-      "$HOME/.dsh/profiles/web/node_modules/dsh-openai-account-ui/index.mjs"
-    run install -m 644 ${./profiles/web/node_modules/dsh-openai-account-ui/client.js} \
-      "$HOME/.dsh/profiles/web/node_modules/dsh-openai-account-ui/client.js"
 
-    # OpenAI 账号登录插件:带 bare import(pi-ai / dsh-llm),符号链接会被 ESM
-    # realpath 到 /nix/store 导致找不到依赖,因此必须真实拷贝到 profile 插件目录。
-    run install -m 644 ${./profiles/web/plugins/openai-codex-account.mjs} \
-      "$HOME/.dsh/profiles/web/plugins/openai-codex-account.mjs"
-    run install -m 644 ${./profiles/web/plugins/openai-codex-account.mjs} \
-      "$HOME/.dsh/profiles/headless/plugins/openai-codex-account.mjs"
+    # dsh-auth imports the exact pi-ai instance owned by dsh-llm-pi-ai. Keep
+    # it as a real profile file (not a home.file symlink) and install the same
+    # package into Web and headless profiles so both surfaces share its
+    # DSH_AUTH_CREDENTIALS default and provider implementation.
+    installDshAuth() {
+      profile="$1"
+      if [ "$profile" = shared ]; then
+        target="$HOME/.dsh/profiles/node_modules/@deepseek-harness-tui/dsh-auth"
+      else
+        target="$HOME/.dsh/profiles/$profile/node_modules/@deepseek-harness-tui/dsh-auth"
+      fi
+      if [ -e "$target" ] || [ -L "$target" ]; then
+        run chmod -R u+rwX "$target"
+        run /run/current-system/sw/bin/remove-without-permission -rf "$target"
+      fi
+      run mkdir -p "$(dirname "$target")"
+      run cp -rL ${dshAuth}/. "$target"
+    }
+    installDshAuth web
+    installDshAuth headless
+    installDshAuth shared
 
     # Codex preset's PTY backend is shipped in the dsh installation but is not
     # part of the Web bundle's automatic dependency heal set. Keep its three

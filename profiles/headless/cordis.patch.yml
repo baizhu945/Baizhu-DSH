@@ -97,5 +97,8 @@
       name: './plugins/cc-connect-runner.mjs'
       inject: [ccConnectStartup]
 
-    - id: openai-codex-account
-      name: './plugins/openai-codex-account.mjs'
+    # dsh-TUI 的 dsh-auth 子模块提供 OAuth provider 路由与自动刷新；
+    # headless 环境只使用已保存凭据，不会假定存在浏览器或交互 UI。
+    - id: dsh-auth
+      name: '@deepseek-harness-tui/dsh-auth'
+      inject: [llm, commands]

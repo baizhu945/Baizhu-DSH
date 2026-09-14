@@ -14,15 +14,16 @@ const fs = process.getBuiltinModule('node:fs/promises')
 const nodeDns = process.getBuiltinModule('node:dns')
 const nodeHttps = process.getBuiltinModule('node:https')
 const nodePath = process.getBuiltinModule('node:path')
-const { randomUUID } = process.getBuiltinModule('node:crypto')
 const { pathToFileURL } = process.getBuiltinModule('node:url')
 const dshHome = process.env.DSH_HOME ?? `${process.env.HOME ?? '/home/baizhu945'}/.dsh`
 const requireFromDsh = createRequire(`${dshHome}/profiles/codex-web-search.cjs`)
 const toolsEntry = requireFromDsh.resolve('@deepseek-ai/dsh-tools')
 const { defineTool } = await import(toolsEntry)
+const dshAuthEntry = requireFromDsh.resolve('@deepseek-harness-tui/dsh-auth')
+const { CredentialFile } = await import(dshAuthEntry)
 
 // Reuse only the OAuth token refresh implementation. No dsh web provider is
-// loaded, and the token file remains owned by the existing account plugin.
+// loaded; the credential document remains owned by dsh-auth.
 const piAiRoot = pathToFileURL(nodePath.join(dshHome, 'profiles/node_modules/@earendil-works/pi-ai') + '/')
 const { openaiCodexOAuth } = await import(new URL('dist/auth/oauth/openai-codex.js', piAiRoot).href)
 
@@ -31,7 +32,9 @@ const SEARCH_TIMEOUT_MS = 60_000
 const SEARCH_RETRY_BACKOFF_MS = [250, 1_000]
 const REFRESH_SKEW_MS = 60_000
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
-const credentialFile = nodePath.join(dshHome, 'openai-codex-credentials.json')
+const credentialFile = process.env.DSH_AUTH_CREDENTIALS?.trim()
+  || nodePath.join(dshHome, 'dsh-auth', 'credentials.json')
+const credentialStore = new CredentialFile(credentialFile)
 const HOSTED_WEB_SEARCH = 'web_search'
 const HOSTED_WEB_SEARCH_MAX_RESULTS = 8
 const HOSTED_WEB_SEARCH_MAX_QUERIES = 4
@@ -42,31 +45,11 @@ const WEB_RUN_DESCRIPTION = (await fs.readFile(
 let refreshChain = Promise.resolve()
 
 async function readCredential() {
-  try {
-    const raw = await fs.readFile(credentialFile, 'utf8')
-    const value = JSON.parse(raw)
-    return value !== null && typeof value === 'object' ? value : undefined
-  } catch (error) {
-    if (error?.code === 'ENOENT') return undefined
-    throw error
-  }
+  return credentialStore.read('openai-codex')
 }
 
 async function writeCredential(value) {
-  await fs.mkdir(nodePath.dirname(credentialFile), { recursive: true, mode: 0o700 })
-  const temporary = `${credentialFile}.web-search.${process.pid}.${randomUUID()}.tmp`
-  let installed = false
-  try {
-    await fs.writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600 })
-    await fs.rename(temporary, credentialFile)
-    installed = true
-  } finally {
-    if (!installed) {
-      try { await fs.unlink(temporary) } catch (error) {
-        if (error?.code !== 'ENOENT') throw error
-      }
-    }
-  }
+  await credentialStore.modify('openai-codex', async () => value)
 }
 
 function decodeJwtPayload(token) {
@@ -99,10 +82,10 @@ async function accessToken(signal) {
   if (signal.aborted) throw new Error('web.run was aborted')
   const credential = await readCredential()
   if (credential === undefined) {
-    throw new Error('OpenAI Codex web search requires an OpenAI account login; run /openai-login first')
+    throw new Error('OpenAI Codex web search requires an OpenAI account login; run /auth login openai-codex first')
   }
   if (typeof credential.access !== 'string' || typeof credential.refresh !== 'string') {
-    throw new Error('OpenAI Codex web search found invalid credentials; run /openai-login again')
+    throw new Error('OpenAI Codex web search found invalid credentials; run /auth login openai-codex again')
   }
   if (typeof credential.expires === 'number' && credential.expires - Date.now() > REFRESH_SKEW_MS) {
     return {
@@ -114,7 +97,7 @@ async function accessToken(signal) {
   const refresh = async () => {
     const current = await readCredential()
     if (current === undefined || typeof current.access !== 'string' || typeof current.refresh !== 'string') {
-      throw new Error('OpenAI Codex web search credentials disappeared; run /openai-login again')
+      throw new Error('OpenAI Codex web search credentials disappeared; run /auth login openai-codex again')
     }
     if (typeof current.expires === 'number' && current.expires - Date.now() > REFRESH_SKEW_MS) {
       return {
@@ -122,7 +105,7 @@ async function accessToken(signal) {
         accountId: typeof current.accountId === 'string' ? current.accountId : accountIdFromToken(current.access),
       }
     }
-    const refreshed = await openaiCodexOAuth.refresh(current)
+    const refreshed = await openaiCodexOAuth.refresh(current, signal)
     if (refreshed?.access === undefined || refreshed.refresh === undefined) {
       throw new Error('OpenAI Codex web search OAuth refresh returned incomplete credentials')
     }

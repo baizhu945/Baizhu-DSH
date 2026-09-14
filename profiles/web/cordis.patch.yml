@@ -22,17 +22,12 @@
     - id: approval-tweaks
       name: 'dsh-baizhu-approval'
 
-    # OpenAI 账号登录插件:注册 openai-codex provider(ChatGPT Plus/Pro token
-    # plan),提供 /openai-login、/openai-logout、/openai-status 命令。
-    # 真实文件部署见 dsh.nix home.activation.dshPlugins(不能是符号链接)。
-    - id: openai-codex-account
-      name: './plugins/openai-codex-account.mjs'
-
-    # OpenAI 账号登录的 Web UI 分节(设置 → OpenAI 账号):浏览器半体通过
-    # dsh.client 自动加载,host 半体为空。包文件部署见 dsh.nix
-    # home.activation.dshPlugins(真实拷贝到 web profile node_modules)。
-    - id: openai-account-ui
-      name: 'dsh-openai-account-ui'
+    # dsh-TUI 的 dsh-auth 子模块：提供 OpenAI Codex/ChatGPT 订阅 OAuth、
+    # 自动浏览器登录、凭据刷新及 /auth 命令。包文件由 dsh.nix 的激活
+    # 步骤真实拷贝到本 profile，避免 Nix store 符号链接破坏 ESM 解析。
+    - id: dsh-auth
+      name: '@deepseek-harness-tui/dsh-auth'
+      inject: [llm, commands]
 
 # inventory 扩展会把 profile 根 package.json 作为本地插件的所属 manifest；
 # 该文件没有 version，导致请求在发出前失败。

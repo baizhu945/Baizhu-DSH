@@ -1,4 +1,4 @@
-{ config, pkgs, lib, ... }:
+{ config, pkgs, lib, dshAuth, ... }:
 
 let
   # Keep the TUI and its vendored std dependency on immutable commits.  The
@@ -205,9 +205,14 @@ let
     private = true;
     dependencies = {
       "@deepseek-harness-tui/dsh-tui" = "file:${dshTui}/package";
+      "@deepseek-harness-tui/dsh-auth" = "file:${dshAuth}";
     };
     dsh.profile = {
-      bundles = [ "@deepseek-ai/dsh-base" "@deepseek-harness-tui/dsh-tui" ];
+      bundles = [
+        "@deepseek-ai/dsh-base"
+        "@deepseek-harness-tui/dsh-tui"
+        "@deepseek-harness-tui/dsh-auth"
+      ];
       patchReload = "live";
     };
   });
@@ -260,6 +265,7 @@ let
   dshTuiManagedMarker = pkgs.writeText "dsh-tui-managed" ''
     home-manager
     @deepseek-harness-tui/dsh-tui
+    @deepseek-harness-tui/dsh-auth
   '';
 
   dshTuiLauncher = pkgs.writeShellScriptBin "dsh-tui" ''
@@ -294,14 +300,16 @@ in
     if [ -e "$target" ] || [ -L "$target" ]; then
       run /run/current-system/sw/bin/remove-without-permission -rf "$target"
     fi
-    # Remove the old bundled auth package from profiles created by the prior
-    # module revision. Only the exact package owned by dsh-tui is targeted.
+    # Install the dsh-auth submodule package alongside dsh-tui. Only this
+    # package-owned path is replaced; user-added profile packages survive.
     tuiAuth="$tuiScope/dsh-auth"
     if [ -e "$tuiAuth" ] || [ -L "$tuiAuth" ]; then
+      run chmod -R u+rwX "$tuiAuth"
       run /run/current-system/sw/bin/remove-without-permission -rf "$tuiAuth"
     fi
     run cp -rL ${dshTui}/node_modules/. "$tuiModules/"
     run cp -rL ${dshTui}/package "$tuiScope/dsh-tui"
+    run cp -rL ${dshAuth}/. "$tuiAuth"
     # The profile patch below references a local plugin. Keep it a real file
     # so Node resolves the profile-relative import rather than a Nix-store
     # symlink, and reconcile only this file owned by the TUI deployment.
@@ -333,12 +341,15 @@ in
       run ${pkgs.jq}/bin/jq \
         --arg bundle '@deepseek-harness-tui/dsh-tui' \
         --arg source 'file:${dshTui}/package' \
-        '.dependencies = ((.dependencies // {}) + {($bundle): $source})
+        --arg authBundle '@deepseek-harness-tui/dsh-auth' \
+        --arg authSource 'file:${dshAuth}' \
+        '.dependencies = ((.dependencies // {}) + {($bundle): $source, ($authBundle): $authSource})
         | .dsh = (.dsh // {})
         | .dsh.profile = (.dsh.profile // {})
         | .dsh.profile.bundles = (((.dsh.profile.bundles // [])
           | if index("@deepseek-ai/dsh-base") == null then ["@deepseek-ai/dsh-base"] + . else . end)
-          | if index($bundle) == null then . + [$bundle] else . end)
+          | if index($bundle) == null then . + [$bundle] else . end
+          | if index($authBundle) == null then . + [$authBundle] else . end)
         | .dsh.profile.patchReload = (.dsh.profile.patchReload // "live")' \
         "$tuiManifest" > "$tuiManifest.tmp"
       run mv "$tuiManifest.tmp" "$tuiManifest"
