@@ -65,10 +65,27 @@ dsh --profile headless --session-id abc --model deepseek-v4-pro \
 | `--list-models` | 输出 dsh 当前运行时 provider/model catalog 的 JSON，不创建 agent |
 | `--jsonl` | stdout 流式输出 text/thinking/tool/approval/result/done 事件，并从 stdin 接收审批 |
 
+### cc-connect JSONL 协议
+
+这里保留自定义 `--jsonl`，而不是切换到 dsh/其他 CLI 的 `--json`：cc-connect 需要同时接收增量输出和审批请求，并在同一个进程的 stdin 回写审批决定。两端当前使用的调用和事件契约如下：
+
+- 普通回合：`cc-connect` 调用 `dsh --profile headless --session-id <id> [--provider <provider>] [--model <model>] [--reasoning-effort <effort>] [--mode <mode>] [--preset <name>] --jsonl <task>`；选项置于 task 之前。
+- 模型目录：调用 `--list-models`（不创建 session），读取一行 `{ "type": "models", "models": [...], "reasoningEfforts": [...] }` JSON。
+- stdout 事件：`text {text}`、`thinking {text}`、`tool/call {callId,name,arguments}`、`tool/result {callId,name,content,isError?}`、`approval/request {id,toolName,reason?,callId?}`、`result {text}` 和 `done {success,sessionId}`。
+- 审批：dsh 输出的 request `id` 在 cc-connect 内部会包装为 `dsh_<id>`；cc-connect 回写时去掉此前缀，发送 `{"type":"approval/response","id":"<id>","outcome":"allowed-once"}` 或 `outcome":"rejected"`，每条一行。
+
+因此 `--jsonl` 是本地 dsh runner 与 cc-connect 的明确私有协议；若未来改用官方 `--json`，必须同步迁移参数构造、所有事件类型/字段、审批 stdin 回写、终局处理和对应测试，不能只替换一个 flag。
+
 `--jsonl` 的审批回应用一行 JSON，例如：
 
 ```json
-{"type":"approval/response","id":"<request id>","outcome":"allowed-once"}
+{"type":"approval/response","id":"<raw request id>","outcome":"allowed-once"}
+```
+
+协议静态回归测试（不需要加载构建后的 dsh 依赖树）：
+
+```bash
+node --test profiles/headless/plugins/cc-connect-protocol.test.mjs
 ```
 
 headless 的权限映射是：Read Only = `read-only + ask`，Workspace Write = `workspace-write + ask`，Full Access = `danger-full-access + never`，Confirm = `danger-full-access + ask`。Confirm 模式会额外拦截 `write`、`edit`、`str_replace_editor`、`bash`、`pwsh` 和 `terminal_send`。
