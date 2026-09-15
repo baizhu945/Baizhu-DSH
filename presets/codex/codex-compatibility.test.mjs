@@ -786,11 +786,21 @@ test('Terra and Sol retain their catalog-owned response preferences', () => {
   }
 })
 
+test('Astra consumes the current catalog message and collaboration fields', () => {
+  const profile = profileForModel('gpt-6-astra')
+  assert.equal(profile.toolMode, 'code_mode_only')
+  assert.equal(profile.multiAgentVersion, 'v2')
+  assert.equal(profile.contextWindow, 272_000)
+  assert.equal(profile.maxContextWindow, 872_000)
+  assert.equal(profile.tokenBudget.reminderThresholdTokens, 6144)
+  assert.match(profile.instructions, /You are Codex, an agent based on GPT-6/)
+})
+
 test('model truncation policy caps unified-exec output budgets', () => {
   const bytesModel = { options: { model: 'gpt-5.2' }, session: {} }
   const tokenModel = { options: { model: 'gpt-5.4' }, session: {} }
-  assert.equal(outputTokenBudget(bytesModel, undefined), 2500)
-  assert.equal(outputTokenBudget(bytesModel, 50_000), 2500)
+  assert.equal(outputTokenBudget(bytesModel, undefined), 10_000)
+  assert.equal(outputTokenBudget(bytesModel, 50_000), 10_000)
   assert.equal(outputTokenBudget(tokenModel, undefined), 10_000)
   assert.equal(outputTokenBudget(tokenModel, 50_000), 10_000)
 })

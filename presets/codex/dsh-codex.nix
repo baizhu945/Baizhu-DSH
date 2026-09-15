@@ -1,14 +1,14 @@
 { pkgs, lib, ... }:
 
 let
-  # OpenAI/codex model catalog @ 2b7c279735d0d096cf7b34fe98938f46792f4d4f.
+  # OpenAI/codex model catalog @ 954fa9057bf3a4521ea34dbd010ff291d5b39763.
   # The catalog is mounted only below the Codex preset. Its base_instructions
   # and capability fields are read by codex-model-parity.mjs per request, so a
   # model switch changes the model-facing contract without touching other
   # agent presets or the host model registry.
   codexModelsSource = pkgs.fetchurl {
-    url = "https://raw.githubusercontent.com/openai/codex/2b7c279735d0d096cf7b34fe98938f46792f4d4f/codex-rs/models-manager/models.json";
-    hash = "sha256-6w17ml3K8QOJXF+KFMFrJp30bgObN1pVupf2I4VC0u0=";
+    url = "https://raw.githubusercontent.com/openai/codex/954fa9057bf3a4521ea34dbd010ff291d5b39763/codex-rs/models-manager/models.json";
+    hash = "sha256-hogmwdJA75/p/9aANnfF5Io3lMTOEzvOzO02Wp/egV0=";
   };
 
   # The upstream catalog exposes GPT-5.6 with a 272K base window and an
