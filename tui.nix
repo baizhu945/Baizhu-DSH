@@ -4,6 +4,13 @@ let
   # Keep the TUI and its vendored std dependency on immutable commits.  The
   # submodules are materialized below because GitHub source archives contain
   # only empty submodule directories.
+  #
+  # Compatibility hold (2026-09-15): dsh master/0.1.6-alpha.1 has no upstream
+  # dsh-TUI or dsh-auth commit declaring or verifying that line. The selected
+  # TUI commit is the last locally validated dsh 0.1.5-rc.1 adapter; dsh-auth is
+  # supplied by dsh.nix at its last 0.1.5-rc.1-compatible commit. Do not widen
+  # either peer range or change these pins until an upstream compatibility
+  # commit exists (or a separately verified adapter patch is available).
   dshTuiVersion = "0.10.0";
   dshTuiSrc = pkgs.fetchFromGitHub {
     owner = "baizhu945";
@@ -218,6 +225,12 @@ let
   });
 
   dshTuiProfileEmptyPatch = pkgs.writeText "dsh-tui-profile-empty-cordis.patch.yml" "[]\n";
+
+  # dsh applies the home-level patch after this profile layer. Consequently
+  # its llm-deepseek row replaces the TUI bundle row as a whole; this profile
+  # must not pretend to override that setting locally. In dsh 0.1.6-alpha.1
+  # the omitted protocol defaults to Messages, so the home patch owner must
+  # explicitly choose chat-completions if that is the intended endpoint.
   dshTuiProfilePatch = pkgs.writeText "dsh-tui-profile-cordis.patch.yml" ''
     # The TUI profile is intentionally aligned with the user's Web profile:
     # `confirm` gives full access while the local plugin asks before every
