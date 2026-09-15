@@ -86,6 +86,14 @@ let
       # The hoisted layout is intentional: the installed plugin must share
       # the dsh installation's Cordis and Harness peer instances.
       echo 'verifyDepsBeforeRun: false' >> pnpm-workspace.yaml
+      # dsh-TUI 0.10.0 still ships rows for the removed worker-thread runtime
+      # and the pre-PTC workflow engine. The current dsh-base already supplies
+      # ptc-runtime/workflow-ptc, so remove only those stale optional rows
+      # before the bundle patch is copied into the profile.
+      sed -i \
+        -e '/^    - id: dsh-tui-code-runtime$/,+2d' \
+        -e '/^- id: workflow-worker-thread$/,+1d' \
+        cordis.patch.yml
     '';
 
     preBuild = ''
@@ -230,12 +238,6 @@ let
   # complete llm-deepseek row therefore remains authoritative; on dsh
   # 0.1.6-alpha.1 its omitted protocol follows the official Messages default.
   dshTuiProfilePatch = pkgs.writeText "dsh-tui-profile-cordis.patch.yml" ''
-    # dsh-TUI 0.10.0 still inserts the removed code-runtime worker row.
-    # dsh-base in 0.1.6 supplies PTC through ptc-runtime instead; disable the
-    # stale optional row in the profile layer before Loader tries to import it.
-    - id: dsh-tui-code-runtime
-      disabled: true
-
     # The TUI profile is intentionally aligned with the user's Web profile:
     # `confirm` gives full access while the local plugin asks before every
     # write/execute tool. This is profile configuration, not a TUI package
@@ -271,10 +273,6 @@ let
             approval: ask
             name: Confirm (ask)
             description: Full access, but every write and command asks for your approval
-  '';
-  dshTuiLegacyCodeRuntimePatch = pkgs.writeText "dsh-tui-legacy-code-runtime-disable.patch.yml" ''
-    - id: dsh-tui-code-runtime
-      disabled: true
   '';
   dshTuiProfileWorkspace = pkgs.writeText "dsh-tui-profile-pnpm-workspace.yaml" ''
     packages:
@@ -389,14 +387,11 @@ in
       run install -m 644 ${dshTuiProfilePatch} "$tuiPatch.tmp"
       run mv "$tuiPatch.tmp" "$tuiPatch"
     fi
-    # Existing TUI profile patches predate dsh 0.1.6, whose base no longer
-    # ships code-runtime-worker-thread. Append this idempotently rather than
-    # overwriting user-added rows, so the stale optional import is disabled.
-    if [ -f "$tuiPatch" ] && ! grep -Fq -- '- id: dsh-tui-code-runtime' "$tuiPatch"; then
-      run install -m 644 "$tuiPatch" "$tuiPatch.tmp"
-      run printf '\n' >> "$tuiPatch.tmp"
-      run cat ${dshTuiLegacyCodeRuntimePatch} >> "$tuiPatch.tmp"
-      run mv "$tuiPatch.tmp" "$tuiPatch"
+    # Remove the compatibility row written by the previous generation after
+    # the TUI bundle stopped needing code-runtime-worker-thread. Keep this
+    # migration idempotent and preserve all unrelated user rows.
+    if [ -f "$tuiPatch" ] && grep -Fq -- '- id: dsh-tui-code-runtime' "$tuiPatch"; then
+      run sed -i '/^- id: dsh-tui-code-runtime$/,+1d' "$tuiPatch"
     fi
     if [ ! -e "$tuiProfile/pnpm-workspace.yaml" ]; then
       run install -m 644 ${dshTuiProfileWorkspace} "$tuiProfile/pnpm-workspace.yaml"
