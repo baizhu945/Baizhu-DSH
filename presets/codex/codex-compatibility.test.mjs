@@ -627,7 +627,7 @@ test('V1 collaboration target checks point-read cold children', async () => {
 test('V1 send_input matches Codex and sends immediately after spawn', async () => {
   const registrations = []
   const parent = { id: 'parent', session: { id: 'parent', header: { id: 'parent' } } }
-  let followed
+  let sent
   const ctx = {
     on: () => undefined,
     tools: { register: tool => registrations.push(tool) },
@@ -637,10 +637,10 @@ test('V1 send_input matches Codex and sends immediately after spawn', async () =
       list: () => [],
       listChildren: async () => { throw new Error('send_input must not scan the global catalog') },
       interrupt: () => undefined,
-      followup: async (...args) => {
-        followed = args
+      sendMessage: async (...args) => {
+        sent = args
         return 'submission-id'
-      },
+      }
     },
   }
   registerAgents(ctx)
@@ -660,9 +660,10 @@ test('V1 send_input matches Codex and sends immediately after spawn', async () =
     { agent: parent, signal: new AbortController().signal },
   )
   assert.deepEqual(result, { submission_id: 'submission-id' })
-  assert.equal(followed[0], parent)
-  assert.equal(followed[1], 'child-id')
-  assert.deepEqual(followed[2], [{ type: 'text', text: 'continue the task' }])
+  assert.equal(sent[0], parent)
+  assert.equal(sent[1], 'child-id')
+  assert.deepEqual(sent[2], [{ type: 'text', text: 'continue the task' }])
+  assert.equal(sent[3].signal instanceof AbortSignal, true)
 })
 
 test('V1 lifecycle controls use an established child without a catalog race', async () => {
@@ -690,7 +691,7 @@ test('V1 lifecycle controls use an established child without a catalog race', as
         live = true
         return { childId: 'child-id' }
       },
-      followup: async () => 'unused',
+      sendMessage: async () => 'unused',
       interrupt: () => undefined,
     },
   }
@@ -865,7 +866,9 @@ test('V2 task names and statuses follow the canonical path/runtime boundaries', 
   assert.equal(v2Status(ctx, 'running', settlements, true), 'running')
   assert.deepEqual(v2Status(ctx, 'idle', settlements, true), { completed: null })
   assert.equal(v2Status(ctx, 'pending', settlements, true, { activity: 'running' }), 'pending_init')
-  assert.equal(v2FinalMessageId({ source: { kind: 'subagent-report', senderSessionId: 'child' } }, new Set(['child'])), 'child')
+  assert.equal(v2FinalMessageId({ source: { kind: 'agent-message', senderSessionId: 'child' } }, new Set(['child'])), 'child')
+  assert.equal(v2FinalMessageId({ source: { kind: 'coordinator', senderSessionId: 'child' } }, new Set(['child'])), undefined)
+  assert.equal(v2FinalMessageId({ source: { kind: 'subagent-report', senderSessionId: 'child' } }, new Set(['child'])), undefined)
 })
 
 test('V2 collaboration tools resolve task names, return canonical spawn paths, and list live agents', async () => {
@@ -882,7 +885,7 @@ test('V2 collaboration tools resolve task names, return canonical spawn paths, a
   const agents = new Map([['root', parent], ['child-id', child]])
   const row = { kind: 'child', id: 'child-id', mode: 'continuable', label: 'child_task', activity: 'running', hasChildren: false, parentId: 'root', depth: 1 }
   let started
-  let followed
+  const sentMessages = []
   const ctx = {
     on: () => () => {},
     agents: { get: id => agents.get(id) },
@@ -892,7 +895,13 @@ test('V2 collaboration tools resolve task names, return canonical spawn paths, a
       listChildren: async () => [row],
       listDescendants: async () => [row],
       startContinuable: async spec => { started = spec; return { childId: 'new-id' } },
-      followup: async (...args) => { followed = args; return 'submission' },
+      sendMessage: async (...args) => {
+        sentMessages.push(args)
+        const [, target, content] = args
+        const message = { id: 'message-' + String(sentMessages.length), content, source: { kind: 'agent-message', senderSessionId: parent.id } }
+        if (target === child.id) child.inject(message)
+        return message.id
+      },
       interrupt: () => {},
     },
   }
@@ -908,13 +917,15 @@ test('V2 collaboration tools resolve task names, return canonical spawn paths, a
   const sent = await tool('collaboration__send_message').execute({ target: 'child_task', message: 'ping' }, execution)
   assert.equal(sent.submission_id.length > 0, true)
   assert.equal(child.injected[0].content[0].text, 'ping')
+  assert.equal(child.injected[0].source.kind, 'agent-message')
   await tool('collaboration__followup_task').execute({ target: '/root/child_task', message: 'continue' }, execution)
-  assert.equal(followed[0], parent)
-  assert.equal(followed[1], 'child-id')
-  assert.deepEqual(followed[2], [{ type: 'text', text: 'continue' }])
+  assert.equal(sentMessages[1][0], parent)
+  assert.equal(sentMessages[1][1], 'child-id')
+  assert.deepEqual(sentMessages[1][2], [{ type: 'text', text: 'continue' }])
+  assert.equal(sentMessages[1][3].signal, execution.signal)
   const listed = await tool('collaboration__list_agents').execute({}, execution)
   assert.deepEqual(listed.agents.map(agent => agent.agent_name), ['/root', '/root/child_task'])
-  parent.inbox.nextStep.push({ id: 'report', source: { kind: 'subagent-report', senderSessionId: 'child-id' } })
+  parent.inbox.nextStep.push({ id: 'report', source: { kind: 'agent-message', senderSessionId: 'child-id' } })
   const waited = await tool('collaboration__wait_agent').execute({ timeout_ms: 0 }, execution)
   assert.equal(waited.timed_out, false)
   assert.match(waited.message, /clamped to the minimum of 10000ms/)
@@ -1240,7 +1251,7 @@ test('V2 mailbox wait resolves on a child report and ignores parent-to-child ins
   listeners.get('agent/inbox/inserted')({ agent: child, message: { source: { senderSessionId: 'parent' } } })
   listeners.get('agent/inbox/inserted')({
     agent: parent,
-    message: { source: { kind: 'subagent-report', senderSessionId: 'child' }, id: 'report' },
+    message: { source: { kind: 'agent-message', senderSessionId: 'child' }, id: 'report' },
   })
   assert.deepEqual(await pending, { kind: 'mailbox', id: 'child' })
   assert.equal(listeners.size, 0)

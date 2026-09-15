@@ -122,7 +122,7 @@ Codex preset 只改变选中该 preset 的 session 的 model-facing surface：SS
 
 ## 持久化与技能
 
-- `home-cordis.patch.yml` 将 DeepSeek provider 和 pi-ai 的 `minimax-cn` provider 的重试次数声明为 5，避免依赖源码级默认值。
+- provider 重试次数使用当前 dsh 官方默认值 5；不再通过全局 `home-cordis.patch.yml` 覆盖各 profile 的完整 provider 配置，避免 TUI/Web/headless 之间互相丢失设置。
 - `skills.nix` 合并本地 `agent/skills` 与 Anthropic 的 docx/pptx/xlsx/pdf/canvas-design、media-processor、idea-refine 以及 superpowers；技能由 `~/.dsh/skills/` 自动发现。
 
 ## 维护提示

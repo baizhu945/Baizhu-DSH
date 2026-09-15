@@ -2447,10 +2447,6 @@ function statusOf(ctx, id, known = false) {
   return child.status === 'running' ? 'running' : { completed: null }
 }
 
-function sourceFor(parent) {
-  return { kind: 'coordinator', form: 'relay', senderSessionId: parent.session.id }
-}
-
 async function directChildren(ctx, parent, signal, targetIds = []) {
   const targets = targetIds.filter(target => typeof target === 'string')
   const rows = []
@@ -2603,10 +2599,15 @@ function registerReportDelivery(ctx) {
     if (typeof output !== 'string' || output.trim().length === 0) {
       throw new Error('report output must be a non-empty string')
     }
-    const messageId = await ctx.subagents.reportFrom(
+    const parentSessionId = exec.agent.session.header.parentSession
+    const messageId = await ctx.subagents.sendMessage(
       exec.agent,
-      [{ type: 'text', text: output }],
-      { delivery: 'quiet', signal: exec.signal },
+      parentSessionId,
+      [
+        { type: 'text', text: `Background subagent ${exec.agent.id} reported:` },
+        { type: 'text', text: output },
+      ],
+      { signal: exec.signal },
     )
     reportedChildren.add(exec.agent.id)
     return { isError: false, value: { messageId }, content: [] }
@@ -2768,11 +2769,11 @@ function registerAgents(ctx) {
       if (args.interrupt === true) {
         ctx.subagents.interrupt(args.target, { kind: 'ancestor', agent: parent })
       }
-      const submissionId = await ctx.subagents.followup(
+      const submissionId = await ctx.subagents.sendMessage(
         parent,
         args.target,
         content,
-        { source: sourceFor(parent), signal: exec.signal },
+        { signal: exec.signal },
       )
       return { submission_id: submissionId }
     },

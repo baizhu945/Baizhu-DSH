@@ -17,7 +17,6 @@ const requireFromDsh = createRequire(dshHome + '/profiles/codex-model-parity.cjs
 const toolsEntry = requireFromDsh.resolve('@deepseek-ai/dsh-tools')
 const { defineTool, renderToolsSdk } = await import(toolsEntry)
 const llmEntry = requireFromDsh.resolve('@deepseek-ai/dsh-llm')
-const { createUserMessage } = await import(llmEntry)
 const { structuredPatch } = requireFromDsh('diff')
 
 const MODEL_CATALOG_PATH = nodePath.join(dshHome, '.agent-presets/codex/codex-models.json')
@@ -582,7 +581,7 @@ function isV1Tool(name) {
 /**
  * CodeModeOnly hides only tools that have a Code Mode binding.  Codex keeps
  * DirectModelOnly tools visible beside exec/wait: request_user_input and, by
- * default, the V2 coordinator surface.  They deliberately stay out of the
+ * default, the V2 collaboration surface.  They deliberately stay out of the
  * nested SDK.
  */
 function isCodeModeOnlyDirectTool(name, profile) {
@@ -1980,10 +1979,6 @@ async function v2Tree(ctx, parent, signal) {
   return { root, rows, cache }
 }
 
-function v2SourceFor(parent) {
-  return { kind: 'coordinator', form: 'relay', senderSessionId: parent.session.id }
-}
-
 async function v2Children(ctx, parent, signal) {
   const rows = await ctx.subagents.listChildren(parent.session.id, signal)
   const children = rows.filter(row => row.kind === 'child' && row.mode === 'continuable')
@@ -2104,15 +2099,17 @@ function v2Status(ctx, id, settlements, known = false, row) {
 
 function v2FinalMessageId(message, targets) {
   const source = message?.source
-  if (source?.kind !== 'subagent-settled' && source?.kind !== 'subagent-report') return undefined
+  if (source?.kind !== 'subagent-settled' && source?.kind !== 'agent-message') return undefined
   const id = String(source.senderSessionId)
   return targets.has(id) ? id : undefined
 }
 
 function v2MailboxMessageId(message, targets) {
+  const source = message?.source
+  if (source?.kind !== 'agent-message' && source?.kind !== 'subagent-settled') return undefined
   const id = v2FinalMessageId(message, targets)
   if (id !== undefined) return id
-  const sender = v2Id(message?.source?.senderSessionId)
+  const sender = v2Id(source.senderSessionId)
   return sender !== undefined && targets.has(sender) ? sender : undefined
 }
 
@@ -2303,9 +2300,13 @@ function registerV2Agents(ctx) {
       const target = ctx.agents.get(resolved.id)
       if (target === undefined) throw new Error('subagent is not live; use followup_task to cold-resume it')
       if (resolved.id === v2Id(parent.id)) throw new Error('an agent cannot send a message to itself')
-      const message = createUserMessage({ content: [{ type: 'text', text: targetText }], source: v2SourceFor(parent) })
-      target.inject(message)
-      return { submission_id: message.id }
+      const submissionId = await ctx.subagents.sendMessage(
+        parent,
+        resolved.id,
+        [{ type: 'text', text: targetText }],
+        { signal: execution.signal },
+      )
+      return { submission_id: submissionId }
     },
   }))
 
@@ -2322,9 +2323,12 @@ function registerV2Agents(ctx) {
       const targetText = v2MessageText(args.message)
       const resolved = await v2ResolveTarget(ctx, parent, args.target, execution.signal)
       if (resolved.id === v2Id(resolved.roster.root?.id)) throw new Error("Follow-up tasks can't target the root agent")
-      const authority = resolved.parentId === undefined ? undefined : ctx.agents.get(resolved.parentId)
-      if (authority === undefined) throw new Error('subagent direct parent is not live; cannot deliver follow-up')
-      const submissionId = await ctx.subagents.followup(authority, resolved.id, [{ type: 'text', text: targetText }], { source: v2SourceFor(parent), signal: execution.signal })
+      const submissionId = await ctx.subagents.sendMessage(
+        parent,
+        resolved.id,
+        [{ type: 'text', text: targetText }],
+        { signal: execution.signal },
+      )
       return { submission_id: submissionId }
     },
   }))
@@ -2507,7 +2511,7 @@ function registerModelParity(ctx) {
     if (agent === undefined) return assembled
     const profile = profileForModel(currentModel(agent, assembled))
     // nativeSchemas already mirrors the official CodeModeOnly visibility rule,
-    // including DirectModelOnly request_user_input and V2 coordinator tools.
+    // including DirectModelOnly request_user_input and V2 collaboration tools.
     const tools = nativeSchemas(ctx, agent, profile)
     const sections = assembled.sections
       .filter(section => profile.toolMode !== 'native' || section.name !== 'tools:code-only')

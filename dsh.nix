@@ -1,12 +1,12 @@
 { config, pkgs, lib, ... }:
 
 let
-  # deepseek-harness v0.1.5-rc.1
+  # deepseek-harness master (2026-09-15)
   dshSrc = pkgs.fetchFromGitHub {
     owner = "deepseek-ai";
     repo = "deepseek-harness";
-    rev = "aa8262ec091698bae9a6b04773a6b5b06ad4aef2";
-    hash = "sha256-YK90nsdspruObQLaR0kVT8cfZX4tSZ28iOEx8sELyJE=";
+    rev = "0d1f50007f9bca3f52b06e1c3074fa14d5fb0720";
+    hash = "sha256-oXrdHSfkBsKvdP422F04B1d8IB9AQlnNNGW7jxrwKuU=";
   };
 
   # 声明式 pnpm 依赖(fetchPnpmDeps 为 fixed-output 派生,沙箱内可联网下载;
@@ -26,7 +26,7 @@ let
       pnpm config set network-concurrency 4
     '';
 
-    hash = "sha256-/VnxXqJ3MUXIPB4rXOKu5FtArYVjyEry4ptRNHxYnrc=";
+    hash = "sha256-DNGGgnec3hFUs3LDorlUGzzgRT88i33y8TqyXfoXVnY=";
   };
 
   # dsh-TUI 的 dsh-auth 子模块：提供 ChatGPT/Codex、Claude 和 Grok
@@ -54,7 +54,7 @@ let
 
   dsh = pkgs.stdenv.mkDerivation {
     pname = "dsh";
-    version = "0.1.5-rc.1";
+    version = "0.1.6-alpha.1";
     src = dshSrc;
 
     pnpmDeps = dshPnpmDeps;
@@ -101,7 +101,7 @@ let
       runHook preBuild
       # node-pty 的 pty.node 由 install script 用 node-gyp 编译(--ignore-scripts 跳过)
       cd node_modules/node-pty && node-gyp rebuild && cd ../..
-      export DSH_CLIENT_COMMIT_HASH=aa8262ec091698bae9a6b04773a6b5b06ad4aef2
+      export DSH_CLIENT_COMMIT_HASH=0d1f50007f9bca3f52b06e1c3074fa14d5fb0720
       npm run build
       runHook postBuild
       # pi-ai 的 OpenAI API 与 OpenAI Codex 目录都把 GPT-5.6 的
@@ -234,12 +234,11 @@ in
   };
 
   # Web/profile cordis patches are runtime-owned files. dsh rewrites them
-  # atomically,
-  # so they must not be home.file symlinks into /nix/store. Seed a missing
-  # target or replace an old Nix link; when an existing real file drifts from
-  # the declarative template (e.g. a plugin row was added/removed in dsh.nix),
-  # reconcile it back to the template. Otherwise each template update would
-  # leave the runtime file permanently stale.
+  # atomically, so they must not be home.file symlinks into /nix/store. Seed a
+  # missing target or replace an old Nix link; when an existing real file drifts
+  # from the declarative template, reconcile it back to the template. The old
+  # global home-cordis.patch.yml was removed because current retry defaults are
+  # already five and a global full-config replacement broke TUI-specific rows.
   home.activation.dshRuntimePatches = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
     seedRuntimePatch() {
       target="$1"
@@ -259,7 +258,12 @@ in
       fi
     }
 
-    seedRuntimePatch "$HOME/.dsh/cordis.patch.yml" "${./home-cordis.patch.yml}"
+    # Remove the former Home Manager-owned global patch. It was intentionally
+    # declarative, so deleting it here also prevents an old generation from
+    # continuing to override the current profile/bundle configuration.
+    if [ -L "$HOME/.dsh/cordis.patch.yml" ] || [ -f "$HOME/.dsh/cordis.patch.yml" ]; then
+      run /run/current-system/sw/bin/remove-without-permission -f "$HOME/.dsh/cordis.patch.yml"
+    fi
     seedRuntimePatch "$HOME/.dsh/profiles/web/cordis.patch.yml" "${./profiles/web/cordis.patch.yml}"
   '';
 
