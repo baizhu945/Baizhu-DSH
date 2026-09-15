@@ -5,7 +5,7 @@
  * cordis.patch.yml 中禁用)。这是把 headless-cc-connect.patch 从"改 dsh 源码"
  * 迁移为插件后的完整实现,行为与补丁版逐行等价:
  *
- * - `--session-id`:create-once / resume-always(先 agents.resume,失败回退 create)
+ * - `--session-id`:adopt-only(只 agents.resume，恢复失败明确退出，绝不以同 ID 新建)
  * - `--provider`:本次运行的 provider route 覆盖
  * - `--model`:本次运行的模型覆盖
  * - `--reasoning-effort`:本次运行的思考强度覆盖
@@ -311,7 +311,8 @@ async function run(ctx, config, io) {
   if (config.reasoningEffort !== undefined && config.reasoningEffort !== '') {
     selection.reasoningEffort = config.reasoningEffort
   }
-  const sessionId = SessionId(config.sessionId !== undefined && config.sessionId !== '' ? config.sessionId : `session-${randomUUID()}`)
+  const hasExplicitSessionId = config.sessionId !== undefined && config.sessionId !== ''
+  const sessionId = SessionId(hasExplicitSessionId ? config.sessionId : `session-${randomUUID()}`)
   const agentOptions = { provider: selection.provider, model: selection.model }
   const setup = async (agentCtx, agent) => {
     const selected = { current: selection, assembled: undefined }
@@ -320,21 +321,11 @@ async function run(ctx, config, io) {
   }
 
   let agent
-  if (config.sessionId !== undefined && config.sessionId !== '') {
-    // create-once / resume-always:恢复失败(如损坏日志)才回退为同 id 新建。
-    try {
-      ({ agent } = await agents.resume({ resumeSessionId: sessionId, agentOptions, setup }))
-    } catch {
-      ({ agent } = await agents.create({
-        sessionId,
-        meta: {
-          cwd: process.cwd(),
-          ...defaultPreset === undefined ? {} : { agentPreset: defaultPreset },
-        },
-        agentOptions,
-        setup,
-      }))
-    }
+  if (hasExplicitSessionId) {
+    // Explicit identities are adopt-only. Preserve the typed persistence error
+    // (not found/corrupt/unsupported) so fail() reports the actual reason; in
+    // particular, never turn a failed restore into a same-id create.
+    ({ agent } = await agents.resume({ resumeSessionId: sessionId, agentOptions, setup }))
   } else {
     ({ agent } = await agents.create({
       sessionId,
@@ -385,17 +376,19 @@ async function run(ctx, config, io) {
       })
     })
 
-    // confirm 模式:写/执行工具先问人(web confirm-writes 插件的 headless 版)。
-    if (config.mode === 'confirm') {
-      ctx.on('tools/pre-execute', (exec, next) => {
-        if (ASK_TOOLS.has(exec.name)) {
-          return { kind: 'ask', reason: `tool "${exec.name}" requires your approval (write/execute)` }
-        }
-        return next()
-      })
-    }
-
     stdinReader = startStdinApprovalReader(pendingApprovals, internals.stdin)
+  }
+
+  // confirm mode must enforce approval independently of JSONL transport. The
+  // tool pipeline turns this into the normal approval.request() path, whose
+  // policy/audit events remain part of the session log even without --jsonl.
+  if (config.mode === 'confirm') {
+    ctx.on('tools/pre-execute', (exec, next) => {
+      if (ASK_TOOLS.has(exec.name)) {
+        return { kind: 'ask', reason: `tool "${exec.name}" requires your approval (write/execute)` }
+      }
+      return next()
+    })
   }
 
   await agent.whenIdle()
