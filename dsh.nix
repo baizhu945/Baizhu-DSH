@@ -14,6 +14,10 @@ let
   dshPnpmDeps = pkgs.fetchPnpmDeps {
     pname = "dsh";
     src = dshSrc;
+    # fetchPnpmDeps 默认使用 nixpkgs 当前的 pnpm；channel 更新后该默认值
+    # 升到 pnpm 12，而上游锁文件由 pnpm 11 生成。pnpm 12 会把 workspace
+    # override 错误地按 apps/cli 解析，导致 frozen-lockfile 校验失败。
+    pnpm = pkgs.pnpm_11;
     fetcherVersion = 4; # 26.11 起 pnpm_11 仅支持 fetcherVersion 4
 
     # 更新 nix-channel 后 pnpm 11 fetchPnpmDeps 要从 npm registry 拉取全部
@@ -42,6 +46,7 @@ let
   dshAuthPnpmDeps = pkgs.fetchPnpmDeps {
     pname = "dsh-auth";
     src = dshAuthSrc;
+    pnpm = pkgs.pnpm_11;
     fetcherVersion = 4;
     prePnpmInstall = ''
       export NIX_NPM_REGISTRY=https://registry.npmmirror.com

@@ -43,6 +43,9 @@ let
   '';
 
   fetchPnpmDepsArgs = {
+    # Keep dependency fetching on the same pnpm major used by these pnpm 11
+    # workspaces instead of following nixpkgs' moving `pnpm` default.
+    pnpm = pkgs.pnpm_11;
     fetcherVersion = 4;
     prePnpmInstall = ''
       export NIX_NPM_REGISTRY=https://registry.npmmirror.com
