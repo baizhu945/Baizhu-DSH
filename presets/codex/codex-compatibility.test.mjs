@@ -16,6 +16,7 @@ import {
   profileForModel,
   modelRowFor,
   registerCodeModeAlias,
+  registerModelParity,
   registerV2Agents,
   rewriteCodeModeName,
   truncateToolContent,
@@ -787,12 +788,12 @@ test('Terra and Sol retain their catalog-owned response preferences', () => {
   }
 })
 
-test('Astra consumes the current catalog message and collaboration fields', () => {
+test('Astra consumes the patched 1.05M context and current catalog collaboration fields', () => {
   const profile = profileForModel('gpt-6-astra')
   assert.equal(profile.toolMode, 'code_mode_only')
   assert.equal(profile.multiAgentVersion, 'v2')
-  assert.equal(profile.contextWindow, 272_000)
-  assert.equal(profile.maxContextWindow, 872_000)
+  assert.equal(profile.contextWindow, 1_050_000)
+  assert.equal(profile.maxContextWindow, 1_050_000)
   assert.equal(profile.tokenBudget.reminderThresholdTokens, 6144)
   assert.match(profile.instructions, /You are Codex, an agent based on GPT-6/)
 })
@@ -852,6 +853,28 @@ test('CodeModeOnly persona overrides conflicting direct-tool instructions', () =
   assert.match(instructions, /await tools\.exec_command\(\.\.\.\)/)
   assert.match(instructions, /`skill` tool is not available/i)
   assert.equal(modelInstructions(profileForModel('gpt-5.4')), profileForModel('gpt-5.4').instructions)
+})
+
+test('rc.2 prompt sections receive model persona and PTC-only tool boundary', async () => {
+  const handlers = new Map()
+  const ctx = {
+    tools: { guard() {}, schemas: () => [] },
+    on: (name, fn) => handlers.set(name, fn),
+    get: () => undefined,
+  }
+  registerModelParity(ctx)
+  const agent = { options: { model: 'gpt-6-astra' }, session: { id: 'isolated-test' } }
+  const assembly = {
+    sections: [
+      { name: 'deployment:persona-prefix', text: 'stale generic persona' },
+      { name: 'tools:ptc-only', text: '`run_code` is the only tool you can call directly' },
+    ],
+    contexts: [],
+  }
+  const result = await handlers.get('system-prompt/assemble')({}, { agent }, async () => assembly)
+  assert.match(result.sections[0].text, /You are Codex, an agent based on GPT-6/)
+  assert.match(result.sections[1].text, /`exec`, `wait`/)
+  assert.doesNotMatch(result.sections[1].text, /`run_code`/)
 })
 
 test('V2 task names and statuses follow the canonical path/runtime boundaries', () => {

@@ -1,0 +1,93 @@
+--- a/src/ink/wheel-notch.ts
++++ b/src/ink/wheel-notch.ts
+@@ -0,0 +1,24 @@
++/** Rows moved by one physical mouse-wheel notch in the fullscreen TUI. */
++export const WHEEL_NOTCH_LINES = 6;
++/** Terminals can send several SGR wheel reports for the same hardware notch. */
++export const WHEEL_NOTCH_WINDOW_MS = 75;
++
++export type WheelNotchState = {
++  at: number;
++  direction: -1 | 0 | 1;
++};
++
++/** Return one six-row intent per short same-direction wheel-report burst. */
++export function wheelNotchDelta(
++  state: WheelNotchState,
++  direction: -1 | 1,
++  now: number,
++): number {
++  const elapsed = now - state.at;
++  if (state.direction === direction && elapsed >= 0 && elapsed < WHEEL_NOTCH_WINDOW_MS) {
++    return 0;
++  }
++  state.at = now;
++  state.direction = direction;
++  return direction * WHEEL_NOTCH_LINES;
++}
+--- a/src/ink/components/App.tsx
++++ b/src/ink/components/App.tsx
+@@ -5,6 +5,7 @@
+ import { isEnvTruthy } from "../../utils/envUtils.js";
+ import { isMouseClicksDisabled } from "../../utils/fullscreen.js";
+ import { isInputSuppressed } from "../input-suppression.js";
++import { wheelNotchDelta, type WheelNotchState } from "../wheel-notch.js";
+ import { logMouseDebug } from "../../utils/debug.js";
+ import { logError } from "../../utils/log.js";
+ import { EventEmitter } from "../events/emitter.js";
+@@ -237,6 +238,8 @@
+ 	// Multi-click tracking for double/triple-click text selection. A click
+ 	// within MULTI_CLICK_TIMEOUT_MS and MULTI_CLICK_DISTANCE of the previous
+ 	// click increments clickCount; otherwise it resets to 1.
++	// One hardware notch may arrive as several SGR reports in a short burst.
++	wheelNotch: WheelNotchState = { at: -Infinity, direction: 0 };
+ 	lastClickTime = 0;
+ 	lastClickCol = -1;
+ 	lastClickRow = -1;
+@@ -909,6 +912,17 @@
+ 			setTerminalFocused(true);
+ 		}
+ 
++		// Coalesce the repeated same-direction reports from one physical notch
++		// before position routing or the global Chat fallback can consume them.
++		const verticalWheel = item.name === "wheelup" || item.name === "wheeldown";
++		let wheelDeltaY = 0;
++		if (verticalWheel && !isInputSuppressed()) {
++			wheelDeltaY = wheelNotchDelta(
++				app.wheelNotch, item.name === "wheelup" ? -1 : 1, performance.now(),
++			);
++			if (wheelDeltaY === 0) continue;
++		}
++
+ 		// Handle Ctrl+Z (suspend) using parsed key to support both raw (\x1a) and
+ 		// CSI u format (\x1b[122;5u) from Kitty keyboard protocol terminals
+ 		if (item.name === "z" && item.ctrl && SUPPORTS_SUSPEND) {
+@@ -935,8 +949,7 @@
+ 		) {
+ 			const step =
+ 				(item.name === "wheelup" || item.name === "wheelleft") ? -3 : 3;
+-			const deltaY =
+-				item.name === "wheelup" || item.name === "wheeldown" ? step : 0;
++			const deltaY = verticalWheel ? wheelDeltaY : 0;
+ 			const deltaX =
+ 				item.name === "wheelleft" || item.name === "wheelright" ? step : 0;
+ 			const consumed = app.props.onWheelAt(
+--- a/src/screens/Chat.tsx
++++ b/src/screens/Chat.tsx
+@@ -40,6 +40,7 @@
+ import { ApprovalPanel } from '../components/approvals/ApprovalPanel.js'
+ import { ExtensionDialog } from '../components/ExtensionDialog.js'
+ import type { DOMElement } from '../ink/dom.js'
++import { WHEEL_NOTCH_LINES } from '../ink/wheel-notch.js'
+ import { useSearchHighlight } from '../ink/hooks/use-search-highlight.js'
+ import { useTerminalTitle } from '../ink/hooks/use-terminal-title.js'
+ import { useTerminalFocus } from '../ink/hooks/use-terminal-focus.js'
+@@ -2887,7 +2888,7 @@
+         overlay.kind !== 'none' &&
+         (overlay.kind !== 'workspace-picker' || workspaceTargets.length > 0)
+       if (overlayModal) return
+-      handle?.scrollBy(key.wheelUp ? -3 : 3)
++      handle?.scrollBy(key.wheelUp ? -WHEEL_NOTCH_LINES : WHEEL_NOTCH_LINES)
+       event.stopImmediatePropagation()
+       return
+     }

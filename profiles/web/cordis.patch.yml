@@ -29,6 +29,19 @@
       name: '@deepseek-harness-tui/dsh-auth'
       inject: [llm, commands]
 
+    # TUI's /provider is local to the terminal UI. Give Web a matching
+    # OpenAI Codex Coding Plan login entry backed by the same dsh-auth API.
+    - id: provider-codex-web
+      name: './plugins/provider-codex.mjs'
+      inject: [commands, dshAuth]
+
+# Web bundle declares standard/ptc/minimal/cordis. Register the user's Codex
+# rows directly in the same registry (not inside an extra Include scope).
+- insert:
+    - id: codex-registrar
+      name: './plugins/codex-registrar.mjs'
+      inject: [agentPresets]
+
 # inventory 扩展会把 profile 根 package.json 作为本地插件的所属 manifest；
 # 该文件没有 version，导致请求在发出前失败。
 # 这是可选的诊断元数据，不影响 Web 对话或工具能力。

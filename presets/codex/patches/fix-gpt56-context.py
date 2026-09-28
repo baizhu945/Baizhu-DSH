@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""修复 Codex preset 官方 GPT-5.6 模型目录的上下文长度。
+"""修复 Codex preset 官方 GPT-6 / GPT-5.6 模型目录的上下文长度。
 
-OpenAI Codex 的官方 models.json 使用 snake_case 字段，并把 GPT-5.6
-价格分层的 272000 阈值误当成了 context_window，同时留下了较小的
-max_context_window 扩展上限。该目录只属于 Codex preset，因此这部分
-逻辑不放进 dsh 通用的 pi-ai patch。
+OpenAI Codex 的官方 models.json 使用 snake_case 字段，把 GPT-6
+价格分层的 272000 阈值误当成了 context_window，同时留下较小的
+max_context_window 扩展上限。保留已有的 GPT-5.6 修正，避免旧会话
+上下文回退。该目录不属于 dsh 内置 pi-ai。
 """
 
 import json
@@ -16,8 +16,9 @@ BROKEN_CONTEXT_WINDOW = 272_000
 BROKEN_MAX_CONTEXT_WINDOW = 872_000
 
 
-def is_gpt56(model_id: str) -> bool:
-    return model_id == "gpt-5.6" or model_id.startswith("gpt-5.6-")
+def needs_extended_context(model_id: str) -> bool:
+    return any(model_id == family or model_id.startswith(f"{family}-")
+               for family in ("gpt-6", "gpt-5.6"))
 
 
 def model_entries(doc: object):
@@ -42,7 +43,7 @@ def fix_catalog(catalog: str) -> int:
 
     changed = 0
     for model_id, model in model_entries(doc):
-        if not is_gpt56(model_id):
+        if not needs_extended_context(model_id):
             continue
 
         if model.get("context_window") == BROKEN_CONTEXT_WINDOW:
@@ -79,11 +80,11 @@ def main() -> None:
             existing += 1
         changed = fix_catalog(catalog)
         total += changed
-        print(f"dsh: fixed Codex GPT-5.6 context metadata in {catalog}: {changed} fields")
+        print(f"dsh: fixed Codex GPT-6/GPT-5.6 context metadata in {catalog}: {changed} fields")
 
     if existing == 0:
         raise SystemExit("dsh: no Codex model catalogs found to patch")
-    print(f"dsh: fixed Codex GPT-5.6 context metadata: {total} fields in {existing} catalogs")
+    print(f"dsh: fixed Codex GPT-6/GPT-5.6 context metadata: {total} fields in {existing} catalogs")
 
 
 if __name__ == "__main__":

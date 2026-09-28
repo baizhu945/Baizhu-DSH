@@ -1,12 +1,12 @@
 { config, pkgs, lib, ... }:
 
 let
-  # deepseek-harness master (2026-09-15)
+  # deepseek-harness dsh-v0.1.7-rc.2 (2026-09-24)
   dshSrc = pkgs.fetchFromGitHub {
     owner = "deepseek-ai";
     repo = "deepseek-harness";
-    rev = "0d1f50007f9bca3f52b06e1c3074fa14d5fb0720";
-    hash = "sha256-oXrdHSfkBsKvdP422F04B1d8IB9AQlnNNGW7jxrwKuU=";
+    rev = "477b4f420553e8a52c2fbccc464d7561b239c443";
+    hash = "sha256-bWeyipPsY5KclNGJPIttZ9CKRXCqkNIoKmK8VKN7FnI=";
   };
 
   # 声明式 pnpm 依赖(fetchPnpmDeps 为 fixed-output 派生,沙箱内可联网下载;
@@ -20,27 +20,26 @@ let
     pnpm = pkgs.pnpm_11;
     fetcherVersion = 4; # 26.11 起 pnpm_11 仅支持 fetcherVersion 4
 
-    # 更新 nix-channel 后 pnpm 11 fetchPnpmDeps 要从 npm registry 拉取全部
-    # 平台可选依赖(1200+ 包);直连 registry.npmjs.org 在大并发下频繁超时
-    # (curl error 23 / UND_ERR_SOCKET)。改用国内镜像并放宽 pnpm 网络参数。
+    # rc.2 的 1686 个锁定依赖需要离线 fixed-output store。镜像在最后
+    # 一个包长时间停滞；改用 npm 官方 CDN，适度提高并发并保留重试。
     prePnpmInstall = ''
-      export NIX_NPM_REGISTRY=https://registry.npmmirror.com
+      export NIX_NPM_REGISTRY=https://registry.npmjs.org
       pnpm config set fetch-timeout 600000
-      pnpm config set fetch-retries 5
-      pnpm config set network-concurrency 4
+      pnpm config set fetch-retries 8
+      pnpm config set network-concurrency 12
     '';
 
-    hash = "sha256-DNGGgnec3hFUs3LDorlUGzzgRT88i33y8TqyXfoXVnY=";
+    hash = "sha256-rDV6HxYwnPROBOP7/JY/cZ7kqmxv0zxOncjJghIvvM4=";
   };
 
   # dsh-TUI 的 dsh-auth 子模块：提供 ChatGPT/Codex、Claude 和 Grok
   # 订阅账号 OAuth 登录、凭据存储/刷新与 provider 路由。固定到 TUI
-  # 主仓库当前引用的子模块提交，避免跟随 main 分支漂移。
+  # v0.11.1 引用的子模块提交，避免跟随 main 分支漂移。
   dshAuthSrc = pkgs.fetchFromGitHub {
     owner = "ccch1mneyyy";
     repo = "dsh-auth";
-    rev = "cc6ec5224b62b6e6508c0109ef19e93b0a5c0a0e";
-    hash = "sha256-yL1ruV86qvi4RWfph9ANKcBrHi5p+ZpRPP5O/Q4PBJA=";
+    rev = "f44ccc74726c65f37763c42264ea56c6fbb28884";
+    hash = "sha256-ih0WZSmwpZ4fRU17A21898h35Ge+0PrvuOuPIShy+FQ=";
   };
 
   dshAuthPnpmDeps = pkgs.fetchPnpmDeps {
@@ -59,7 +58,7 @@ let
 
   dsh = pkgs.stdenv.mkDerivation {
     pname = "dsh";
-    version = "0.1.6-alpha.1";
+    version = "0.1.7-rc.2";
     src = dshSrc;
 
     pnpmDeps = dshPnpmDeps;
@@ -68,6 +67,9 @@ let
       ./patches/tool-bottom-collapse.patch
       ./patches/bash-command-hscroll.patch
       ./patches/web-fetch-clash-fake-ip.patch
+      # Nix Node exposes internals through --expose-internals; its addon getter
+      # probe is incompatible with the packaged Node 22 and 24 binaries.
+      ./patches/profile-resolution-expose-internals.patch
 
       # Optional trusted terminal/FS seams used only by the Codex preset.
       # Existing callers omit the new fields/methods and retain upstream behavior.
@@ -106,13 +108,13 @@ let
       runHook preBuild
       # node-pty 的 pty.node 由 install script 用 node-gyp 编译(--ignore-scripts 跳过)
       cd node_modules/node-pty && node-gyp rebuild && cd ../..
-      export DSH_CLIENT_COMMIT_HASH=0d1f50007f9bca3f52b06e1c3074fa14d5fb0720
+      export DSH_CLIENT_COMMIT_HASH=477b4f420553e8a52c2fbccc464d7561b239c443
       npm run build
       runHook postBuild
-      # pi-ai 的 OpenAI API 与 OpenAI Codex 目录都把 GPT-5.6 的
-      # 272000 价格分层阈值误当成上下文上限。fix-gpt56-context.py 会同时
-      # 修正两个 provider 的目录；OpenAI 账号默认走 openai-codex，不能只
-      # 修改 openai.json，否则 Web 中仍会显示/记录 272K。
+      # pi-ai 的 OpenAI API 与 OpenAI Codex 目录都把 GPT-6 的
+      # 272000 价格分层阈值误当成上下文上限。fix-gpt56-context.py（旧文件名）
+      # 现在仅修正 GPT-6；OpenAI 账号默认走 openai-codex，必须同时修正
+      # 两个目录，避免 Web 仍显示/记录 272K。
       python3 ${./patches/fix-gpt56-context.py}
     '';
 
@@ -130,6 +132,9 @@ let
       # The patched fetch provider accepts this synthetic range only for DNS
       # hostnames; callers can opt out with DSH_WEB_FETCH_ALLOW_FAKE_IP=0.
       export DSH_WEB_FETCH_ALLOW_FAKE_IP="''${DSH_WEB_FETCH_ALLOW_FAKE_IP:-1}"
+      # Codex web.run must load pi-ai from the same installation instance as
+      # dsh-llm-pi-ai; rc.2 no longer heals a shared profiles/node_modules link.
+      export DSH_PI_AI_ROOT="$out/packages/llm/llm-pi-ai/node_modules/@earendil-works/pi-ai"
       exec ${pkgs.nodejs_22}/bin/node --expose-internals $out/apps/cli/lib/bin.js "\$@"
       EOF
       chmod +x $out/bin/dsh
@@ -153,6 +158,14 @@ let
     version = "0.1.0";
     src = dshAuthSrc;
     pnpmDeps = dshAuthPnpmDeps;
+    # The TUI/OAuth provider and Codex web.run each keep their own store
+    # instance. Read the shared credential document afresh after token rotation.
+    patches = [
+      ./patches/dsh-auth-fresh-credentials.patch
+      # Web slash commands have an exact live Agent; scope OAuth questions to
+      # its session so the browser question panel can answer them.
+      ./patches/dsh-auth-web-question-scope.patch
+    ];
 
     nativeBuildInputs = [
       pkgs.nodejs_22
@@ -174,6 +187,23 @@ let
     buildPhase = ''
       runHook preBuild
       pnpm run build
+      pnpm run smoke
+      # The Web/Codex search plugin and the provider have separate store
+      # instances. Verify that token rotation is visible across both.
+      node --input-type=module - <<'NODE'
+      import { mkdtempSync } from 'node:fs'
+      import { tmpdir } from 'node:os'
+      import { join } from 'node:path'
+      import { CredentialFile } from './lib/credentials.js'
+      const path = join(mkdtempSync(join(tmpdir(), 'dsh-auth-rotation-')), 'credentials.json')
+      const provider = new CredentialFile(path)
+      const search = new CredentialFile(path)
+      const token = access => ({ type: 'oauth', access, refresh: 'fake', expires: Date.now() + 60000 })
+      await provider.modify('openai-codex', async () => token('first'))
+      await search.read('openai-codex')
+      await search.modify('openai-codex', async () => token('rotated'))
+      if ((await provider.read('openai-codex'))?.access !== 'rotated') throw new Error('stale OAuth credential cache')
+      NODE
       runHook postBuild
     '';
 
@@ -200,6 +230,9 @@ let
   dshManagedPluginPaths = pkgs.writeText "dsh-managed-plugin-paths" ''
     profiles/headless/plugins/cc-connect-startup.mjs
     profiles/headless/plugins/cc-connect-runner.mjs
+    profiles/headless/plugins/official-presets.mjs
+    profiles/web/plugins/codex-registrar.mjs
+    profiles/web/plugins/provider-codex.mjs
     profiles/web/node_modules/dsh-baizhu-approval/package.json
     profiles/web/node_modules/dsh-baizhu-approval/index.mjs
     profiles/web/node_modules/dsh-baizhu-approval/client.js
@@ -209,6 +242,7 @@ in
 {
   _module.args.dsh = dsh;
   _module.args.dshAuth = dshAuth;
+  _module.args.dshAuthSrc = dshAuthSrc;
 
   imports = [
     ./skills.nix
@@ -233,17 +267,21 @@ in
   home.file = {
     ".dsh/AGENTS.md".source = ../agent-context.md;
 
+    # Keep build-only pnpm stores in the Home Manager generation closure so GC
+    # does not discard them while the installed DSH packages remain in use.
+    ".local/share/dsh-nix-pnpm-deps/dsh".source = dshPnpmDeps;
+    ".local/share/dsh-nix-pnpm-deps/dsh-auth".source = dshAuthPnpmDeps;
+
     ".dsh/profiles/web/plugins/confirm-writes.mjs".source = ./profiles/web/plugins/confirm-writes.mjs;
 
     ".dsh/profiles/headless/cordis.patch.yml".source = ./profiles/headless/cordis.patch.yml;
   };
 
   # Web/profile cordis patches are runtime-owned files. dsh rewrites them
-  # atomically, so they must not be home.file symlinks into /nix/store. Seed a
-  # missing target or replace an old Nix link; when an existing real file drifts
-  # from the declarative template, reconcile it back to the template. The old
-  # global home-cordis.patch.yml was removed because current retry defaults are
-  # already five and a global full-config replacement broke TUI-specific rows.
+  # atomically, so they must not be home.file symlinks into /nix/store. Keep
+  # Home Manager-owned rows declarative while preserving any new rows that
+  # dsh 0.1.7 imports from settings.yaml into the profile patch. Otherwise a
+  # later home-manager switch silently discards model/UI/provider preferences.
   home.activation.dshRuntimePatches = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
     seedRuntimePatch() {
       target="$1"
@@ -257,8 +295,44 @@ in
       else
         run chmod u+rw "$target"
         if ! cmp -s "$target" "$template"; then
-          run install -m 644 "$template" "$target.tmp"
-          run mv "$target.tmp" "$target"
+          # Reconcile only managed entry ids; runtime-owned settings rows
+          # remain in the Web patch across future Home Manager switches.
+          run ${pkgs.nodejs_22}/bin/node --input-type=module - "$template" "$target" "${dsh}/apps/cli/package.json" <<'NODE'
+          import { readFileSync, renameSync, writeFileSync } from 'node:fs'
+          import { createRequire } from 'node:module'
+          const [template, target, anchor] = process.argv.slice(2)
+          const yaml = createRequire(anchor)('js-yaml')
+          const managedText = readFileSync(template, 'utf8')
+          const existingText = readFileSync(target, 'utf8')
+          const managed = yaml.load(managedText)
+          const existing = yaml.load(existingText)
+          if (!Array.isArray(managed) || !Array.isArray(existing)) {
+            throw new Error('dsh: expected YAML patch lists; refusing to overwrite runtime settings')
+          }
+          const managedIds = new Set()
+          for (const patch of managed) {
+            if (typeof patch?.id === 'string') managedIds.add(patch.id)
+            for (const entry of patch?.insert ?? []) {
+              if (typeof entry?.id === 'string') managedIds.add(entry.id)
+            }
+          }
+          const extra = []
+          for (const patch of existing) {
+            if (typeof patch?.id === 'string') {
+              if (!managedIds.has(patch.id)) extra.push(patch)
+            } else if (Array.isArray(patch?.insert)) {
+              const insert = patch.insert.filter(entry => !managedIds.has(entry?.id))
+              if (insert.length) extra.push({ ...patch, insert })
+            } else {
+              extra.push(patch)
+            }
+          }
+          const next = managedText.trimEnd() + '\n' + (extra.length ? '\n' + yaml.dump(extra, { noRefs: true, lineWidth: -1 }) : "")
+          if (next !== existingText) {
+            writeFileSync(target + '.tmp', next, { mode: 0o644 })
+            renameSync(target + '.tmp', target)
+          }
+    NODE
         fi
       fi
     }
@@ -399,6 +473,12 @@ in
       "$HOME/.dsh/profiles/headless/plugins/cc-connect-startup.mjs"
     run install -m 644 ${./profiles/headless/plugins/cc-connect-runner.mjs} \
       "$HOME/.dsh/profiles/headless/plugins/cc-connect-runner.mjs"
+    run install -m 644 ${./profiles/headless/plugins/official-presets.mjs} \
+      "$HOME/.dsh/profiles/headless/plugins/official-presets.mjs"
+    run install -m 644 ${./presets/codex/codex-registrar.mjs} \
+      "$HOME/.dsh/profiles/web/plugins/codex-registrar.mjs"
+    run install -m 644 ${./profiles/web/plugins/provider-codex.mjs} \
+      "$HOME/.dsh/profiles/web/plugins/provider-codex.mjs"
     run install -m 644 ${./profiles/web/node_modules/dsh-baizhu-approval/package.json} \
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval/package.json"
     run install -m 644 ${./profiles/web/node_modules/dsh-baizhu-approval/index.mjs} \

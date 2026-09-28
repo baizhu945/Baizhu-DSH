@@ -11,10 +11,10 @@ let
     hash = "sha256-hogmwdJA75/p/9aANnfF5Io3lMTOEzvOzO02Wp/egV0=";
   };
 
-  # The upstream catalog exposes GPT-5.6 with a 272K base window and an
-  # 872K extension cap.  DSH's pi-ai provider is configured for the full 1M
-  # context, so patch the preset-owned copy too; editing ~/.dsh directly would
-  # be overwritten by Home Manager on the next activation.
+  # The pinned catalog exposes GPT-6 Astra with a 272K base window and an
+  # 872K extension cap. Patch the preset-owned copy to the same 1.05M window
+  # as dsh's pi-ai catalog while retaining the existing GPT-5.6 corrections;
+  # editing ~/.dsh directly would be overwritten by Home Manager.
   codexModels = pkgs.runCommand "dsh-codex-models-gpt56-context" {
     nativeBuildInputs = [ pkgs.python3 ];
   } ''

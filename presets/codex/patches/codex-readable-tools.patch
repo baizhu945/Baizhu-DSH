@@ -1,5 +1,5 @@
 diff --git a/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts b/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
-index 5343472cd0..e8081cd491 100644
+index 5343472..e8081cd 100644
 --- a/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
 +++ b/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
 @@ -39,6 +39,90 @@ function narrowDiffs(diffs: unknown): DiffHunk[] | null {
@@ -103,10 +103,10 @@ index 5343472cd0..e8081cd491 100644
    const intended = intendedDiff(block)
    if (intended === null) return null
 diff --git a/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts b/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
-index 0b6f386623..9c4d563bcb 100644
+index de0e2a8..db88bc6 100644
 --- a/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
 +++ b/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
-@@ -62,6 +62,10 @@ const TOOL_VARIANTS: Record<string, ToolRowVariant> = {
+@@ -59,6 +59,10 @@ const TOOL_VARIANTS: Record<string, ToolRowVariant> = {
    write: 'write',
    edit: 'edit',
    run_code: 'code',
@@ -117,7 +117,7 @@ index 0b6f386623..9c4d563bcb 100644
    cordis_package_inspect: 'read',
    cordis_runtime_inspect: 'read',
    // The three run-control verbs take one package id and produce a receipt, so
-@@ -157,6 +161,158 @@ function firstLine(text: string): string {
+@@ -203,6 +207,158 @@ function firstLine(text: string): string {
    return nl === -1 ? text : text.slice(0, nl)
  }
  
@@ -276,7 +276,7 @@ index 0b6f386623..9c4d563bcb 100644
  function pickString(args: Record<string, unknown>, keys: readonly string[]): string | undefined {
    for (const key of keys) {
      const v = args[key]
-@@ -181,6 +337,15 @@ function deriveSummary(variant: ToolRowVariant, argsRaw: string): string {
+@@ -227,6 +383,15 @@ function deriveSummary(variant: ToolRowVariant, argsRaw: string): string {
    const parsed = parseArgs(argsRaw)
    if (typeof parsed !== 'object' || parsed === null) return firstLine(argsRaw)
    const args = parsed as Record<string, unknown>
@@ -292,7 +292,7 @@ index 0b6f386623..9c4d563bcb 100644
    if (variant === 'search' && Array.isArray(args.queries)) {
      const queries = args.queries.filter((query): query is string => typeof query === 'string' && query !== '')
      if (queries.length > 0) return queries.map(firstLine).join(', ')
-@@ -222,6 +387,12 @@ export function formatToolBody(variant: ToolRowVariant, argsRaw: string): string
+@@ -268,6 +433,12 @@ export function formatToolBody(variant: ToolRowVariant, argsRaw: string): string
    if (variant === 'code' && typeof parsed === 'object' && parsed !== null) {
      const code = (parsed as Record<string, unknown>).code
      if (typeof code === 'string' && code !== '') return code
@@ -306,10 +306,10 @@ index 0b6f386623..9c4d563bcb 100644
    return JSON.stringify(parsed, null, 2)
  }
 diff --git a/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx b/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx
-index 4765faeb3d..920f51ae58 100644
+index bc0faac..2c03484 100644
 --- a/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx
 +++ b/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx
-@@ -44,13 +44,16 @@ export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect,
+@@ -46,6 +46,9 @@ export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect,
      ? 'error'
      : model.state
    const singleFile = model.filePath !== undefined
@@ -318,7 +318,8 @@ index 4765faeb3d..920f51ae58 100644
 +      : t(model.titleKey)
    return (
      <ToolRow
-       t={t}
+       useDisclosure={useDisclosure}
+@@ -53,7 +56,7 @@ export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect,
        variant={model.variant}
        toolName={toolName}
        icon={VARIANT_ICONS[model.variant]}
@@ -328,10 +329,10 @@ index 4765faeb3d..920f51ae58 100644
        // Single-file tools never expose an args body — the path link is the only
        // args interaction. A card is not an args body: a read/write/edit row is
 diff --git a/packages/client/ui-trajectory/src/client/layout.ts b/packages/client/ui-trajectory/src/client/layout.ts
-index 7691b7f74a..f6d855ad1d 100644
+index 0fe5bd6..ca0041d 100644
 --- a/packages/client/ui-trajectory/src/client/layout.ts
 +++ b/packages/client/ui-trajectory/src/client/layout.ts
-@@ -1063,6 +1063,48 @@ function summarizeCall(
+@@ -1092,6 +1092,48 @@ function summarizeCall(
    name: string,
    argsRaw: string,
  ): Pick<TrajectoryCellProps, 'text' | 'previewMarkdown' | 'toolName'> {

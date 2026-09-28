@@ -1,0 +1,76 @@
+--- a/src/service.ts
++++ b/src/service.ts
+@@ -11,6 +11,7 @@
+ import { Service } from '@deepseek-ai/cordis'
+ import type { Context } from '@deepseek-ai/cordis'
+ import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
++import type { AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
+ import { asStoredCredential, CredentialFile, type StoredOAuthCredential } from './credentials.js'
+ import { oauthOf } from './profiles.js'
+ import { QuestionBridge, type AskFn } from './interaction.js'
+@@ -62,7 +63,7 @@
+    * @throws Error when no interactive surface is present, the provider is
+    *   unknown, a login is already running, or the flow itself fails.
+    */
+-  login(provider?: string, signal?: AbortSignal): Promise<DshAuthLoginResult>
++  login(provider?: string, signal?: AbortSignal, agent?: AskUserQuestionRequest['agent']): Promise<DshAuthLoginResult>
+   /** Remove one provider's stored credential; resolves whether one existed. */
+   logout(provider: string): Promise<boolean>
+ }
+@@ -81,7 +82,7 @@
+   profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>
+   store: CredentialFile
+   /** The interactive ask surface, resolved per call so mounting order never matters. */
+-  resolveAsk: () => AskFn | undefined
++  resolveAsk: (agent?: AskUserQuestionRequest['agent']) => AskFn | undefined
+   logger: { warn(message: string): void }
+ }
+ 
+@@ -156,8 +157,8 @@
+ 
+   return {
+     providers: statusOf,
+-    login: async (provider, signal) => {
+-      const ask = deps.resolveAsk()
++    login: async (provider, signal, agent) => {
++      const ask = deps.resolveAsk(agent)
+       let target = provider
+       if (target === undefined) {
+         if (ask === undefined) {
+
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -41,6 +41,7 @@
+ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+ import type { LlmAdapter, LlmModelInfo } from '@deepseek-ai/dsh-llm'
+ import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
++import type { AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
+ import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
+ import type { PiAiAdapterOptions } from '@deepseek-ai/dsh-llm-pi-ai'
+ import { CredentialFile, defaultCredentialsFile } from './credentials.js'
+@@ -214,9 +215,11 @@
+   const api = createDshAuthApi({
+     profiles,
+     store,
+-    resolveAsk: () => {
++    resolveAsk: (agent?: AskUserQuestionRequest['agent']) => {
+       const questions = ctx.get('userQuestions')
+-      return questions === undefined ? undefined : request => questions.ask(request)
++      return questions === undefined ? undefined : request => questions.ask({
++        ...request, ...(agent === undefined ? {} : { agent }),
++      })
+     },
+     logger: ctx.logger,
+   })
+
+--- a/src/command.ts
++++ b/src/command.ts
+@@ -44,7 +44,7 @@
+     }
+     if (verb === 'login') {
+       try {
+-        const result = await api.login(target, invocation.signal)
++        const result = await api.login(target, invocation.signal, invocation.agent)
+         return {
+           kind: 'success',
+           text: `Signed in to ${result.oauthLabel} (${result.provider}); token expires `

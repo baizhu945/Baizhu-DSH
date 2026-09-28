@@ -32,6 +32,8 @@
   disabled: true
 - id: tool-skill
   disabled: true
+- id: command-goal
+  disabled: true
 - id: tool-goal
   disabled: true
 - id: plan-mode
@@ -50,7 +52,7 @@
   disabled: true
 - id: tool-subagent-fork
   disabled: true
-- id: workflow-worker-thread
+- id: workflow-ptc
   disabled: true
 - id: tool-workflow
   disabled: true
@@ -62,6 +64,8 @@
   disabled: true
 - id: tool-web
   disabled: true
+- id: tool-plugin-manager
+  disabled: true
 
 # Profile 根 package.json 是 Home Manager 的私有 manifest，没有 version；
 # inventory 只提供诊断元数据，不能阻断 headless 请求准备。
@@ -69,8 +73,12 @@
   config:
     enabled: false
 
-# dsh's launcher adds the installed system preset root when this row exists;
-# the agent-presets package appends ~/.dsh/.agent-presets for user presets.
+# Registry owns selection and scoped mounts. The headless bundle only
+# includes dsh-base; it does not install the Web bundle's patch layers.
+# Load the four shipped declarations from the SAME installed Web bundle,
+# preserving its !!js child expressions and avoiding a second fork of those
+# model-facing compositions. Do not include the Web bundle itself: it also
+# starts an HTTP server and browser UI. No directory discovery is involved.
 - insert:
     # Host services required by the optional shipped `cordis` preset. The
     # preset's tool-cordis row is agent-scoped, but its dynamic plugin runner
@@ -84,10 +92,16 @@
     - id: subagent-model-selection-settings
       name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
 
-    - id: agent-presets
-      name: '@deepseek-ai/dsh-agent-presets'
+    - id: agent-preset-registry
+      name: '@deepseek-ai/dsh-agent-preset-registry'
       config:
         default: standard
+
+    # Register the four official declarations plus user Codex before the
+    # runner starts; early --preset resolution otherwise races registration.
+    - id: headless-official-presets
+      name: './plugins/official-presets.mjs'
+      inject: [agentPresets]
 
 - insert:
     - id: cc-connect-startup
@@ -95,7 +109,7 @@
 
     - id: cc-connect-runner
       name: './plugins/cc-connect-runner.mjs'
-      inject: [ccConnectStartup]
+      inject: [ccConnectStartup, headlessPresetsReady]
 
     # dsh-TUI 的 dsh-auth 子模块提供 OAuth provider 路由与自动刷新；
     # headless 环境只使用已保存凭据，不会假定存在浏览器或交互 UI。

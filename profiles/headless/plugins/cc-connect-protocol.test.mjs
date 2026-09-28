@@ -49,7 +49,8 @@ test('headless patch mounts the custom startup and runner together', () => {
   assert.match(patch, /- id: headless-runner\n  disabled: true/)
   assert.match(patch, /- id: cc-connect-startup\n      name: '\.\/plugins\/cc-connect-startup\.mjs'/)
   assert.match(patch, /- id: cc-connect-runner\n      name: '\.\/plugins\/cc-connect-runner\.mjs'/)
-  assert.match(patch, /inject: \[ccConnectStartup\]/)
+  assert.match(patch, /- id: headless-official-presets\n      name: '\.\/plugins\/official-presets\.mjs'/)
+  assert.match(patch, /inject: \[ccConnectStartup, headlessPresetsReady\]/)
 })
 
 test('README documents the private JSONL wire and its migration boundary', () => {

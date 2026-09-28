@@ -52,7 +52,12 @@ export function apply(ctx, config = {}) {
       try {
         current = ctx.permissionPresets?.current?.(exec.agent.session)
       } catch {
-        return next() // 权限服务异常时安全降级为放行
+        // A broken permission lookup must not silently grant write/execute.
+        // Leave read-only operations on the normal tool pipeline.
+        if (askTools.has(exec.name)) {
+          return { kind: 'ask', reason: `tool "${exec.name}" ${reasonSuffix}` }
+        }
+        return next()
       }
       if (current !== askPreset) return next()
       // 会话级 always-allow(审批弹窗选择"总是允许",由客户端页面内记录):

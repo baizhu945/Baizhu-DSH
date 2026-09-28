@@ -1,0 +1,35 @@
+--- a/src/dsh-adapter/bundled-presets.ts
++++ b/src/dsh-adapter/bundled-presets.ts
+@@ -2,10 +2,8 @@
+ import type { PresetDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
+ import { readFileSync } from 'node:fs'
+ import { createRequire } from 'node:module'
+-import { join } from 'node:path'
+ import { pathToFileURL } from 'node:url'
+ import { parse } from 'yaml'
+-import { packagedPresetRoot } from './packaged-presets.js'
+ 
+ interface DeclarativePresets {
+   register(definition: PresetDefinition): Promise<() => Promise<void>>
+@@ -70,21 +68,5 @@
+     const dispose = await declarativePresets(owner)!.register(readPresetPatch(path))
+     ctx.effect(() => dispose)
+   }
+-  if (!declared.has('liangshen')) {
+-    const root = join(packagedPresetRoot(), 'liangshen')
+-    const metadata: Pick<PresetDefinition, 'name' | 'description' | 'order'> = parse(readFileSync(join(root, 'preset.yml'), 'utf8'))
+-    const dispose = await declarativePresets(ctx)!.register({
+-      id: 'liangshen',
+-      name: metadata.name,
+-      description: metadata.description,
+-      order: metadata.order,
+-      plugins: [{
+-        id: 'liangshen-plugins',
+-        name: '@deepseek-ai/cordis-plugin-include',
+-        config: { path: pathToFileURL(join(root, 'agent.cordis.yml')).href },
+-      }],
+-    })
+-    ctx.effect(() => dispose)
+-  }
+   return true
+ }

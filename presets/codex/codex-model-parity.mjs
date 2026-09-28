@@ -2513,12 +2513,17 @@ function registerModelParity(ctx) {
     // nativeSchemas already mirrors the official CodeModeOnly visibility rule,
     // including DirectModelOnly request_user_input and V2 collaboration tools.
     const tools = nativeSchemas(ctx, agent, profile)
+    // dsh 0.1.7 renamed the persona and PTC-only prompt sections; retain the
+    // older names for sessions/profile tests that still use pre-0.1.7 hosts.
+    const isPtcOnly = name => name === 'tools:ptc-only' || name === 'tools:code-only'
     const sections = assembled.sections
-      .filter(section => profile.toolMode !== 'native' || section.name !== 'tools:code-only')
+      .filter(section => profile.toolMode !== 'native' || !isPtcOnly(section.name))
       .filter(section => profile.toolMode !== 'native' || section.name !== 'tools:sdk')
       .map(section => {
-        if (section.name === 'deployment:persona') return { ...section, text: modelInstructions(profile) }
-        if (section.name === 'tools:code-only') {
+        if (section.name === 'deployment:persona-prefix' || section.name === 'deployment:persona') {
+          return { ...section, text: modelInstructions(profile) }
+        }
+        if (isPtcOnly(section.name)) {
           return { ...section, text: rewriteCodeModeName(section.text, profile) }
         }
         if (section.name === 'tool:web_search'
@@ -2561,6 +2566,7 @@ export {
   profileForModel,
   modelRowFor,
   registerCodeModeAlias,
+  registerModelParity,
   rewriteCodeModeSdk,
   registerV2Agents,
   rewriteCodeModeName,

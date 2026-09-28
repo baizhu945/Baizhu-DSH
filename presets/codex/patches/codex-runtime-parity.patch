@@ -2,17 +2,15 @@ diff --git a/packages/fs/fs-local/src/index.ts b/packages/fs/fs-local/src/index.
 index 22fc6310f..3d4394301 100644
 --- a/packages/fs/fs-local/src/index.ts
 +++ b/packages/fs/fs-local/src/index.ts
-@@ -6,7 +6,8 @@
- 
- import { Context } from '@deepseek-ai/cordis'
+@@ -8,6 +8,7 @@
  import { constants as bufferConstants } from 'node:buffer'
--import { isAbsolute, relative, resolve, sep } from 'node:path'
+ import { once } from 'node:events'
+ import { watch } from 'chokidar'
 +import { mkdir, rename, unlink } from 'node:fs/promises'
-+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
  import { pathToFileURL } from 'node:url'
  import z from '@deepseek-ai/schemastery'
- import { FileSystem, FsError, FsVersion } from '@deepseek-ai/dsh-fs'
-@@ -104,6 +105,16 @@ export class LocalFileSystem extends FileSystem {
+@@ -130,6 +131,16 @@ export class LocalFileSystem extends FileSystem {
      }
    }
  
@@ -29,7 +27,7 @@ index 22fc6310f..3d4394301 100644
    override async resolve(path: string, opts?: { cwd?: string; signal?: AbortSignal }): Promise<FsTarget> {
      if (opts?.signal?.aborted) throw new FsError('resolve aborted', 'FS_ABORTED')
      const local = await resolveLocalTarget(opts?.cwd ?? this.config.cwd, path)
-@@ -227,6 +238,64 @@ export class LocalFileSystem extends FileSystem {
+@@ -254,6 +265,64 @@ export class LocalFileSystem extends FileSystem {
      })
    }
  
@@ -94,7 +92,7 @@ index 22fc6310f..3d4394301 100644
    override async editText(
      target: FsTarget,
      edit: FsEditRequest,
-@@ -269,6 +338,19 @@ export class LocalFileSystem extends FileSystem {
+@@ -296,6 +365,19 @@ export class LocalFileSystem extends FileSystem {
      if (after) return after.version
      return FsVersion(`missing:${target.targetKey}`)
    }
@@ -159,15 +157,7 @@ diff --git a/packages/fs/fs/src/index.ts b/packages/fs/fs/src/index.ts
 index bfa05bf25..2ed375fc6 100644
 --- a/packages/fs/fs/src/index.ts
 +++ b/packages/fs/fs/src/index.ts
-@@ -10,6 +10,7 @@
- 
- import { Context, Service } from '@deepseek-ai/cordis'
- import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
-+import { FsError } from './types.ts'
- import type {
-   FsDirEntry,
-   FsEditOutcome,
-@@ -255,6 +256,27 @@ export abstract class FileSystem extends Service {
+@@ -271,6 +271,27 @@ export abstract class FileSystem extends Service {
      sandboxPolicy?: SandboxExecutionPolicy,
    ): Promise<FsWriteOutcome>
  

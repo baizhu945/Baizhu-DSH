@@ -1725,7 +1725,7 @@ async function rollbackPatchMutation(ctx, exec, mutation, sandboxPolicy, state) 
       const expectedVersion = currentVersion(mutation.target, mutation.written.version)
       const written = await writePatchedFile(
         ctx,
-        rollbackExec,
+        exec,
         mutation.target,
         mutation.operation.original,
         expectedVersion,

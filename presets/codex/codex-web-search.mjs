@@ -19,12 +19,20 @@ const dshHome = process.env.DSH_HOME ?? `${process.env.HOME ?? '/home/baizhu945'
 const requireFromDsh = createRequire(`${dshHome}/profiles/codex-web-search.cjs`)
 const toolsEntry = requireFromDsh.resolve('@deepseek-ai/dsh-tools')
 const { defineTool } = await import(toolsEntry)
-const dshAuthEntry = requireFromDsh.resolve('@deepseek-harness-tui/dsh-auth')
-const { CredentialFile } = await import(dshAuthEntry)
+// Import the credential store directly: the package's main entry also mounts
+// Cordis/provider peers that a preset's module does not need, and a shared
+// profile fallback cannot resolve those peers before the host intercepts it.
+const dshAuthManifest = requireFromDsh.resolve('@deepseek-harness-tui/dsh-auth/package.json')
+const { CredentialFile } = await import(pathToFileURL(nodePath.join(nodePath.dirname(dshAuthManifest), 'lib/credentials.js')).href)
 
 // Reuse only the OAuth token refresh implementation. No dsh web provider is
 // loaded; the credential document remains owned by dsh-auth.
-const piAiRoot = pathToFileURL(nodePath.join(dshHome, 'profiles/node_modules/@earendil-works/pi-ai') + '/')
+// rc.2 resolves profile modules at runtime instead of leaving a shared
+// node_modules link. The Nix dsh launcher supplies the pi-ai instance owned
+// by dsh-llm-pi-ai; the fallback preserves older standalone test profiles.
+const piAiDirectory = process.env.DSH_PI_AI_ROOT?.trim()
+  || nodePath.join(dshHome, 'profiles/node_modules/@earendil-works/pi-ai')
+const piAiRoot = pathToFileURL(piAiDirectory + '/')
 const { openaiCodexOAuth } = await import(new URL('dist/auth/oauth/openai-codex.js', piAiRoot).href)
 
 const CODEX_SEARCH_URL = 'https://chatgpt.com/backend-api/codex/alpha/search'

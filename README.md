@@ -5,7 +5,7 @@
 ## 配置特色
 
 - **源码级可复现构建**：`dsh.nix` 固定 `deepseek-harness` 的 Git revision 和 pnpm 依赖，使用 Node.js 22、pnpm 11 构建 host/client 两端，并生成带 `--expose-internals` 的 `dsh` 启动包装器。
-- **Web 与 headless 双 profile**：Web profile 面向交互式浏览器；headless profile 面向脚本和 `cc-connect`，两者共享模型、技能、会话和权限语义。
+- **Web、TUI 与 headless profile**：共用 dsh 0.1.7-rc.2 的模型实现、技能与会话存储；Web 面向浏览器，headless 面向脚本和 `cc-connect`。新版设置按 profile 保存，不再共享一份 `settings.yaml`。
 - **第四种 Confirm 权限模式**：保留 DSH 原有的 Read Only、Workspace Write、Full Access，另加默认的 `confirm`：使用完整访问范围，但每次文件写入或命令执行都先询问。
 - **Codex-compatible preset**：`Codex Mode` 把 DSH 的底层能力映射为 `exec_command`、`apply_patch`、Plan、图片查看、用户提问和 Luna V1 子代理等 Codex 形状的工具，同时仍由主机统一掌管沙箱、审批、文件系统和会话持久化。
 - **面向长任务的会话保护**：使用上游 `session-persistence-jsonl` 的 kernel-level `session.lock`，由操作系统负责跨进程写入排他和进程退出后的自动释放。
@@ -24,7 +24,7 @@ dsh.nix
 profiles/web/                               # 浏览器交互
 profiles/headless/                          # 一次性/JSONL 驱动
 presets/codex/                              # Codex 工具边界与 persona
-presets/dsh-*-standard.nix                  # 实验性路由/工具渐进注入
+presets/codex/codex-registrar.mjs          # Web/TUI 中注册 Codex；headless 由 official-presets 注册
 ```
 
 `home.nix` 导入本目录的 `dsh.nix`；因此源码、插件和用户文件都由现有的非 flake Home Manager 配置管理。运行时会被 DSH 原子重写的 `cordis.patch.yml` 不直接做成 `/nix/store` 符号链接，而是由 activation 脚本 seed/reconcile 到 `~/.dsh/`。
@@ -106,19 +106,17 @@ headless 的权限映射是：Read Only = `read-only + ask`，Workspace Write = 
 
 | Preset | 重点 |
 | --- | --- |
-| `anchored-standard` | 首次请求只给 Minimal 对齐的双工具目录；出现持久化晋升信号后开放完整 Standard 工具目录。 |
-| `router-standard` | 首轮注入 RL-interface 风格 persona 与 shell/editor，首次工具调用后开放完整 Standard。 |
-| `router-spec` | 按任务分类注入 persona 和完整 prompt sections，强调 deep-think-first。 |
-| `codex` | Codex persona、环境与 `AGENTS.md`、Code Mode、沙箱 shell、`apply_patch`、Skills、Plan Mode、用户提问、图片查看、时间和 Luna V1 子代理。 |
+| `standard` / `ptc` / `minimal` / `cordis` | dsh 官方声明式 preset：Web/TUI 使用 bundle 及适配器，headless 从已安装 Web bundle 注册相同的四份定义。 |
+| `codex` | 本地声明式 preset：Codex persona、Code Mode、沙箱 shell、`apply_patch`、Skills、Plan Mode、用户提问、图片查看和子代理。三个 profile 都显式注册；不安装 liangshen。 |
 
 Codex preset 只改变选中该 preset 的 session 的 model-facing surface：SSH 等主机额外工具会被隐藏，但沙箱、审批、附件、文件系统、模型路由和 session persistence 仍由 DSH 主机服务提供。NixOS 不保证 `/bin/bash` 存在，因此 `dsh-codex.nix` 会把 Codex PTY 的 bash 路径替换为 nixpkgs 中的 `bashInteractive`。
 
 ## 模型、账号与 UI 修复
 
-- 修正 pi-ai 将 GPT-5.6 的价格分层阈值误当成上下文上限的问题，相关 OpenAI/Codex 条目使用约 105 万上下文窗口。
-- 从 dsh-TUI 的 `dsh-auth` 子模块（固定提交 `cc6ec522…`）构建订阅 OAuth provider；ChatGPT/Codex、Claude 和 Grok 共用 `~/.dsh/dsh-auth/credentials.json`，凭据原子保存并在请求前自动刷新。
-- Web、TUI 和 headless profile 都挂载 `dsh-auth`；交互入口为 `/auth login openai-codex`、`/auth logout openai-codex`、`/auth status`，浏览器登录会自动打开系统默认浏览器，并保留设备码/手动回退路径。
-- `tool-bottom-collapse.patch` 在长卡片底部提供折叠按钮；`bash-command-hscroll.patch` 保留长命令原文并让状态/复制控件固定可见。
+- 内置 pi-ai 的 OpenAI/Codex **GPT-6 系列**条目改为 105 万上下文窗口，不再修改其 GPT-5.6 条目；Codex preset 独立目录也修正 GPT-6，同时保留已有的 GPT-5.6 修正。
+- 从 dsh-TUI 引用的 `dsh-auth` 子模块（固定提交 `f44ccc74…`）构建订阅 OAuth provider；ChatGPT/Codex、Claude 和 Grok 共用 `~/.dsh/dsh-auth/credentials.json`，凭据原子保存、跨实例重新读取并在请求前自动刷新。
+- Web、TUI 和 headless profile 都挂载 `dsh-auth`；Web 新增 `/provider`（默认登录 OpenAI Codex Coding Plan，也支持 `status`、`logout`），Web `/auth login openai-codex` 同样会把 OAuth 提问关联当前会话。TUI 保留自身的 `/provider` 向导；三个 profile 共用凭据文件。
+- `tool-bottom-collapse.patch` 在长卡片底部提供折叠按钮；`bash-command-hscroll.patch` 保留长命令原文并让状态/复制控件固定可见。`dsh-tui-wheel-six-lines.patch` 把短时间内同向的滚轮报告合为一次 6 行滚动。
 
 ## 持久化与技能
 
@@ -127,6 +125,4 @@ Codex preset 只改变选中该 preset 的 session 的 model-facing surface：SS
 
 ## 维护提示
 
-修改 `dsh.nix` 的源码 revision、`pnpm-lock.yaml` 对应依赖或 patches 后，需要重新确认 fixed-output hash，并检查 `node-pty`、native/system、loader 和模型目录补丁是否仍适配新版本。跨进程 session 写入由上游 `session.lock` 管理；升级时应先停止旧版 dsh 进程，再恢复或写入已有 session。
-
-当前 `skills.nix` 的几个外部 `builtins.fetchGit` 使用 `main` 而未固定 `rev`/hash；这与本目录其余固定源码的可复现目标不完全一致，若追求严格复现，升级技能时应一并固定它们。
+修改 `dsh.nix` 的源码 revision、`pnpm-lock.yaml` 对应依赖或 patches 后，需要重新确认 fixed-output hash，并检查 `node-pty`、native/system、loader 和模型目录补丁。0.1.7 首次启动把旧 `settings.yaml` 改名为 `.imported` 并导入**首先启动的 profile**；Web 运行时新增的设置行会由 Home Manager 保留。恢复旧版时仅切换 generation 不足以回滚 v4 会话，应恢复升级前的 `~/.dsh` 备份。
