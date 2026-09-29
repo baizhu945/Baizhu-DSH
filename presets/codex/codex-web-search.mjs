@@ -9,6 +9,7 @@
  * fallback only when the host has not already registered the standard DSH
  * tool (the headless profile already provides it).
  */
+const { randomUUID } = process.getBuiltinModule('node:crypto')
 const createRequire = process.getBuiltinModule('node:module').createRequire
 const fs = process.getBuiltinModule('node:fs/promises')
 const nodeDns = process.getBuiltinModule('node:dns')
@@ -27,7 +28,7 @@ const { CredentialFile } = await import(pathToFileURL(nodePath.join(nodePath.dir
 
 // Reuse only the OAuth token refresh implementation. No dsh web provider is
 // loaded; the credential document remains owned by dsh-auth.
-// rc.2 resolves profile modules at runtime instead of leaving a shared
+// Recent DSH resolves profile modules at runtime instead of leaving a shared
 // node_modules link. The Nix dsh launcher supplies the pi-ai instance owned
 // by dsh-llm-pi-ai; the fallback preserves older standalone test profiles.
 const piAiDirectory = process.env.DSH_PI_AI_ROOT?.trim()

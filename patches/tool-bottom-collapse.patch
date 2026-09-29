@@ -2,10 +2,13 @@ diff --git a/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css b/p
 index f59c04e..95c9875 100644
 --- a/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
 +++ b/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
-@@ -103,6 +103,26 @@
+@@ -79,5 +79,25 @@
+ .thinkBody {
+   /* Indent under the title, which starts at leading (16 + delta) + gap 6. */
+   padding: 4px 0 4px calc(22px + var(--dsh-content-font-delta, 0px));
    min-width: 0;
  }
- 
++
 +.collapseButton {
 +  display: inline-flex;
 +  align-items: center;
@@ -25,10 +28,6 @@ index f59c04e..95c9875 100644
 +  background: var(--dsw-alias-interactive-bg-hover-solid);
 +  color: var(--dsw-alias-label-primary);
 +}
-+
- @media (prefers-reduced-motion: reduce) {
-   .root[data-state='running'] .row::after {
-     animation: none;
 diff --git a/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx b/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
 index 74a801d..1b56709 100644
 --- a/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
@@ -36,8 +35,8 @@ index 74a801d..1b56709 100644
 @@ -1,6 +1,6 @@
  /** Assistant reasoning disclosure, independent of Tool-call presentation. */
  import { memo, useMemo } from 'react'
--import { DisclosureRow, IconThinkOutlineRegular, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
-+import { DisclosureRow, IconChevronUpOutlineRegular, IconThinkOutlineRegular, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+-import { DisclosureRow, IconThinkOutlineRegular, MarkdownText, TextShimmer } from '@deepseek-ai/dsh-client-ui-primitives'
++import { DisclosureRow, IconChevronUpOutlineRegular, IconThinkOutlineRegular, MarkdownText, TextShimmer } from '@deepseek-ai/dsh-client-ui-primitives'
  import type { ChatViewSlotProps, UseDisclosure, UsePresentation } from '../contract/slots.ts'
  import { markdownLabels } from '../markdown-labels.ts'
  import a11yCss from './accessibility.module.css'
@@ -143,8 +142,8 @@ index 0800bc7..102037b 100644
 @@ -1,6 +1,6 @@
  import { useState, type KeyboardEvent, type ReactNode } from 'react'
  import {
--  IconChevronDownOutlineRegular, IconInspectOutlineRegular, IconSkillOutlineRegular,
-+  IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconInspectOutlineRegular, IconSkillOutlineRegular,
+-  IconChevronDownOutlineRegular, IconInspectOutlineRegular, IconSkillOutlineRegular, TextShimmer,
++  IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconInspectOutlineRegular, IconSkillOutlineRegular, TextShimmer,
  } from '@deepseek-ai/dsh-client-ui-primitives'
  import type { StartedToolCallViewProps, ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
  import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'

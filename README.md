@@ -5,11 +5,11 @@
 ## 配置特色
 
 - **源码级可复现构建**：`dsh.nix` 固定 `deepseek-harness` 的 Git revision 和 pnpm 依赖，使用 Node.js 22、pnpm 11 构建 host/client 两端，并生成带 `--expose-internals` 的 `dsh` 启动包装器。
-- **Web、TUI 与 headless profile**：共用 dsh 0.1.7-rc.2 的模型实现、技能与会话存储；Web 面向浏览器，headless 面向脚本和 `cc-connect`。新版设置按 profile 保存，不再共享一份 `settings.yaml`。
+- **Web、TUI 与 headless profile**：共用 dsh 0.2.0-rc.1 的模型实现、技能与会话存储；Web 面向浏览器，headless 面向脚本。新版设置按 profile 保存，不再共享一份 `settings.yaml`。
 - **第四种 Confirm 权限模式**：保留 DSH 原有的 Read Only、Workspace Write、Full Access，另加默认的 `confirm`：使用完整访问范围，但每次文件写入或命令执行都先询问。
 - **Codex-compatible preset**：`Codex Mode` 把 DSH 的底层能力映射为 `exec_command`、`apply_patch`、Plan、图片查看、用户提问和 Luna V1 子代理等 Codex 形状的工具，同时仍由主机统一掌管沙箱、审批、文件系统和会话持久化。
 - **面向长任务的会话保护**：使用上游 `session-persistence-jsonl` 的 kernel-level `session.lock`，由操作系统负责跨进程写入排他和进程退出后的自动释放。
-- **声明式的插件化扩展**：权限询问、审批面板、OpenAI 账号、headless JSONL runner 和 skills 都通过 profile/preset 注入，而不是长期维护一份分叉的 DSH 源码。
+- **声明式的插件化扩展**：权限询问、审批面板、OpenAI 账号和 skills 都通过 profile/preset 注入，而不是长期维护一份分叉的 DSH 源码。
 
 ## 分层结构
 
@@ -44,51 +44,16 @@ DSH_BROWSER=chromium dsh-web 3080
 
 `dsh-web` 会在端口空闲时启动 `dsh web`，然后以临时 Chromium profile 打开独立应用窗口；端口已有实例时只复用它。关闭窗口、终端或按 `Ctrl+C` 后，仅回收本次启动的服务和临时 profile，不会误杀原先运行的实例。启动失败日志写入 `~/.dsh-web.log`；Wayland 下脚本自动使用兼容的 Ozone/IME 参数。
 
-### Headless / cc-connect
+TUI 使用 `~/.dsh/profiles/dsh-tui/cordis.patch.yml`；`dst doctor` 还会检查未使用的旧路径 `~/.dsh-tui/cordis.yml`，显示“缺失”不影响当前 profile 启动。不要为了消除这条提示而覆盖用户现有配置。
+
+### Headless
 
 ```bash
 dsh --profile headless "run the tests"
-dsh --profile headless --session-id abc --model deepseek-v4-pro \
-  --mode confirm --jsonl "inspect and fix the failing test"
+dsh --profile headless --help
 ```
 
-自定义 `cc-connect-startup` 解析以下参数，`cc-connect-runner` 负责创建或恢复 session、覆盖模型、写入权限旋钮、运行一回合并退出：
-
-| 参数 | 行为 |
-| --- | --- |
-| `--session-id` | 指定 id 时优先恢复已有持久化 session，恢复失败才以同 id 新建 |
-| `--provider` | 覆盖本次运行的 provider route；与 `--model` 一起保证跨 provider 同名模型不歧义 |
-| `--model` | 仅覆盖本次运行的模型 |
-| `--reasoning-effort` | 覆盖本次运行的思考强度；`/reasoning` 会在下一轮传入 |
-| `--mode` | `read-only`、`workspace-write`、`danger-full-access` 或 `confirm` |
-| `--preset` | 选择 preset；已有历史的 session 不允许改 composition，空白 session 会记录 `agent-preset/selected` |
-| `--list-models` | 输出 dsh 当前运行时 provider/model catalog 的 JSON，不创建 agent |
-| `--jsonl` | stdout 流式输出 text/thinking/tool/approval/result/done 事件，并从 stdin 接收审批 |
-
-### cc-connect JSONL 协议
-
-这里保留自定义 `--jsonl`，而不是切换到 dsh/其他 CLI 的 `--json`：cc-connect 需要同时接收增量输出和审批请求，并在同一个进程的 stdin 回写审批决定。两端当前使用的调用和事件契约如下：
-
-- 普通回合：`cc-connect` 调用 `dsh --profile headless --session-id <id> [--provider <provider>] [--model <model>] [--reasoning-effort <effort>] [--mode <mode>] [--preset <name>] --jsonl <task>`；选项置于 task 之前。
-- 模型目录：调用 `--list-models`（不创建 session），读取一行 `{ "type": "models", "models": [...], "reasoningEfforts": [...] }` JSON。
-- stdout 事件：`text {text}`、`thinking {text}`、`tool/call {callId,name,arguments}`、`tool/result {callId,name,content,isError?}`、`approval/request {id,toolName,reason?,callId?}`、`result {text}` 和 `done {success,sessionId}`。
-- 审批：dsh 输出的 request `id` 在 cc-connect 内部会包装为 `dsh_<id>`；cc-connect 回写时去掉此前缀，发送 `{"type":"approval/response","id":"<id>","outcome":"allowed-once"}` 或 `outcome":"rejected"`，每条一行。
-
-因此 `--jsonl` 是本地 dsh runner 与 cc-connect 的明确私有协议；若未来改用官方 `--json`，必须同步迁移参数构造、所有事件类型/字段、审批 stdin 回写、终局处理和对应测试，不能只替换一个 flag。
-
-`--jsonl` 的审批回应用一行 JSON，例如：
-
-```json
-{"type":"approval/response","id":"<raw request id>","outcome":"allowed-once"}
-```
-
-协议静态回归测试（不需要加载构建后的 dsh 依赖树）：
-
-```bash
-node --test profiles/headless/plugins/cc-connect-protocol.test.mjs
-```
-
-headless 的权限映射是：Read Only = `read-only + ask`，Workspace Write = `workspace-write + ask`，Full Access = `danger-full-access + never`，Confirm = `danger-full-access + ask`。Confirm 模式会额外拦截 `write`、`edit`、`str_replace_editor`、`bash`、`pwsh` 和 `terminal_send`。
+使用官方 `headless-startup` 和 `headless-runner`，保留上游支持的 `--session-id` / `--json`；不再安装 cc-connect 的 `--jsonl` 桥或扩展参数。原有独立 `cc-connect` 服务仍由 `agent/cc-connect.nix` 管理，若要继续使用它，需另行适配其 dsh 调用协议。
 
 ## Web 权限与审批体验
 
@@ -106,8 +71,8 @@ headless 的权限映射是：Read Only = `read-only + ask`，Workspace Write = 
 
 | Preset | 重点 |
 | --- | --- |
-| `standard` / `ptc` / `minimal` / `cordis` | dsh 官方声明式 preset：Web/TUI 使用 bundle 及适配器，headless 从已安装 Web bundle 注册相同的四份定义。 |
-| `codex` | 本地声明式 preset：Codex persona、Code Mode、沙箱 shell、`apply_patch`、Skills、Plan Mode、用户提问、图片查看和子代理。三个 profile 都显式注册；不安装 liangshen。 |
+| `standard` / `ptc` / `minimal` / `cordis` | dsh 官方声明式 preset：Web/TUI 使用 bundle 及适配器；headless 使用上游默认工具。 |
+| `codex` | 本地声明式 preset：Codex persona、Code Mode、沙箱 shell、`apply_patch`、Skills、Plan Mode、用户提问、图片查看和子代理。Web/TUI 显式注册；不安装 liangshen。 |
 
 Codex preset 只改变选中该 preset 的 session 的 model-facing surface：SSH 等主机额外工具会被隐藏，但沙箱、审批、附件、文件系统、模型路由和 session persistence 仍由 DSH 主机服务提供。NixOS 不保证 `/bin/bash` 存在，因此 `dsh-codex.nix` 会把 Codex PTY 的 bash 路径替换为 nixpkgs 中的 `bashInteractive`。
 
@@ -120,9 +85,9 @@ Codex preset 只改变选中该 preset 的 session 的 model-facing surface：SS
 
 ## 持久化与技能
 
-- provider 重试次数使用当前 dsh 官方默认值 5；不再通过全局 `home-cordis.patch.yml` 覆盖各 profile 的完整 provider 配置，避免 TUI/Web/headless 之间互相丢失设置。
+- provider 重试次数遵循当前 dsh 官方默认值；不再通过全局 `home-cordis.patch.yml` 覆盖各 profile 的完整 provider 配置，避免 TUI/Web/headless 之间互相丢失设置。
 - `skills.nix` 合并本地 `agent/skills` 与 Anthropic 的 docx/pptx/xlsx/pdf/canvas-design、media-processor、idea-refine 以及 superpowers；技能由 `~/.dsh/skills/` 自动发现。
 
 ## 维护提示
 
-修改 `dsh.nix` 的源码 revision、`pnpm-lock.yaml` 对应依赖或 patches 后，需要重新确认 fixed-output hash，并检查 `node-pty`、native/system、loader 和模型目录补丁。0.1.7 首次启动把旧 `settings.yaml` 改名为 `.imported` 并导入**首先启动的 profile**；Web 运行时新增的设置行会由 Home Manager 保留。恢复旧版时仅切换 generation 不足以回滚 v4 会话，应恢复升级前的 `~/.dsh` 备份。
+修改 `dsh.nix` 的源码 revision、`pnpm-lock.yaml` 对应依赖或 patches 后，需要重新确认 fixed-output hash，并检查 `node-pty`、native/system、loader 和模型目录补丁。首次启动可能把旧 `settings.yaml` 改名为 `.imported` 并导入**首先启动的 profile**；Web 运行时新增的设置行会由 Home Manager 保留。0.2.0 的 V4 会话写入采用新事件格式；恢复旧版时仅切换 generation 不足以回滚 v4 会话，应恢复升级前的 `~/.dsh` 备份。

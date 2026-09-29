@@ -3,14 +3,14 @@
 let
   # Pin the upstream release and its submodules. GitHub source archives omit
   # submodule contents; materialize them below before fetching pnpm deps.
-  # v0.11.1 declares compatibility with the pinned dsh 0.1.7-rc.2 host.
+  # v0.11.2 declares compatibility with the pinned dsh 0.2.0-rc.1 host.
   # Keep this source and the matching dsh-auth submodule pinned together.
-  dshTuiVersion = "0.11.1";
+  dshTuiVersion = "0.11.2";
   dshTuiSrc = pkgs.fetchFromGitHub {
     owner = "ccch1mneyyy";
     repo = "dsh-TUI";
-    rev = "886316ac3378635169977482b687ef2096612133";
-    hash = "sha256-V8x//Z/gV8gvY8bzW2AIjTzzh6PYBZ46jgQy9GTAxIM=";
+    rev = "dd4137129b91090184e5eaabb7b8a0a74c1b919b";
+    hash = "sha256-H/J3OjrFpZp32sOmr3iLz3AvZMJ+YGaMHF8tuQZBl0M=";
   };
 
   dshEcosystemSpecSrc = pkgs.fetchFromGitHub {
@@ -59,7 +59,7 @@ let
   dshTuiPnpmDeps = pkgs.fetchPnpmDeps (fetchPnpmDepsArgs // {
     pname = "dsh-tui";
     src = sourceWithSubmodules;
-    hash = "sha256-Nqe3KqzcMTxnFk1aIINPhJ2fJA0mKavj8PsazFPlrnA=";
+    hash = "sha256-MLI956zagv4CArx5Vx/1gQKmAqrF+AJ8mMY2KwhFeA8=";
   });
 
   dshTui = pkgs.stdenv.mkDerivation {
@@ -143,8 +143,14 @@ let
         )
       done
 
+      # 0.11.2 renders optional LaTeX images from a bundled MathJax worker.
+      # Its workspace dependency must be built before compiling the TUI.
+      node vendor/mathjax-tex-svg/build.mjs
       node scripts/clean-lib.mjs
       "$root/node_modules/.bin/tsc" -p tsconfig.json
+      node scripts/gen-settings-json.mjs
+      # The TUI's lock must contain the validated 0.2.0-rc.1 Harness packages.
+      node --import tsx/esm scripts/verify-upstream-contract.ts
       node --input-type=module -e '
         import assert from "node:assert/strict";
         import { WHEEL_NOTCH_LINES, wheelNotchDelta } from "./lib/types/ink/wheel-notch.js";
@@ -160,6 +166,7 @@ let
         ], [6, 0, 0, 6, -6, 0]);
       '
       node --import tsx/esm scripts/verify-wheel-selection.ts
+      node --import tsx/esm scripts/verify-math-renderer.tsx
       runHook postBuild
     '';
 
@@ -255,7 +262,7 @@ let
       bundles = [
         "@deepseek-ai/dsh-base"
         "@deepseek-harness-tui/dsh-tui"
-        # TUI 0.11.1 mounts dsh-auth via its own /oauth row.
+        # TUI mounts dsh-auth via its own /oauth row.
       ];
       patchReload = "live";
     };
@@ -265,7 +272,7 @@ let
 
   # No global provider patch is applied after this profile. The TUI bundle's
   # complete llm-deepseek row therefore remains authoritative; the omitted
-  # protocol follows dsh 0.1.7-rc.2's official Messages default.
+  # protocol follows dsh 0.2.0-rc.1's official Messages default.
   # Keep the previous seed for a safe, exact-match upgrade. A user-edited
   # runtime patch is never replaced just to add a new preset declaration.
   dshTuiProfilePatchText = ''
@@ -409,7 +416,7 @@ in
       # Keep user-added dependencies and bundle layers, but ensure the
       # declarative TUI bundle and the in-box base layer are present exactly
       # once. Remove the previous TUI profile's separate dsh-auth bundle:
-      # upstream 0.11.1 mounts it via the TUI's /oauth row instead.
+      # upstream mounts it via the TUI's /oauth row instead.
       # The store path makes the package source explicit without asking
       # pnpm to mutate the profile during activation.
       run ${pkgs.jq}/bin/jq \

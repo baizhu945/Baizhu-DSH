@@ -1,12 +1,12 @@
 { config, pkgs, lib, ... }:
 
 let
-  # deepseek-harness dsh-v0.1.7-rc.2 (2026-09-24)
+  # deepseek-harness dsh-v0.2.0-rc.1 (2026-09-28)
   dshSrc = pkgs.fetchFromGitHub {
     owner = "deepseek-ai";
     repo = "deepseek-harness";
-    rev = "477b4f420553e8a52c2fbccc464d7561b239c443";
-    hash = "sha256-bWeyipPsY5KclNGJPIttZ9CKRXCqkNIoKmK8VKN7FnI=";
+    rev = "4878cdabd87d4041bdaff61d04c966883b9fd07a";
+    hash = "sha256-J1uuMfQe9wWKCDNV3h3VimS9xcNbzdKC8qzeSfYJdGo=";
   };
 
   # 声明式 pnpm 依赖(fetchPnpmDeps 为 fixed-output 派生,沙箱内可联网下载;
@@ -20,7 +20,7 @@ let
     pnpm = pkgs.pnpm_11;
     fetcherVersion = 4; # 26.11 起 pnpm_11 仅支持 fetcherVersion 4
 
-    # rc.2 的 1686 个锁定依赖需要离线 fixed-output store。镜像在最后
+    # 锁定依赖需要离线 fixed-output store。镜像在最后
     # 一个包长时间停滞；改用 npm 官方 CDN，适度提高并发并保留重试。
     prePnpmInstall = ''
       export NIX_NPM_REGISTRY=https://registry.npmjs.org
@@ -29,12 +29,12 @@ let
       pnpm config set network-concurrency 12
     '';
 
-    hash = "sha256-rDV6HxYwnPROBOP7/JY/cZ7kqmxv0zxOncjJghIvvM4=";
+    hash = "sha256-nf943HpUoW1Ai+UEZd9MsO/4ZmvpesFkHaoNUtY6Iwc=";
   };
 
   # dsh-TUI 的 dsh-auth 子模块：提供 ChatGPT/Codex、Claude 和 Grok
   # 订阅账号 OAuth 登录、凭据存储/刷新与 provider 路由。固定到 TUI
-  # v0.11.1 引用的子模块提交，避免跟随 main 分支漂移。
+  # v0.11.2 引用的子模块提交，避免跟随 main 分支漂移。
   dshAuthSrc = pkgs.fetchFromGitHub {
     owner = "ccch1mneyyy";
     repo = "dsh-auth";
@@ -58,7 +58,7 @@ let
 
   dsh = pkgs.stdenv.mkDerivation {
     pname = "dsh";
-    version = "0.1.7-rc.2";
+    version = "0.2.0-rc.1";
     src = dshSrc;
 
     pnpmDeps = dshPnpmDeps;
@@ -108,7 +108,7 @@ let
       runHook preBuild
       # node-pty 的 pty.node 由 install script 用 node-gyp 编译(--ignore-scripts 跳过)
       cd node_modules/node-pty && node-gyp rebuild && cd ../..
-      export DSH_CLIENT_COMMIT_HASH=477b4f420553e8a52c2fbccc464d7561b239c443
+      export DSH_CLIENT_COMMIT_HASH=4878cdabd87d4041bdaff61d04c966883b9fd07a
       npm run build
       runHook postBuild
       # pi-ai 的 OpenAI API 与 OpenAI Codex 目录都把 GPT-6 的
@@ -133,7 +133,7 @@ let
       # hostnames; callers can opt out with DSH_WEB_FETCH_ALLOW_FAKE_IP=0.
       export DSH_WEB_FETCH_ALLOW_FAKE_IP="''${DSH_WEB_FETCH_ALLOW_FAKE_IP:-1}"
       # Codex web.run must load pi-ai from the same installation instance as
-      # dsh-llm-pi-ai; rc.2 no longer heals a shared profiles/node_modules link.
+      # dsh-llm-pi-ai; the launcher must not depend on a shared profiles/node_modules link.
       export DSH_PI_AI_ROOT="$out/packages/llm/llm-pi-ai/node_modules/@earendil-works/pi-ai"
       exec ${pkgs.nodejs_22}/bin/node --expose-internals $out/apps/cli/lib/bin.js "\$@"
       EOF
@@ -211,6 +211,23 @@ let
       runHook preInstall
       mkdir -p $out
       cp -r lib dsh-plugin.json cordis.patch.yml package.json README.md LICENSE $out/
+      # TUI 0.11.2 validates DSH 0.2.0-rc.1, but its unchanged dsh-auth
+      # submodule still declares peer ranges ending at 0.1.7-rc.1. DSH 0.2's
+      # compatibility preflight disables the plugin before it can run. Extend
+      # only the five Harness peers to this exact tested release, rather than
+      # granting a persistent allow-version exemption or accepting future 0.2s.
+      node --input-type=module - "$out/package.json" <<'NODE'
+      import { readFileSync, writeFileSync } from 'node:fs'
+      const path = process.argv[2]
+      const manifest = JSON.parse(readFileSync(path, 'utf8'))
+      for (const suffix of ['attachment', 'commands', 'llm', 'llm-pi-ai', 'user-questions']) {
+        const name = '@deepseek-ai/dsh-' + suffix
+        const range = manifest.peerDependencies?.[name]
+        if (typeof range !== 'string') throw new Error('dsh-auth: missing ' + name + ' peer')
+        manifest.peerDependencies[name] = range + ' || 0.2.0-rc.1'
+      }
+      writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n')
+      NODE
       runHook postInstall
     '';
 
@@ -228,9 +245,6 @@ let
   # previous manifest lets activation remove only files it owned when a
   # managed plugin is later removed from this list.
   dshManagedPluginPaths = pkgs.writeText "dsh-managed-plugin-paths" ''
-    profiles/headless/plugins/cc-connect-startup.mjs
-    profiles/headless/plugins/cc-connect-runner.mjs
-    profiles/headless/plugins/official-presets.mjs
     profiles/web/plugins/codex-registrar.mjs
     profiles/web/plugins/provider-codex.mjs
     profiles/web/node_modules/dsh-baizhu-approval/package.json
@@ -254,6 +268,7 @@ in
     dsh
     # dsh 运行时依赖(必须):
     pkgs.nodejs_22 # dsh 子进程/spawn helper 需要 node 在 PATH
+    pkgs.pnpm_11  # TUI doctor/插件管理器的 profile 包操作使用同一主版本
     pkgs.ripgrep   # dsh-tool-fs-search 通过 ctx.subprocess 调用 rg
     pkgs.bubblewrap # dsh sandbox-local 的 Linux 沙箱后端(workspace-write/read-only 模式需要;
                     # 探测方式:spawnSync('bwrap', ...);缺它则报 "no sandbox backend usable")
@@ -280,7 +295,7 @@ in
   # Web/profile cordis patches are runtime-owned files. dsh rewrites them
   # atomically, so they must not be home.file symlinks into /nix/store. Keep
   # Home Manager-owned rows declarative while preserving any new rows that
-  # dsh 0.1.7 imports from settings.yaml into the profile patch. Otherwise a
+  # dsh imports from settings.yaml into the profile patch. Otherwise a
   # later home-manager switch silently discards model/UI/provider preferences.
   home.activation.dshRuntimePatches = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
     seedRuntimePatch() {
@@ -469,12 +484,6 @@ in
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval" \
       "$HOME/.dsh/profiles/node_modules/@deepseek-ai"
 
-    run install -m 644 ${./profiles/headless/plugins/cc-connect-startup.mjs} \
-      "$HOME/.dsh/profiles/headless/plugins/cc-connect-startup.mjs"
-    run install -m 644 ${./profiles/headless/plugins/cc-connect-runner.mjs} \
-      "$HOME/.dsh/profiles/headless/plugins/cc-connect-runner.mjs"
-    run install -m 644 ${./profiles/headless/plugins/official-presets.mjs} \
-      "$HOME/.dsh/profiles/headless/plugins/official-presets.mjs"
     run install -m 644 ${./presets/codex/codex-registrar.mjs} \
       "$HOME/.dsh/profiles/web/plugins/codex-registrar.mjs"
     run install -m 644 ${./profiles/web/plugins/provider-codex.mjs} \
@@ -508,23 +517,35 @@ in
     installDshAuth headless
     installDshAuth shared
 
-    # Codex preset's PTY backend is shipped in the dsh installation but is not
-    # part of the Web bundle's automatic dependency heal set. Keep its three
-    # bare imports resolvable from a user-authored preset without changing any
-    # host composition or other preset.
-    for package in dsh-terminal dsh-terminal-bash dsh-tool-terminal dsh-tools; do
+    # User-authored Codex modules resolve bare imports relative to the shared
+    # profile. DSH's healer does not link every package used by that preset;
+    # keep the PTY, sandbox-policy and LLM imports on the *same* DSH instance.
+    for package in dsh-terminal dsh-terminal-bash dsh-tool-terminal dsh-tools \
+      dsh-sandbox dsh-sandbox-policy dsh-llm; do
       target="$HOME/.dsh/profiles/node_modules/@deepseek-ai/$package"
       if [ -L "$target" ]; then
         run /run/current-system/sw/bin/remove-without-permission -f "$target"
       elif [ -e "$target" ]; then
         run /run/current-system/sw/bin/remove-without-permission -rf "$target"
       fi
-      if [ "$package" = dsh-tools ]; then
-        run ln -s "${dsh}/packages/core/tools" "$target"
-      else
-        run ln -s "${dsh}/packages/terminal/''${package#dsh-}" "$target"
-      fi
+      case "$package" in
+        dsh-tools) run ln -s "${dsh}/packages/core/tools" "$target" ;;
+        dsh-sandbox*) run ln -s "${dsh}/packages/sandbox/''${package#dsh-}" "$target" ;;
+        dsh-llm) run ln -s "${dsh}/packages/llm/llm" "$target" ;;
+        *) run ln -s "${dsh}/packages/terminal/''${package#dsh-}" "$target" ;;
+      esac
     done
+
+    # Codex's diff preview imports the exact root 'diff' package from this
+    # shared profile too. Without a link Node cannot find it from the
+    # user-authored preset (the host package itself uses a different root).
+    diffTarget="$HOME/.dsh/profiles/node_modules/diff"
+    if [ -L "$diffTarget" ]; then
+      run /run/current-system/sw/bin/remove-without-permission -f "$diffTarget"
+    fi
+    if [ ! -e "$diffTarget" ]; then
+      run ln -s "${dsh}/node_modules/diff" "$diffTarget"
+    fi
 
     run install -m 644 ${dshManagedPluginPaths} "$managedPluginManifest"
   '';
