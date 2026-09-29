@@ -11,8 +11,8 @@ in
 {
   home.file = {
     # ---- 本地技能（agent/skills/）----
-    ".dsh/skills/" = {
-      source = ../skills;
+    ".dsh/skills/chrome-automation" = {
+      source = ../skills/chrome-automation;
       recursive = true;
     };
 
