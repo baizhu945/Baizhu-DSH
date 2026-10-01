@@ -10,5 +10,5 @@
 # A noninteractive headless run consumes saved credentials only.
 - insert:
     - id: dsh-auth
-      name: '@deepseek-harness-tui/dsh-auth'
+      name: '@deepseek-harness-tui/dsh-tui/oauth'
       inject: [llm, commands]

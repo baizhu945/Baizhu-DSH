@@ -5,16 +5,19 @@ import test from 'node:test'
 import {
   codeModePreview,
   codeModeSyntaxValid,
+  collaborationModeBlock,
   contextTokensRemaining,
   directPatchContent,
   modelToolAllowed,
   modelInstructions,
+  multiAgentUsageHintBlock,
   normalizeCodeModeSource,
-  officialRuntimeProgram,
   normalizeToolMode,
   patchWebSearchSchema,
+  persistentModeBlock,
   profileForModel,
   modelRowFor,
+  registerClockTools as registerClockToolsForTest,
   registerCodeModeAlias,
   registerModelParity,
   registerV2Agents,
@@ -26,6 +29,8 @@ import {
   v2Status,
   validateV2TaskName,
   waitForV2MailboxUpdate,
+  officialRuntimeProgram,
+  wrapCollaborationMode,
 } from './codex-model-parity.mjs'
 import { approvalReason, apply as applyApproval, patchApprovalPreview } from './codex-approval.mjs'
 import {
@@ -43,6 +48,7 @@ import {
   permissionInstructions,
   preflightPatch,
   pipeOutput,
+  stripCodexHeader,
   terminalOutputText,
   waitForTerminalOperation,
   registerAgents,
@@ -51,6 +57,9 @@ import { apply as applyCodexWebSearch, parseResponseBody, parseResponseEnvelope,
 import { apply as applyCodexPermissions, CODEX_PROFILES, commonDirectory, normalizePermissionRequest } from './codex-permissions.mjs'
 
 const agentComposition = readFileSync(new URL('./agent.cordis.yml', import.meta.url), 'utf8')
+
+const V2_NAMES_FOR_TEST = ['collaboration__spawn_agent', 'collaboration__send_message', 'collaboration__followup_task', 'collaboration__wait_agent', 'collaboration__interrupt_agent', 'collaboration__list_agents']
+const V1_NAMES_FOR_TEST = ['multi_agent_v1__spawn_agent', 'multi_agent_v1__send_input', 'multi_agent_v1__resume_agent', 'multi_agent_v1__wait_agent', 'multi_agent_v1__close_agent']
 
 const shellQuoteSplice = String.fromCharCode(39) + String.fromCharCode(34) + String.fromCharCode(39) + String.fromCharCode(34) + String.fromCharCode(39)
 const directPatch = ['*** Begin Patch', '*** Add File: direct.txt', '+direct "quoted" line', '*** End Patch'].join('\n')
@@ -331,10 +340,22 @@ test('PTY output parser preserves split echo, prompt, and exit marker state', ()
   assert.deepEqual(values[2], { output: '', exitCode: 1 })
 })
 
-test('terminal output exposes session metadata and pipe termination signals', () => {
-  assert.equal(terminalOutputText({ output: 'ok', exit_code: 0 }), 'ok')
-  assert.match(terminalOutputText({ output: 'hello', session_id: 3, exit_code: 2 }), /session ID: 3/)
-  assert.match(terminalOutputText({ output: 'hello', session_id: 3, exit_code: 2 }), /exit code: 2/)
+test('terminal output exposes the Codex result header the model reads', () => {
+  // Codex renders Chunk ID / Wall time / exit code / session id / token count
+  // before the output; the UI card strips that header back off.
+  const plain = terminalOutputText({ output: 'ok', exit_code: 0, wall_time_seconds: 1.5 })
+  assert.match(plain, /^Wall time: 1\.5000 seconds\nProcess exited with code 0\nOutput:\nok$/)
+  assert.equal(stripCodexHeader(plain), 'ok')
+  const live = terminalOutputText({
+    output: 'hello', session_id: 3, exit_code: 2, chunk_id: '4-1', original_token_count: 7,
+  })
+  assert.match(live, /^Chunk ID: 4-1\n/)
+  assert.match(live, /session ID 3/)
+  assert.match(live, /Process exited with code 2/)
+  assert.match(live, /Original token count: 7/)
+  assert.equal(stripCodexHeader(live), 'hello')
+  // Output that happens to contain a bare "Output:" line must survive intact.
+  assert.equal(stripCodexHeader('grep -r x .\nOutput:\nfoo'), 'grep -r x .\nOutput:\nfoo')
   const record = {
     id: 1,
     chunk: 0,
@@ -448,7 +469,7 @@ test('Codex skill visibility follows the selected official catalog row', () => {
   const luna = profileForModel('gpt-5.6-luna')
   assert.equal(luna.includeSkillsUsageInstructions, false)
   assert.equal(modelToolAllowed({}, luna, 'skill', {}, true), false)
-  const legacy = profileForModel('gpt-5.4')
+  const legacy = profileForModel('gpt-5.5')
   assert.equal(legacy.includeSkillsUsageInstructions, true)
   assert.equal(modelToolAllowed({}, legacy, 'skill', {}, false), true)
 })
@@ -457,13 +478,26 @@ test('CodeModeOnly retains official DirectModelOnly controls beside exec', () =>
   const luna = profileForModel('gpt-5.6-luna')
   assert.equal(modelToolAllowed({}, luna, 'request_user_input', {}, false), true)
   assert.equal(modelToolAllowed({}, luna, 'request_user_input', {}, true), false)
-  assert.equal(modelToolAllowed({}, luna, 'new_context', {}, false), true)
-  assert.equal(modelToolAllowed({}, luna, 'new_context', {}, true), false)
   assert.equal(modelToolAllowed({}, luna, 'update_plan', {}, false), true)
   assert.equal(modelToolAllowed({}, luna, 'update_plan', {}, true), true)
   assert.equal(modelToolAllowed({}, luna, 'multi_agent_v1__spawn_agent', {}, false), true)
   assert.equal(modelToolAllowed({}, luna, 'multi_agent_v1__spawn_agent', {}, true), false)
   assert.equal(modelToolAllowed({}, luna, 'collaboration__spawn_agent', {}, false), false)
+  // new_context belongs to the token-budget surface, which every catalog row
+  // currently disables, so Codex never shows it either.
+  assert.equal(luna.tokenBudget, undefined)
+  assert.equal(modelToolAllowed({}, luna, 'new_context', {}, false), false)
+  assert.equal(modelToolAllowed({}, luna, 'new_context', {}, true), false)
+
+  // GPT-6 advertises the clock and async-question tools; Luna does not.
+  const astra = profileForModel('gpt-6-astra')
+  assert.equal(modelToolAllowed({}, astra, 'clock__curr_time', {}, false), true)
+  assert.equal(modelToolAllowed({}, astra, 'clock__sleep', {}, false), true)
+  assert.equal(modelToolAllowed({}, astra, 'clock__sleep', {}, true), false)
+  assert.equal(modelToolAllowed({}, astra, 'request_user_input_async', {}, false), true)
+  assert.equal(modelToolAllowed({}, astra, 'request_user_input_async', {}, true), false)
+  assert.equal(modelToolAllowed({}, luna, 'clock__sleep', {}, false), false)
+  assert.equal(modelToolAllowed({}, luna, 'request_user_input_async', {}, false), false)
 
   const terra = profileForModel('gpt-5.6-terra')
   assert.equal(modelToolAllowed({}, terra, 'collaboration__spawn_agent', {}, false), true)
@@ -553,13 +587,34 @@ test('Codex permission grants are turn-scoped and never policy rejects without p
   assert.match(rejected.reason, /approval policy is never/)
 })
 
-test('Codex environment and never approval text retain official machine-readable facts', () => {
+test('Codex environment and approval blocks keep the official machine-readable facts', () => {
   const unrestricted = filesystemElement({ mode: 'danger-full-access', workspaceRoot: '/repo' })
   assert.match(unrestricted, /<workspace_roots><root>\/repo<\/root><\/workspace_roots>/)
   assert.match(unrestricted, /permission_profile type="disabled"/)
   const managed = filesystemElement({ mode: 'workspace-write', workspaceRoot: '/repo' })
   assert.match(managed, /<entry access="write"><path>\/repo<\/path><\/entry>/)
-  assert.match(permissionInstructions({ mode: 'danger-full-access' }, 'never'), /`sandbox_permissions`/)
+
+  const never = permissionInstructions({ mode: 'danger-full-access', network: true }, 'never')
+  assert.match(never, /`sandbox_permissions`/)
+  assert.match(never, /Network access is enabled\./)
+
+  // A managed profile reports restricted network, exactly like upstream's
+  // NetworkSandboxPolicy::Restricted default.
+  const onRequest = permissionInstructions(
+    { mode: 'workspace-write', workspaceRoot: '/repo', network: false },
+    'ask',
+    { requestPermissions: true },
+  )
+  assert.match(onRequest, /`sandbox_mode` is `workspace-write`/)
+  assert.match(onRequest, /Network access is restricted\./)
+  assert.match(onRequest, /# Permission Requests/)
+  assert.match(onRequest, /The writable root is \/repo\./)
+
+  // Without the tool available, upstream falls back to the long escalation
+  // contract; that full text is what teaches the model to retry unsandboxed.
+  const escalation = permissionInstructions({ mode: 'read-only', network: false }, 'ask')
+  assert.match(escalation, /# Escalation Requests/)
+  assert.match(escalation, /### Banned prefix_rules/)
 })
 
 test('V1 collaboration target checks do not scan a conflicting global session catalog', async () => {
@@ -711,7 +766,7 @@ test('V1 lifecycle controls use an established child without a catalog race', as
 
 test('search tool routing matches Responses Lite capability boundaries', () => {
   const luna = profileForModel('gpt-5.6-luna')
-  const legacy = profileForModel('gpt-5.4')
+  const legacy = profileForModel('gpt-5.5')
   const unknown = profileForModel('codex-unknown-model')
   assert.equal(modelToolAllowed({}, luna, 'web__run', {}, true), true)
   assert.equal(modelToolAllowed({}, luna, 'web_search', {}, true), false)
@@ -721,24 +776,46 @@ test('search tool routing matches Responses Lite capability boundaries', () => {
 })
 
 test('model-owned token-budget messages follow remaining capacity and reset after compaction', () => {
+  // No shipped row enables token budgeting, so exercise the reminder machinery
+  // with a profile that opts in, exactly as a future catalog row would.
+  const row = JSON.parse(readFileSync(
+    new URL('../../../../../../.dsh/.agent-presets/codex/codex-models.json', import.meta.url), 'utf8',
+  )).models.find(entry => entry.slug === 'gpt-5.6-luna')
+  const budget = row.model_messages.token_budget
+  const opted = {
+    ...profileForModel('gpt-5.6-luna'),
+    contextWindow: 1_050_000,
+    tokenBudget: {
+      reminderThresholdTokens: budget.reminder_threshold_tokens,
+      reminderMessageTemplate: budget.reminder_message_template,
+      guidanceMessage: budget.guidance_message,
+      autoCompactFallbackPrompt: budget.auto_compact_fallback_prompt,
+      autoCompactFallbackBufferTokens: budget.auto_compact_fallback_buffer_tokens,
+    },
+  }
   const session = { surface: { replaceGeneration: 0 } }
   const agent = { options: { model: 'gpt-5.6-luna' }, session }
   const meter = { measure: () => ({ totalTokens: 944_000 }) }
   const ctx = { get: name => name === 'tokenMeter' ? meter : undefined }
-  const first = tokenBudgetContextText(ctx, agent)
+  const first = tokenBudgetContextText(ctx, agent, opted)
   assert.match(first, /<context_window_guidance>/)
   assert.match(first, /only 1000 tokens remain/)
-  assert.doesNotMatch(tokenBudgetContextText(ctx, agent), /only 1000 tokens remain/)
+  assert.doesNotMatch(tokenBudgetContextText(ctx, agent, opted), /only 1000 tokens remain/)
   session.surface.replaceGeneration = 1
-  assert.match(tokenBudgetContextText(ctx, agent), /only 1000 tokens remain/)
+  assert.match(tokenBudgetContextText(ctx, agent, opted), /only 1000 tokens remain/)
 
   const exhausted = { options: { model: 'gpt-5.6-terra' }, session: { id: 'session-b', surface: { replaceGeneration: 0 } } }
   const exhaustedContext = tokenBudgetContextText(
     { get: () => ({ measure: () => ({ totalTokens: 945_000 }) }) },
     exhausted,
+    opted,
   )
   assert.match(exhaustedContext, /only 0 tokens remain/)
   assert.match(exhaustedContext, /current context window is exhausted/i)
+
+  // The shipped rows must stay dormant.
+  assert.equal(profileForModel('gpt-6-astra').tokenBudget, undefined)
+  assert.equal(profileForModel('gpt-5.5').tokenBudget, undefined)
 })
 
 test('Codex compaction stays automatic and leaves room for summary replay', () => {
@@ -761,14 +838,25 @@ test('Codex permission service shares the isolated realm with its consumer', () 
 })
 
 test('official remaining-context tool is available only on token-budget routes', () => {
+  // Every shipped catalog row leaves token budgeting disabled, so neither
+  // gpt-5.6-luna nor gpt-6-astra exposes the context-meter tools.
   const luna = profileForModel('gpt-5.6-luna')
-  const legacy = profileForModel('gpt-5.4')
+  const astra = profileForModel('gpt-6-astra')
+  const legacy = profileForModel('gpt-5.5')
   const ctx = { get: name => name === 'tokenMeter' ? { measure: () => ({ totalTokens: 1_000 }) } : undefined }
   const agent = { options: { model: 'gpt-5.6-luna' }, session: {} }
+  assert.equal(luna.tokenBudget, undefined)
+  assert.equal(astra.tokenBudget, undefined)
   assert.equal(modelToolAllowed(ctx, luna, 'get_context_remaining', agent, false), false)
-  assert.equal(modelToolAllowed(ctx, luna, 'get_context_remaining', agent, true), true)
+  assert.equal(modelToolAllowed(ctx, luna, 'get_context_remaining', agent, true), false)
   assert.equal(modelToolAllowed(ctx, legacy, 'get_context_remaining', agent, true), false)
-  assert.equal(contextTokensRemaining(ctx, agent, luna), 944_000)
+  // The window math itself still follows upstream when a row opts in.
+  const optIn = {
+    ...luna,
+    contextWindow: 1_050_000,
+    tokenBudget: { reminderThresholdTokens: 6144, reminderMessageTemplate: 'left {n_remaining}', guidanceMessage: '', autoCompactFallbackPrompt: '' },
+  }
+  assert.equal(contextTokensRemaining(ctx, agent, optIn), 944_000)
 })
 
 test('Terra and Sol retain their catalog-owned response preferences', () => {
@@ -778,13 +866,14 @@ test('Terra and Sol retain their catalog-owned response preferences', () => {
     assert.equal(profile.maxContextWindow, 1_050_000)
     assert.equal(profile.supportVerbosity, true)
     assert.equal(profile.defaultVerbosity, 'low')
-    assert.equal(profile.tokenBudget.reminderThresholdTokens, 6144)
     const context = tokenBudgetContextText(
       { get: () => undefined },
       { options: { model }, session: {} },
     )
+    // Verbosity is a request parameter upstream, so it is still announced; the
+    // token-budget guidance is not, because the catalog disables that feature.
     assert.match(context, /Default response verbosity: low/)
-    assert.match(context, /<context_window_guidance>/)
+    assert.doesNotMatch(context, /<context_window_guidance>/)
   }
 })
 
@@ -794,17 +883,34 @@ test('Astra consumes the patched 1.05M context and current catalog collaboration
   assert.equal(profile.multiAgentVersion, 'v2')
   assert.equal(profile.contextWindow, 1_050_000)
   assert.equal(profile.maxContextWindow, 1_050_000)
-  assert.equal(profile.tokenBudget.reminderThresholdTokens, 6144)
   assert.match(profile.instructions, /You are Codex, an agent based on GPT-6/)
+  // GPT-6 family instruction blocks upstream owns and this preset now consumes.
+  assert.match(profile.persistentInstructions, /persistent mode for this session/)
+  assert.match(profile.collaborationModeDefault, /# Collaboration Mode: Default/)
+  assert.match(profile.multiAgentRoleRoot, /You are `\/root`, the primary agent/)
+  assert.ok(profile.experimentalTools.includes('clock'))
+  assert.ok(profile.experimentalTools.includes('send_user_message_async'))
+})
+
+test('GPT-6 flagship rows are present in the pinned catalog', () => {
+  // Regression guard: the catalog pin must not fall behind the model lineup.
+  for (const model of ['gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6-astra']) {
+    const profile = profileForModel(model)
+    assert.equal(profile.toolMode, 'code_mode_only', model)
+    assert.equal(profile.multiAgentVersion, 'v2', model)
+    assert.match(profile.instructions, /You are Codex, an agent based on GPT-6/, model)
+  }
 })
 
 test('model truncation policy caps unified-exec output budgets', () => {
-  const bytesModel = { options: { model: 'gpt-5.2' }, session: {} }
-  const tokenModel = { options: { model: 'gpt-5.4' }, session: {} }
-  assert.equal(outputTokenBudget(bytesModel, undefined), 10_000)
-  assert.equal(outputTokenBudget(bytesModel, 50_000), 10_000)
-  assert.equal(outputTokenBudget(tokenModel, undefined), 10_000)
-  assert.equal(outputTokenBudget(tokenModel, 50_000), 10_000)
+  const catalogModel = { options: { model: 'gpt-6-astra' }, session: {} }
+  assert.equal(outputTokenBudget(catalogModel, undefined), 10_000)
+  assert.equal(outputTokenBudget(catalogModel, 50_000), 10_000)
+  // An unknown slug has no catalog row, so the surface falls back to the
+  // documented 10 000-token ceiling rather than trusting the request.
+  const unknownModel = { options: { model: 'gpt-5.2' }, session: {} }
+  assert.equal(outputTokenBudget(unknownModel, undefined), 10_000)
+  assert.equal(outputTokenBudget(unknownModel, 500), 500)
 })
 
 test('model truncation policy bounds direct tool text without touching typed blocks', () => {
@@ -845,14 +951,17 @@ test('CodeModeOnly prompt states the direct-tool boundary while combined mode st
 
 test('CodeModeOnly persona overrides conflicting direct-tool instructions', () => {
   const luna = profileForModel('gpt-5.6-luna')
-  const instructions = modelInstructions(luna)
+  const instructions = modelInstructions(luna, {}, undefined)
   assert.match(instructions, /<codex_code_mode_boundary>/)
   assert.match(instructions, /`exec`, `wait`, `new_context`/)
   assert.match(instructions, /`request_user_input`/)
   assert.match(instructions, /top-level tool call naming any other tool/i)
   assert.match(instructions, /await tools\.exec_command\(\.\.\.\)/)
   assert.match(instructions, /`skill` tool is not available/i)
-  assert.equal(modelInstructions(profileForModel('gpt-5.4')), profileForModel('gpt-5.4').instructions)
+  // The catalog-owned collaboration blocks follow the base instructions.
+  assert.match(instructions, /<collaboration_mode>/)
+  assert.match(instructions, /<multi_agent_usage_hint>/)
+  assert.match(instructions, /All agents share the same directory/)
 })
 
 test('rc.2 prompt sections receive model persona and PTC-only tool boundary', async () => {
@@ -861,6 +970,7 @@ test('rc.2 prompt sections receive model persona and PTC-only tool boundary', as
     tools: { guard() {}, schemas: () => [] },
     on: (name, fn) => handlers.set(name, fn),
     get: () => undefined,
+    inject: () => () => {},
   }
   registerModelParity(ctx)
   const agent = { options: { model: 'gpt-6-astra' }, session: { id: 'isolated-test' } }
@@ -1492,4 +1602,121 @@ test('web request retries transient 5xx responses but leaves 4xx responses to th
   })
   assert.equal(clientError.statusCode, 401)
   assert.equal(clientAttempts, 1)
+})
+
+test('approval reason prefers the model justification and keeps the patch preview', () => {
+  const ctx = { tools: { get: () => undefined } }
+  const escalated = {
+    name: 'exec_command',
+    arguments: { cmd: 'git push', sandbox_permissions: 'require_escalated', justification: 'Push the branch the user asked for?' },
+  }
+  assert.equal(approvalReason(ctx, escalated), 'Push the branch the user asked for?')
+  const bare = { name: 'exec_command', arguments: { cmd: 'ls' } }
+  assert.match(approvalReason(ctx, bare), /requires your approval/)
+  const patch = {
+    name: 'apply_patch',
+    arguments: { input: '*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch' },
+  }
+  const reason = approvalReason(ctx, patch)
+  assert.match(reason, /Patch preview: \+1\/-1/)
+  assert.match(reason, /Update file: a\.txt/)
+})
+
+test('collaboration mode defaults to the shipped Default template and wraps Plan', () => {
+  const template = readFileSync(
+    new URL('./codex-default-mode.md', import.meta.url), 'utf8',
+  )
+  assert.match(template, /# Collaboration Mode: Default/)
+  assert.match(template, /Never use the `request_user_input` tool for permission requests/)
+  const block = collaborationModeBlock({}, undefined, profileForModel('gpt-5.6-luna'))
+  assert.match(block, /^<collaboration_mode>/)
+  assert.match(block, /<\/collaboration_mode>$/)
+  assert.match(block, /strongly prefer making reasonable assumptions/)
+  // Plan mode owns its own template, so the Default block steps aside.
+  const planning = { get: () => ({ get: () => ({ active: true }) }) }
+  assert.equal(collaborationModeBlock(planning, undefined, profileForModel('gpt-5.6-luna')), undefined)
+  assert.equal(
+    wrapCollaborationMode('# Plan Mode (Conversational)\ntext'),
+    '<collaboration_mode>\n# Plan Mode (Conversational)\ntext\n</collaboration_mode>',
+  )
+  assert.equal(wrapCollaborationMode('<collaboration_mode>x</collaboration_mode>'), '<collaboration_mode>x</collaboration_mode>')
+})
+
+test('GPT-6 rows add persistent mode and the multi-agent role only when opted in', () => {
+  const astra = profileForModel('gpt-6-astra')
+  const session = {}
+  const agent = { session }
+  const ctx = { get: () => undefined }
+
+  assert.equal(persistentModeBlock(astra, false), undefined)
+  const on = persistentModeBlock(astra, true)
+  assert.match(on, /^<persistent_mode>/)
+  assert.match(on, /persistent mode for this session/)
+  // The GPT-6 catalog override names the async channel directly; the bundled
+  // template upstream uses a `{{ approval_request_channel }}` placeholder.
+  assert.match(on, /functions\.send_user_message_async/)
+  assert.doesNotMatch(on, /\{\{ approval_request_channel \}\}/)
+  assert.ok(on.trimEnd().endsWith('</persistent_mode>'))
+  // A row without persistent text never gets the block.
+  assert.equal(persistentModeBlock(profileForModel('gpt-5.6-sol'), true), undefined)
+
+  assert.match(multiAgentUsageHintBlock(astra), /There are 4 available concurrency slots/)
+  assert.match(multiAgentUsageHintBlock(astra), /edits made by one agent are immediately visible/)
+  assert.equal(multiAgentUsageHintBlock(profileForModel('gpt-5.5')), undefined)
+})
+
+test('the model switch marker fires once per selected route', () => {
+  const astra = profileForModel('gpt-6-astra')
+  const sol = profileForModel('gpt-6-sol')
+  const ctx = { get: () => undefined }
+  const session = {}
+  const first = modelInstructions(astra, ctx, { session })
+  assert.match(first, /^<model_switch>/)
+  assert.match(first, /`gpt-6-astra`/)
+  assert.doesNotMatch(modelInstructions(astra, ctx, { session }), /<model_switch>/)
+  const switched = modelInstructions(sol, ctx, { session })
+  assert.match(switched, /`gpt-6-sol`/)
+})
+
+test('the clock namespace registers the official schema and short wait', async () => {
+  const registrations = []
+  const ctx = { tools: { register: tool => registrations.push(tool) } }
+  registerClockToolsForTest(ctx)
+  const tool = name => registrations.find(item => item.name === name)
+  assert.ok(tool('clock__curr_time'))
+  assert.ok(tool('clock__sleep'))
+  assert.deepEqual(tool('clock__sleep').parameters.required, ['duration_ms'])
+  assert.match(tool('clock__sleep').parameters.properties.duration_ms.description, /between 1 and 43200000/)
+  assert.deepEqual(tool('clock__curr_time').parameters.properties, {})
+  const execution = { agent: { session: {} }, signal: new AbortController().signal }
+  const now = await tool('clock__curr_time').execute({}, execution)
+  assert.match(now.current_time, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/)
+  const waited = await tool('clock__sleep').execute({ duration_ms: 40 }, execution)
+  assert.equal(waited.interrupted, false)
+  assert.ok(waited.elapsed_ms >= 30)
+  await assert.rejects(
+    tool('clock__sleep').execute({ duration_ms: 0 }, execution),
+    /duration_ms must be between/,
+  )
+})
+
+test('every Codex surface tool name is valid on the provider wire', () => {
+  // The Responses API pattern-matches the whole `tools` array, so a single
+  // rejected name (for example a dotted namespace) fails the whole request.
+  const pattern = /^[a-zA-Z0-9_-]+$/
+  const names = [
+    ...new Set([
+      'exec',
+      'wait',
+      'request_permissions',
+      'update_plan',
+      'request_user_input',
+      'request_user_input_async',
+      'clock__curr_time',
+      'clock__sleep',
+      ...V2_NAMES_FOR_TEST,
+      ...V1_NAMES_FOR_TEST,
+    ]),
+  ]
+  for (const name of names) assert.match(name, pattern, name)
 })

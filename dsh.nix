@@ -1,12 +1,12 @@
-{ config, pkgs, lib, ... }:
+{ config, pkgs, lib, dshTui, ... }:
 
 let
-  # deepseek-harness dsh-v0.2.0-rc.1 (2026-09-28)
+  # deepseek-harness dsh-v0.2.0-rc.2 (2026-09-29)
   dshSrc = pkgs.fetchFromGitHub {
     owner = "deepseek-ai";
     repo = "deepseek-harness";
-    rev = "4878cdabd87d4041bdaff61d04c966883b9fd07a";
-    hash = "sha256-J1uuMfQe9wWKCDNV3h3VimS9xcNbzdKC8qzeSfYJdGo=";
+    rev = "639ed015397290b3745d163aafe02ffee4aa3f84";
+    hash = "sha256-ZtO+bdoYbIkIgLTge5Eh7KYwTVh8FpFAAvx58dSY1PI=";
   };
 
   # 声明式 pnpm 依赖(fetchPnpmDeps 为 fixed-output 派生,沙箱内可联网下载;
@@ -29,39 +29,17 @@ let
       pnpm config set network-concurrency 12
     '';
 
-    hash = "sha256-nf943HpUoW1Ai+UEZd9MsO/4ZmvpesFkHaoNUtY6Iwc=";
-  };
-
-  # dsh-TUI 的 dsh-auth 子模块：提供 ChatGPT/Codex、Claude 和 Grok
-  # 订阅账号 OAuth 登录、凭据存储/刷新与 provider 路由。固定到 TUI
-  # v0.11.2 引用的子模块提交，避免跟随 main 分支漂移。
-  dshAuthSrc = pkgs.fetchFromGitHub {
-    owner = "ccch1mneyyy";
-    repo = "dsh-auth";
-    rev = "f44ccc74726c65f37763c42264ea56c6fbb28884";
-    hash = "sha256-ih0WZSmwpZ4fRU17A21898h35Ge+0PrvuOuPIShy+FQ=";
-  };
-
-  dshAuthPnpmDeps = pkgs.fetchPnpmDeps {
-    pname = "dsh-auth";
-    src = dshAuthSrc;
-    pnpm = pkgs.pnpm_11;
-    fetcherVersion = 4;
-    prePnpmInstall = ''
-      export NIX_NPM_REGISTRY=https://registry.npmmirror.com
-      pnpm config set fetch-timeout 600000
-      pnpm config set fetch-retries 5
-      pnpm config set network-concurrency 4
-    '';
-    hash = "sha256-+kj3H8dbEwL2ale+iQef0S+SXJgZ37qtvhjPs2Njxic=";
+    hash = "sha256-+7jFaROKpN8XHFpulloK2lb0GsYXbEdMs/V7ZO9leKE=";
   };
 
   dsh = pkgs.stdenv.mkDerivation {
     pname = "dsh";
-    version = "0.2.0-rc.1";
+    version = "0.2.0-rc.2";
     src = dshSrc;
 
     pnpmDeps = dshPnpmDeps;
+    # Refuse a silently fuzzy patch application when the pinned host changes.
+    patchFlags = [ "-p1" "--fuzz=0" ];
 
     patches = [
       ./patches/tool-bottom-collapse.patch
@@ -108,7 +86,7 @@ let
       runHook preBuild
       # node-pty 的 pty.node 由 install script 用 node-gyp 编译(--ignore-scripts 跳过)
       cd node_modules/node-pty && node-gyp rebuild && cd ../..
-      export DSH_CLIENT_COMMIT_HASH=4878cdabd87d4041bdaff61d04c966883b9fd07a
+      export DSH_CLIENT_COMMIT_HASH=${dshSrc.rev}
       npm run build
       runHook postBuild
       # pi-ai 的 OpenAI API 与 OpenAI Codex 目录都把 GPT-6 的
@@ -116,6 +94,18 @@ let
       # 现在仅修正 GPT-6；OpenAI 账号默认走 openai-codex，必须同时修正
       # 两个目录，避免 Web 仍显示/记录 272K。
       python3 ${./patches/fix-gpt56-context.py}
+      # Guard the original model-window behavior even if pi-ai moves its data.
+      node --input-type=module - <<'NODE'
+      import assert from 'node:assert/strict'
+      import { readFileSync } from 'node:fs'
+      for (const provider of ['openai', 'openai-codex']) {
+        const catalog = JSON.parse(readFileSync('node_modules/@earendil-works/pi-ai/dist/providers/data/' + provider + '.json', 'utf8'))
+        const rows = Object.values(catalog).flatMap(models => Object.entries(models))
+          .filter(([id]) => id === 'gpt-6' || id.startsWith('gpt-6-'))
+        assert.ok(rows.length > 0, provider + ': GPT-6 catalog disappeared')
+        for (const [id, model] of rows) assert.equal(model.contextWindow, 1050000, provider + '/' + id)
+      }
+      NODE
     '';
 
     # 产物 = 完整源码树 + node_modules(运行时经扁平链接加载 @deepseek-ai/* 插件)
@@ -153,94 +143,6 @@ let
     };
   };
 
-  dshAuth = pkgs.stdenv.mkDerivation {
-    pname = "dsh-auth";
-    version = "0.1.0";
-    src = dshAuthSrc;
-    pnpmDeps = dshAuthPnpmDeps;
-    # The TUI/OAuth provider and Codex web.run each keep their own store
-    # instance. Read the shared credential document afresh after token rotation.
-    patches = [
-      ./patches/dsh-auth-fresh-credentials.patch
-      # Web slash commands have an exact live Agent; scope OAuth questions to
-      # its session so the browser question panel can answer them.
-      ./patches/dsh-auth-web-question-scope.patch
-    ];
-
-    nativeBuildInputs = [
-      pkgs.nodejs_22
-      pkgs.pnpm_11
-      pkgs.pnpmConfigHook
-      pkgs.typescript
-    ];
-
-    __structuredAttrs = true;
-    strictDeps = true;
-    pnpmInstallFlags = [ "--frozen-lockfile" "--shamefully-hoist" ];
-
-    postPatch = ''
-      # pnpm 11's Nix hook verifies the dependency tree before every run;
-      # the fixed pnpmDeps already performed that check during installation.
-      echo 'verifyDepsBeforeRun: false' >> pnpm-workspace.yaml
-    '';
-
-    buildPhase = ''
-      runHook preBuild
-      pnpm run build
-      pnpm run smoke
-      # The Web/Codex search plugin and the provider have separate store
-      # instances. Verify that token rotation is visible across both.
-      node --input-type=module - <<'NODE'
-      import { mkdtempSync } from 'node:fs'
-      import { tmpdir } from 'node:os'
-      import { join } from 'node:path'
-      import { CredentialFile } from './lib/credentials.js'
-      const path = join(mkdtempSync(join(tmpdir(), 'dsh-auth-rotation-')), 'credentials.json')
-      const provider = new CredentialFile(path)
-      const search = new CredentialFile(path)
-      const token = access => ({ type: 'oauth', access, refresh: 'fake', expires: Date.now() + 60000 })
-      await provider.modify('openai-codex', async () => token('first'))
-      await search.read('openai-codex')
-      await search.modify('openai-codex', async () => token('rotated'))
-      if ((await provider.read('openai-codex'))?.access !== 'rotated') throw new Error('stale OAuth credential cache')
-      NODE
-      runHook postBuild
-    '';
-
-    installPhase = ''
-      runHook preInstall
-      mkdir -p $out
-      cp -r lib dsh-plugin.json cordis.patch.yml package.json README.md LICENSE $out/
-      # TUI 0.11.2 validates DSH 0.2.0-rc.1, but its unchanged dsh-auth
-      # submodule still declares peer ranges ending at 0.1.7-rc.1. DSH 0.2's
-      # compatibility preflight disables the plugin before it can run. Extend
-      # only the five Harness peers to this exact tested release, rather than
-      # granting a persistent allow-version exemption or accepting future 0.2s.
-      node --input-type=module - "$out/package.json" <<'NODE'
-      import { readFileSync, writeFileSync } from 'node:fs'
-      const path = process.argv[2]
-      const manifest = JSON.parse(readFileSync(path, 'utf8'))
-      for (const suffix of ['attachment', 'commands', 'llm', 'llm-pi-ai', 'user-questions']) {
-        const name = '@deepseek-ai/dsh-' + suffix
-        const range = manifest.peerDependencies?.[name]
-        if (typeof range !== 'string') throw new Error('dsh-auth: missing ' + name + ' peer')
-        manifest.peerDependencies[name] = range + ' || 0.2.0-rc.1'
-      }
-      writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n')
-      NODE
-      runHook postInstall
-    '';
-
-    dontFixup = true;
-
-    meta = {
-      description = "Subscription OAuth provider routes for DeepSeek Harness";
-      homepage = "https://github.com/ccch1mneyyy/dsh-auth";
-      license = lib.licenses.mit;
-      mainProgram = "dsh-auth";
-    };
-  };
-
   # Files copied by dshPlugins rather than linked through home.file. The
   # previous manifest lets activation remove only files it owned when a
   # managed plugin is later removed from this list.
@@ -255,8 +157,6 @@ let
 in
 {
   _module.args.dsh = dsh;
-  _module.args.dshAuth = dshAuth;
-  _module.args.dshAuthSrc = dshAuthSrc;
 
   imports = [
     ./skills.nix
@@ -285,11 +185,9 @@ in
     # Keep build-only pnpm stores in the Home Manager generation closure so GC
     # does not discard them while the installed DSH packages remain in use.
     ".local/share/dsh-nix-pnpm-deps/dsh".source = dshPnpmDeps;
-    ".local/share/dsh-nix-pnpm-deps/dsh-auth".source = dshAuthPnpmDeps;
 
     ".dsh/profiles/web/plugins/confirm-writes.mjs".source = ./profiles/web/plugins/confirm-writes.mjs;
 
-    ".dsh/profiles/headless/cordis.patch.yml".source = ./profiles/headless/cordis.patch.yml;
   };
 
   # Web/profile cordis patches are runtime-owned files. dsh rewrites them
@@ -352,13 +250,18 @@ in
       fi
     }
 
-    # Remove the former Home Manager-owned global patch. It was intentionally
-    # declarative, so deleting it here also prevents an old generation from
-    # continuing to override the current profile/bundle configuration.
-    if [ -L "$HOME/.dsh/cordis.patch.yml" ] || [ -f "$HOME/.dsh/cordis.patch.yml" ]; then
-      run /run/current-system/sw/bin/remove-without-permission -f "$HOME/.dsh/cordis.patch.yml"
+    # Remove only the former Home Manager-owned global symlink. A regular
+    # file or an unrelated user symlink must survive subsequent switches.
+    globalPatch="$HOME/.dsh/cordis.patch.yml"
+    if [ -L "$globalPatch" ]; then
+      case "$(readlink "$globalPatch")" in
+        /nix/store/*-home-manager-files/.dsh/cordis.patch.yml|/nix/store/*-home-cordis.patch.yml)
+          run /run/current-system/sw/bin/remove-without-permission -f "$globalPatch" ;;
+      esac
     fi
     seedRuntimePatch "$HOME/.dsh/profiles/web/cordis.patch.yml" "${./profiles/web/cordis.patch.yml}"
+    # Settings imported by a first headless startup are runtime-owned too.
+    seedRuntimePatch "$HOME/.dsh/profiles/headless/cordis.patch.yml" "${./profiles/headless/cordis.patch.yml}"
   '';
 
   # The old account bridge used to leave Codex model selections under the
@@ -495,33 +398,37 @@ in
     run install -m 644 ${./profiles/web/node_modules/dsh-baizhu-approval/client.js} \
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval/client.js"
 
-    # dsh-auth imports the exact pi-ai instance owned by dsh-llm-pi-ai. Keep
-    # it as a real profile file (not a home.file symlink) and install the same
-    # package into Web and headless profiles so both surfaces share its
-    # DSH_AUTH_CREDENTIALS default and provider implementation.
-    installDshAuth() {
+    # OAuth now lives in dsh-tui/oauth, not a separately fetched dsh-auth.
+    # Deploy the canonical package (without mounting its TUI bundle) to Web,
+    # headless and the shared fallback used by Codex web.run. Keep its private
+    # production dependencies nested so user-installed profile packages and
+    # the host's Cordis/LLM peer instances are not overwritten.
+    installDshOAuth() {
       profile="$1"
       if [ "$profile" = shared ]; then
-        target="$HOME/.dsh/profiles/node_modules/@deepseek-harness-tui/dsh-auth"
+        scope="$HOME/.dsh/profiles/node_modules/@deepseek-harness-tui"
       else
-        target="$HOME/.dsh/profiles/$profile/node_modules/@deepseek-harness-tui/dsh-auth"
+        scope="$HOME/.dsh/profiles/$profile/node_modules/@deepseek-harness-tui"
       fi
-      if [ -e "$target" ] || [ -L "$target" ]; then
-        run chmod -R u+rwX "$target"
-        run /run/current-system/sw/bin/remove-without-permission -rf "$target"
-      fi
-      run mkdir -p "$(dirname "$target")"
-      run cp -rL ${dshAuth}/. "$target"
+      for target in "$scope/dsh-auth" "$scope/dsh-tui"; do
+        if [ -e "$target" ] || [ -L "$target" ]; then
+          if [ ! -L "$target" ]; then run chmod -R u+rwX "$target"; fi
+          run /run/current-system/sw/bin/remove-without-permission -rf "$target"
+        fi
+      done
+      run mkdir -p "$scope"
+      run cp -rL --no-preserve=mode ${dshTui}/package "$scope/dsh-tui"
+      run cp -rL --no-preserve=mode ${dshTui}/node_modules "$scope/dsh-tui/node_modules"
     }
-    installDshAuth web
-    installDshAuth headless
-    installDshAuth shared
+    installDshOAuth web
+    installDshOAuth headless
+    installDshOAuth shared
 
     # User-authored Codex modules resolve bare imports relative to the shared
     # profile. DSH's healer does not link every package used by that preset;
     # keep the PTY, sandbox-policy and LLM imports on the *same* DSH instance.
     for package in dsh-terminal dsh-terminal-bash dsh-tool-terminal dsh-tools \
-      dsh-sandbox dsh-sandbox-policy dsh-llm; do
+      dsh-sandbox dsh-sandbox-policy dsh-llm dsh-atomic-write; do
       target="$HOME/.dsh/profiles/node_modules/@deepseek-ai/$package"
       if [ -L "$target" ]; then
         run /run/current-system/sw/bin/remove-without-permission -f "$target"
@@ -530,6 +437,7 @@ in
       fi
       case "$package" in
         dsh-tools) run ln -s "${dsh}/packages/core/tools" "$target" ;;
+        dsh-atomic-write) run ln -s "${dsh}/packages/util/atomic-write" "$target" ;;
         dsh-sandbox*) run ln -s "${dsh}/packages/sandbox/''${package#dsh-}" "$target" ;;
         dsh-llm) run ln -s "${dsh}/packages/llm/llm" "$target" ;;
         *) run ln -s "${dsh}/packages/terminal/''${package#dsh-}" "$target" ;;

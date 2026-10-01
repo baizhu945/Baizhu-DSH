@@ -33,6 +33,46 @@ const SURFACE_MODEL_CATALOG = await (async () => {
   }
 })()
 
+/**
+ * Upstream keeps the sandbox and approval prose in
+ * `codex-rs/prompts/templates/permissions/**` and interpolates only the
+ * network state plus the dynamic writable-root / denied-read lines. Ship those
+ * templates verbatim as preset-owned data instead of paraphrasing them: the
+ * escalation contract is the model's only guide for what to do after a sandbox
+ * refusal, so a shortened copy silently changes agent behaviour.
+ */
+const PERMISSION_PROMPTS_DIR = nodePath.join(dshHome, '.agent-presets/codex/prompts')
+const PERMISSION_TEMPLATES = Object.freeze({
+  'sandbox-read-only': 'sandbox-read-only.md',
+  'sandbox-workspace-write': 'sandbox-workspace-write.md',
+  'sandbox-danger-full-access': 'sandbox-danger-full-access.md',
+  'approval-never': 'approval-never.md',
+  'approval-unless-trusted': 'approval-unless-trusted.md',
+  'approval-on-request': 'approval-on-request.md',
+  'approval-on-request-request-permissions': 'approval-on-request-request-permissions.md',
+})
+
+async function readPermissionTemplate(name) {
+  const file = PERMISSION_TEMPLATES[name]
+  if (file === undefined) return undefined
+  try {
+    const text = await nodeFs.readFile(nodePath.join(PERMISSION_PROMPTS_DIR, file), 'utf8')
+    return text.trim()
+  } catch {
+    return undefined
+  }
+}
+
+const PERMISSION_TEXT = Object.freeze({
+  'sandbox-read-only': await readPermissionTemplate('sandbox-read-only'),
+  'sandbox-workspace-write': await readPermissionTemplate('sandbox-workspace-write'),
+  'sandbox-danger-full-access': await readPermissionTemplate('sandbox-danger-full-access'),
+  'approval-never': await readPermissionTemplate('approval-never'),
+  'approval-unless-trusted': await readPermissionTemplate('approval-unless-trusted'),
+  'approval-on-request': await readPermissionTemplate('approval-on-request'),
+  'approval-on-request-request-permissions': await readPermissionTemplate('approval-on-request-request-permissions'),
+})
+
 const IMAGE_EXTENSIONS = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -49,6 +89,10 @@ const HIDDEN_HOST_SECTIONS = new Set([
   // The host renders the same policy in dsh-flavored prose; the preset
   // re-expresses it inside <environment_context> in the upstream Codex shape.
   'sandbox:policy',
+  // Likewise the host's approval sentence. <permissions instructions> is the
+  // upstream contract for this, and the dsh wording only adds an answerer
+  // failure mode the model cannot act on.
+  'approval:policy',
 ])
 
 function humanLabel(key) {
@@ -224,19 +268,53 @@ function localDate() {
   return `${part('year')}-${part('month')}-${part('day')}`
 }
 
-function permissionInstructions(policy, approval) {
-  const network = 'enabled'
-  const sandbox = policy.mode === 'danger-full-access'
-    ? `Filesystem sandboxing defines which files can be read or written. sandbox_mode is danger-full-access: No filesystem sandboxing - all commands are permitted. Network access is ${network}.`
-    : policy.mode === 'workspace-write'
-      ? `Filesystem sandboxing defines which files can be read or written. sandbox_mode is workspace-write: The sandbox permits reading files, and editing files in cwd and writable_roots. Editing files in other directories requires approval. Network access is ${network}.`
-      : `Filesystem sandboxing defines which files can be read or written. sandbox_mode is read-only: The sandbox only permits reading files. Network access is ${network}.`
-  const approvals = approval === 'never'
-    ? 'Approval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.'
-    : policy.mode === 'danger-full-access'
-      ? 'approval_policy is on-request: the harness requires user approval before every exec_command or apply_patch call.'
-      : 'Commands run inside the sandbox without prompting. After a real sandbox denial, retry the exact command with sandbox_permissions=require_escalated and a short justification; do not ask in chat first.'
-  return `<permissions instructions>\n${sandbox}\n\n${approvals}\n</permissions instructions>`
+/**
+ * Compose the `<permissions instructions>` block the way
+ * `codex-rs/prompts/src/permissions_instructions.rs::from_resolved` does:
+ * sandbox template → approval template → writable roots → denied reads.
+ *
+ * `policy.network` replaces upstream's `{{ network_access }}` and follows the
+ * same rule: a `Disabled` permission profile reports network as enabled, a
+ * managed one reports it as restricted.
+ */
+function permissionInstructions(policy, approval, options = {}) {
+  const sections = []
+  const network = policy.network === true ? 'enabled' : 'restricted'
+  const sandboxText = PERMISSION_TEXT['sandbox-' + (policy.mode === 'read-only'
+    ? 'read-only'
+    : policy.mode === 'workspace-write' ? 'workspace-write' : 'danger-full-access')]
+  sections.push(sandboxText === undefined
+    ? `Filesystem sandboxing defines which files can be read or written. \`sandbox_mode\` is ${policy.mode}. Network access is ${network}.`
+    : sandboxText.replaceAll('{{ network_access }}', network))
+
+  const approvalText = approvalSection(approval, options)
+  if (approvalText !== undefined) sections.push(approvalText)
+
+  if (policy.mode === 'workspace-write' && typeof policy.workspaceRoot === 'string' && policy.workspaceRoot !== '') {
+    sections.push(` The writable root is ${policy.workspaceRoot}.`)
+  }
+  if (options.approvedPrefixes !== undefined && options.approvedPrefixes.length > 0) {
+    sections.push('## Approved command prefixes\nThe following prefix rules have already been approved: '
+      + options.approvedPrefixes.map(prefix => '- `' + prefix + '`').join('\n'))
+  }
+  if (options.requestPermissions === true) {
+    sections.push('# request_permissions Tool\n\nThe built-in `request_permissions` tool is available in this session. '
+      + 'Invoke it when you need to request additional `network` or `file_system` permissions before later '
+      + 'shell-like commands need them. Request only the specific permissions required for the task.')
+  }
+  return `<permissions instructions>\n${sections.join('\n')}\n</permissions instructions>`
+}
+
+function approvalSection(approval, options) {
+  if (approval === 'never') return PERMISSION_TEXT['approval-never']
+  if (approval === 'untrusted') return PERMISSION_TEXT['approval-unless-trusted']
+  if (approval !== 'ask') return undefined
+  // Upstream prefers the request_permissions-first contract whenever the tool
+  // is available, because it keeps execution inside the current sandbox.
+  if (options.requestPermissions === true) {
+    return PERMISSION_TEXT['approval-on-request-request-permissions']
+  }
+  return PERMISSION_TEXT['approval-on-request']
 }
 
 /** Remove deployment/UI announcements while preserving tool, skill, plan, and Code Mode sections. */
@@ -263,7 +341,7 @@ function registerPromptBoundary(ctx) {
       const agent = context.agent
       if (agent === undefined) return ''
       const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-      const policy = ctx.get('sandboxPolicy')?.resolve({ session: agent.session })
+      const policy = resolvedPolicy(ctx, agent)
       const filesystem = policy === undefined ? undefined : filesystemElement(policy)
       return [
         '<environment_context>',
@@ -271,7 +349,9 @@ function registerPromptBoundary(ctx) {
         '  <shell>bash</shell>',
         `  <current_date>${localDate()}</current_date>`,
         `  <timezone>${xmlEscape(timezone)}</timezone>`,
-        '  <network enabled="true" />',
+        // Upstream renders the same element, but only when the deployment
+        // declares network requirements. A Codex preset session always does.
+        `  <network enabled="${policy?.network === true ? 'true' : 'false'}" />`,
         ...(filesystem !== undefined ? [`  ${filesystem}`] : []),
         '</environment_context>',
       ].join('\n')
@@ -284,10 +364,23 @@ function registerPromptBoundary(ctx) {
     text: context => {
       const agent = context.agent
       if (agent === undefined) return ''
-      const policy = ctx.sandboxPolicy.resolve({ session: agent.session })
-      return permissionInstructions(policy, effectiveApprovalPolicy(sessionEvents(agent.session)))
+      const policy = resolvedPolicy(ctx, agent)
+      return permissionInstructions(policy, effectiveApprovalPolicy(sessionEvents(agent.session)), {
+        requestPermissions: true,
+      })
     },
   })
+}
+
+/**
+ * Resolve the standing policy through the Codex permission seam so the network
+ * policy and any turn-scoped grant reach both the rendered instructions and the
+ * sandbox enforcement path with the same value.
+ */
+function resolvedPolicy(ctx, agent) {
+  const standing = ctx.sandboxPolicy.resolve({ session: agent.session })
+  const codexPermissions = ctx.get?.('codexPermissions')
+  return codexPermissions?.policyFor?.(agent, standing) ?? standing
 }
 
 function shellWorkdir(agent, requested) {
@@ -584,21 +677,60 @@ async function waitForTerminalOperation(operation, yieldTimeMs, signal) {
   }
 }
 
+/**
+ * Model-facing exec result text.
+ *
+ * Codex renders a header before the output
+ * (`codex-rs/core/src/tools/context.rs::response_header`): chunk id, wall
+ * time, exit code, session id and the pre-truncation token count. Those are the
+ * model's only feedback about how long a command took and how much output was
+ * dropped, which is what it uses to decide between polling again, widening
+ * `max_output_tokens`, or changing approach.
+ */
 function terminalOutputText(value) {
+  const headers = []
+  if (typeof value?.chunk_id === 'string' && value.chunk_id !== '') {
+    headers.push('Chunk ID: ' + value.chunk_id)
+  }
+  if (typeof value?.wall_time_seconds === 'number') {
+    headers.push('Wall time: ' + value.wall_time_seconds.toFixed(4) + ' seconds')
+  }
+  if (typeof value?.exit_code === 'number') {
+    headers.push('Process exited with code ' + String(value.exit_code))
+  }
+  if (value?.session_id !== undefined) {
+    headers.push('Process running with session ID ' + String(value.session_id))
+  }
+  if (typeof value?.original_token_count === 'number') {
+    headers.push('Original token count: ' + String(value.original_token_count))
+  }
   const output = typeof value?.output === 'string' ? value.output : ''
-  const markers = []
-  // Match DSH's standard shell renderer: success is represented by the output
-  // itself, while a non-zero status remains a concise recovery signal.
-  if (typeof value?.exit_code === 'number' && value.exit_code !== 0) markers.push('[exit code: ' + String(value.exit_code) + ']')
-  if (value?.session_id !== undefined) markers.push('[session ID: ' + String(value.session_id) + ']')
-  const body = output.length > 0 ? output : markers.length > 0 ? '(no output)' : ''
-  return markers.length === 0 ? body : body + String.fromCharCode(10) + markers.join(String.fromCharCode(10))
+  const body = output !== '' ? output : headers.length === 0 ? '' : '(no output)'
+  return headers.length === 0 ? body : headers.join('\n') + '\nOutput:\n' + body
 }
 
 function prependTerminalOutput(value, prefix, maxOutputTokens) {
   if (prefix.length === 0) return value
   const output = prefix + (value.output.length === 0 ? '' : String.fromCharCode(10) + value.output)
   return { ...value, output: boundedOutput(output, maxOutputTokens), original_token_count: approximateTokens(output) }
+}
+
+/**
+ * Drop the Codex result header for a UI card.
+ *
+ * `presentResult` only receives the already-rendered model text, so the card
+ * has to recover the plain output by removing the header the renderer just
+ * prepended. Header lines are always followed by a bare `Output:` line, which
+ * is what makes this unambiguous.
+ */
+function stripCodexHeader(text) {
+  if (typeof text !== 'string') return text
+  const marker = '\nOutput:\n'
+  const at = text.lastIndexOf(marker)
+  if (at === -1) return text
+  const head = text.slice(0, at)
+  if (!/^(Chunk ID: |Wall time: |Process exited with code |Process running with session ID |Original token count: )/m.test(head)) return text
+  return text.slice(at + marker.length)
 }
 
 function terminalOutputValue(record, output, elapsedMs, settled, maxOutputTokens, exitCode) {
@@ -899,7 +1031,11 @@ function registerExecCommand(ctx) {
     },
     presentResult(_args, result) {
       if (result.isError) return genericToolError('Command failed', result)
-      return { card: 'terminal', output: result.content.filter(block => block.type === 'text').map(block => block.text).join('') }
+      const output = result.content
+        .filter(block => block.type === 'text')
+        .map(block => stripCodexHeader(block.text))
+        .join('')
+      return { card: 'terminal', output }
     },
   }))
 }
@@ -1036,17 +1172,19 @@ function registerWriteStdin(ctx) {
     },
     presentResult(_args, result) {
       if (result.isError) return genericToolError('Terminal session failed', result)
-      return { card: 'terminal', output: result.content.filter(block => block.type === 'text').map(block => block.text).join('') }
+      const output = result.content
+        .filter(block => block.type === 'text')
+        .map(block => stripCodexHeader(block.text))
+        .join('')
+      return { card: 'terminal', output }
     },
   }))
 }
 
 function waitOutputText(value) {
-  const output = typeof value?.output === 'string' && value.output.length > 0 ? value.output : '(no output)'
-  const markers = []
-  if (typeof value?.exit_code === 'number' && value.exit_code !== 0) markers.push(`[exit code: ${value.exit_code}]`)
-  if (value?.session_id !== undefined) markers.push(`[session ID: ${value.session_id}]`)
-  return markers.length === 0 ? output : `${output}\n${markers.join('\n')}`
+  // `wait` forwards a write_stdin result, so reuse the same Codex result header
+  // the model already knows how to read.
+  return terminalOutputText(value)
 }
 
 /**
@@ -1119,7 +1257,11 @@ function registerWait(ctx) {
     },
     presentResult(_args, result) {
       if (result.isError) return genericToolError('Wait failed', result)
-      return { card: 'terminal', output: result.content.filter(block => block.type === 'text').map(block => block.text).join('') }
+      const output = result.content
+        .filter(block => block.type === 'text')
+        .map(block => stripCodexHeader(block.text))
+        .join('')
+      return { card: 'terminal', output }
     },
   }))
 }
@@ -2978,6 +3120,7 @@ export {
   applyHunks,
   patchInput,
   pipeOutput,
+  stripCodexHeader,
   terminalOutputText,
   timeoutPromise,
   waitForTerminalOperation,

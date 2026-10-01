@@ -8,6 +8,10 @@
 export const name = 'codex-tool-boundary'
 export const inject = ['tools']
 
+// Host-added tools that are not part of the OpenAI Codex CLI tool contract.
+// They are denied on the direct surface here and again for the nested Code
+// Mode SDK by codex-model-parity.mjs, so a Code Mode program cannot reach the
+// dsh-native delegation, plan and workflow tools behind the Codex shapes.
 const HOST_EXTRAS = [
   'describe_image',
   'ssh_cluster',
@@ -18,24 +22,28 @@ const HOST_EXTRAS = [
   'ssh_upload',
 ]
 
-// The web profile keeps the standard dsh tool bundle mounted beside the
-// preset. Codex exposes the equivalent unified-exec/fs surface instead, so
-// hide the dsh-native names only in this agent scope.
 const DSH_NATIVE_TOOLS = [
   'ask_user_question',
   'bash',
   'create_goal',
   'edit',
+  'exit_plan_mode',
   'get_goal',
   'glob',
   'grep',
+  'interrupt_agent',
   'job_kill',
   'job_list',
   'job_output',
+  'list_agents',
+  'list_subagent_models',
   'pwsh',
   'read',
   'read_image',
+  'send_message',
   'str_replace_editor',
+  'subagent',
+  'subagent_fork',
   'terminal_close',
   'terminal_list',
   'terminal_open',
@@ -45,6 +53,7 @@ const DSH_NATIVE_TOOLS = [
   'todo_write',
   'update_goal',
   'web_fetch',
+  'workflow',
   'write',
 ]
 

@@ -87,8 +87,20 @@ function patchApprovalPreview(input) {
   return ['Patch preview: +' + String(added) + '/-' + String(removed), ...visible].join('\n')
 }
 
+/**
+ * The question shown on the approval panel.
+ *
+ * Upstream shows `ctx.retry_reason.or(ctx.approval_reason).or(justification)`.
+ * A sandbox refusal that the harness is re-running outside the sandbox uses the
+ * fixed retry question; anything the model asked for on its own initiative
+ * carries the model's own `justification`, so the human approves the reason the
+ * model actually gave.
+ */
 function approvalReason(ctx, exec) {
-  const base = 'Codex tool "' + exec.name + '" requires your approval'
+  const justification = typeof exec.arguments?.justification === 'string'
+    ? exec.arguments.justification.trim()
+    : ''
+  const base = justification !== '' ? justification : 'Codex tool "' + exec.name + '" requires your approval'
   const patch = exec.arguments?.input ?? exec.arguments?.patch
   if (exec.name !== 'apply_patch' || typeof patch !== 'string') return base
   const preview = patchApprovalPreview(patch)

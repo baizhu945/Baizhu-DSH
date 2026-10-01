@@ -5,6 +5,10 @@ OpenAI Codex 的官方 models.json 使用 snake_case 字段，把 GPT-6
 价格分层的 272000 阈值误当成了 context_window，同时留下较小的
 max_context_window 扩展上限。保留已有的 GPT-5.6 修正，避免旧会话
 上下文回退。该目录不属于 dsh 内置 pi-ai。
+
+这是刻意为之的放宽：dsh 内置 pi-ai 目录已经对同一批模型使用 1.05M，
+保持一致可以让 gpt-6-astra / gpt-6.1-sol / gpt-6-sol / gpt-6-luna 与
+gpt-5.6-* 在同一个 preset 内看到同一个窗口声明。
 """
 
 import json
@@ -17,7 +21,9 @@ BROKEN_MAX_CONTEXT_WINDOW = 872_000
 
 
 def needs_extended_context(model_id: str) -> bool:
-    return any(model_id == family or model_id.startswith(f"{family}-")
+    # Upstream slugs are `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`,
+    # `gpt-6-luna` and `gpt-5.6-*`, so both '-' and '.' separate the family.
+    return any(model_id == family or model_id.startswith((f"{family}-", f"{family}."))
                for family in ("gpt-6", "gpt-5.6"))
 
 

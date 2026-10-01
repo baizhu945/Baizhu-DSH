@@ -1,16 +1,16 @@
-{ config, pkgs, lib, dshAuth, dshAuthSrc, ... }:
+{ config, pkgs, lib, ... }:
 
 let
   # Pin the upstream release and its submodules. GitHub source archives omit
   # submodule contents; materialize them below before fetching pnpm deps.
-  # v0.11.2 declares compatibility with the pinned dsh 0.2.0-rc.1 host.
-  # Keep this source and the matching dsh-auth submodule pinned together.
-  dshTuiVersion = "0.11.2";
+  # v0.12.0 embeds OAuth and supports both dsh 0.2.0 release candidates.
+  # The GitHub API tree confirms both remaining submodule pins are unchanged.
+  dshTuiVersion = "0.12.0";
   dshTuiSrc = pkgs.fetchFromGitHub {
     owner = "ccch1mneyyy";
     repo = "dsh-TUI";
-    rev = "dd4137129b91090184e5eaabb7b8a0a74c1b919b";
-    hash = "sha256-H/J3OjrFpZp32sOmr3iLz3AvZMJ+YGaMHF8tuQZBl0M=";
+    rev = "3066b29113bde90606921b64bcf7c25fad31068d";
+    hash = "sha256-dKxdMGVu8DbV5i4OcD0a9Z1mluEUa5y8MLrjjq6JR5U=";
   };
 
   dshEcosystemSpecSrc = pkgs.fetchFromGitHub {
@@ -31,10 +31,9 @@ let
     mkdir -p $out
     cp -r ${dshTuiSrc}/. $out/
     chmod -R u+w $out
-    mkdir -p $out/dsh-ecosystem-spec $out/vendor/dsh-std $out/dsh-auth
+    mkdir -p $out/dsh-ecosystem-spec $out/vendor/dsh-std
     cp -r ${dshEcosystemSpecSrc}/. $out/dsh-ecosystem-spec/
     cp -r ${dshStdSrc}/. $out/vendor/dsh-std/
-    cp -r ${dshAuthSrc}/. $out/dsh-auth/
   '';
 
   fetchPnpmDepsArgs = {
@@ -43,10 +42,10 @@ let
     pnpm = pkgs.pnpm_11;
     fetcherVersion = 4;
     prePnpmInstall = ''
-      export NIX_NPM_REGISTRY=https://registry.npmmirror.com
+      export NIX_NPM_REGISTRY=https://registry.npmjs.org
       pnpm config set fetch-timeout 600000
-      pnpm config set fetch-retries 5
-      pnpm config set network-concurrency 4
+      pnpm config set fetch-retries 8
+      pnpm config set network-concurrency 12
     '';
   };
 
@@ -59,7 +58,7 @@ let
   dshTuiPnpmDeps = pkgs.fetchPnpmDeps (fetchPnpmDepsArgs // {
     pname = "dsh-tui";
     src = sourceWithSubmodules;
-    hash = "sha256-MLI956zagv4CArx5Vx/1gQKmAqrF+AJ8mMY2KwhFeA8=";
+    hash = "sha256-i4HpC5SShCUR3MX0fwWsrE2Pt/S3zUSshOP/NhcTEL8=";
   });
 
   dshTui = pkgs.stdenv.mkDerivation {
@@ -67,8 +66,11 @@ let
     version = dshTuiVersion;
     src = sourceWithSubmodules;
     pnpmDeps = dshTuiPnpmDeps;
+    patchFlags = [ "-p1" "--fuzz=0" ];
     patches = [
       ./patches/dsh-tui-no-liangshen.patch
+      # OAuth is embedded now; Web /auth questions still need the live Agent.
+      ./patches/dsh-auth-web-question-scope.patch
       # A hardware wheel notch can arrive as several terminal reports; apply
       # exactly one six-line vertical scroll to each short report burst.
       ./patches/dsh-tui-wheel-six-lines.patch
@@ -90,6 +92,8 @@ let
       # The hoisted layout is intentional: the installed plugin must share
       # the dsh installation's Cordis and Harness peer instances.
       echo 'verifyDepsBeforeRun: false' >> pnpm-workspace.yaml
+      # Legacy directory discovery must also see an empty shipped preset root.
+      node -e 'require("node:fs").rmSync("presets/liangshen", { recursive: true, force: true })'
       # The current dsh-base supplies ptc-runtime/workflow-ptc. Remove the
       # obsolete worker-thread row INCLUDING its multi-line !!js expression;
       # deleting only the first lines leaves the YAML malformed.
@@ -103,10 +107,6 @@ let
       export HOME=$TMPDIR
       export CI=true
       root=$PWD
-      # TUI's workspace link needs compiled auth declarations. Reuse the
-      # separately pinned and built dsh-auth derivation, not a network install.
-      cp -r ${dshAuth}/lib dsh-auth/
-
       restorePnpmStore() {
         archive="$1"
         store="$2"
@@ -143,14 +143,45 @@ let
         )
       done
 
-      # 0.11.2 renders optional LaTeX images from a bundled MathJax worker.
+      # Optional LaTeX images use a bundled MathJax worker.
       # Its workspace dependency must be built before compiling the TUI.
       node vendor/mathjax-tex-svg/build.mjs
       node scripts/clean-lib.mjs
       "$root/node_modules/.bin/tsc" -p tsconfig.json
       node scripts/gen-settings-json.mjs
-      # The TUI's lock must contain the validated 0.2.0-rc.1 Harness packages.
+      node scripts/build-guide.mjs --check
+      # The TUI's lock must contain its validated Harness packages.
       node --import tsx/esm scripts/verify-upstream-contract.ts
+      # Includes external token/sign-in visibility, cross-process locking and
+      # the local regression for session-scoped Web /auth questions.
+      node scripts/verify-oauth.mjs
+      node --input-type=module - <<'NODE'
+      import assert from 'node:assert/strict'
+      import { existsSync, readdirSync } from 'node:fs'
+      import { registerBundledPresets } from './lib/types/dsh-adapter/bundled-presets.js'
+      import { ensurePackagedPresets } from './lib/types/dsh-adapter/packaged-presets.js'
+      const registered = []
+      const registry = { register: async definition => {
+        registered.push(definition.id)
+        return async () => {}
+      } }
+      const ctx = {
+        baseUrl: import.meta.url,
+        get: name => name === 'agentPresets' ? registry : name === 'loader' ? {
+          entries: () => [{ disabled: false, options: {
+            name: '@deepseek-ai/dsh-agent-preset', config: { id: 'standard' },
+          } }],
+        } : undefined,
+        extend: () => ctx,
+        effect: () => {},
+      }
+      assert.equal(await registerBundledPresets(ctx), true)
+      assert.deepEqual(registered, ['ptc', 'minimal', 'cordis'])
+      assert.equal(existsSync('presets/liangshen'), false)
+      assert.deepEqual(readdirSync('presets'), [])
+      assert.deepEqual(ensurePackagedPresets({ sourceRoot: 'presets' }), [])
+      console.log('no-liangshen: official presets only; no shipped or materialized custom preset')
+      NODE
       node --input-type=module -e '
         import assert from "node:assert/strict";
         import { WHEEL_NOTCH_LINES, wheelNotchDelta } from "./lib/types/ink/wheel-notch.js";
@@ -166,7 +197,12 @@ let
         ], [6, 0, 0, 6, -6, 0]);
       '
       node --import tsx/esm scripts/verify-wheel-selection.ts
+      node --import tsx/esm scripts/verify-pointer-events.ts
       node --import tsx/esm scripts/verify-math-renderer.tsx
+      # Baseline screen regressions cover the touched Chat/Ink input seam.
+      node --import tsx/esm scripts/repro-askpanel.tsx
+      node --import tsx/esm scripts/verify-askpanel-layout.tsx
+      node --import tsx/esm scripts/repro-toolcards.tsx
       runHook postBuild
     '';
 
@@ -234,18 +270,29 @@ let
       for (const metadata of ['.pnpm', '.package-map.json', '.modules.yaml', '.pnpm-workspace-state-v1.json']) {
         rmSync(join(nodeModules, metadata), { recursive: true, force: true })
       }
-      // The separately built dsh-auth is deployed into this profile below.
-      // Leaving pnpm's read-only workspace copy would prevent activation from
-      // replacing it with the version pinned to the TUI's submodule commit.
-      rmSync(join(nodeModules, '@deepseek-harness-tui/dsh-auth'), { recursive: true, force: true })
       NODE
 
       mkdir -p $out/package
-      cp -r bin lib cordis.patch.yml cordis.yml dsh-ecosystem-spec package.json $out/package/
+      cp -r bin lib assets guide cordis.patch.yml cordis.yml dsh-ecosystem-spec package.json $out/package/
       # Keep the directory for legacy preset discovery, but do not ship or
       # register the upstream Liangshen preset (registration patched above).
       mkdir -p $out/package/presets
       cp -rL node_modules $out/node_modules
+      # Test the actual distribution: presets stay empty; OAuth and its types,
+      # the bundled guide, portrait assets and vendor runtime are all shipped.
+      node --input-type=module - "$out" <<'NODE'
+      import assert from 'node:assert/strict'
+      import { existsSync, readdirSync } from 'node:fs'
+      import { join } from 'node:path'
+      const out = process.argv[2]
+      assert.deepEqual(readdirSync(join(out, 'package/presets')), [])
+      assert.equal(existsSync(join(out, 'node_modules/@deepseek-harness-tui/dsh-auth')), false)
+      for (const path of [
+        'lib/types/oauth.js', 'lib/types/oauth.d.ts',
+        'guide/dsh-tui-guide/SKILL.md', 'guide/dsh-tui-guide/user-guide.en.md',
+        'assets/whale-girl/whale-girl.png',
+      ]) assert.ok(existsSync(join(out, 'package', path)), path)
+      NODE
     '';
 
     dontFixup = true;
@@ -256,13 +303,12 @@ let
     private = true;
     dependencies = {
       "@deepseek-harness-tui/dsh-tui" = "file:${dshTui}/package";
-      "@deepseek-harness-tui/dsh-auth" = "file:${dshAuth}";
     };
     dsh.profile = {
       bundles = [
         "@deepseek-ai/dsh-base"
         "@deepseek-harness-tui/dsh-tui"
-        # TUI mounts dsh-auth via its own /oauth row.
+        # TUI mounts embedded OAuth via its own /oauth row.
       ];
       patchReload = "live";
     };
@@ -332,7 +378,6 @@ let
   dshTuiManagedMarker = pkgs.writeText "dsh-tui-managed" ''
     home-manager
     @deepseek-harness-tui/dsh-tui
-    @deepseek-harness-tui/dsh-auth
   '';
 
   dshTuiLauncher = pkgs.writeShellScriptBin "dsh-tui" ''
@@ -344,6 +389,9 @@ let
   '';
 in
 {
+  # Web/headless/shared profiles deploy this package but mount only ./oauth.
+  _module.args.dshTui = dshTui;
+
   home.packages = [
     dshTuiLauncher
     dstLauncher
@@ -373,18 +421,24 @@ in
     if [ -e "$target" ] || [ -L "$target" ]; then
       run /run/current-system/sw/bin/remove-without-permission -rf "$target"
     fi
-    # Install the dsh-auth submodule package alongside dsh-tui. Only this
-    # package-owned path is replaced; user-added profile packages survive.
+    # Remove the former package-owned auth install, never its credentials
+    # ($DSH_HOME/dsh-auth remains the embedded module's credential location).
+    # All unrelated profile packages survive.
     tuiAuth="$tuiScope/dsh-auth"
     if [ -e "$tuiAuth" ] || [ -L "$tuiAuth" ]; then
-      run chmod -R u+rwX "$tuiAuth"
+      if [ ! -L "$tuiAuth" ]; then
+        run chmod -R u+rwX "$tuiAuth"
+      fi
       run /run/current-system/sw/bin/remove-without-permission -rf "$tuiAuth"
     fi
-    # Nix-store directories are read-only; nested @dsh-std dependencies must
-    # be writable while cp descends into them, not only at the final chmod.
-    run cp -rL --no-preserve=mode ${dshTui}/node_modules/. "$tuiModules/"
-    run cp -rL --no-preserve=mode ${dshTui}/package "$tuiScope/dsh-tui"
-    run cp -rL --no-preserve=mode ${dshAuth}/. "$tuiAuth"
+    # Keep production dependencies inside the owned package: never replace
+    # unrelated profile package versions. Old root copies may remain, but
+    # nested canonical dependencies win. Harness peers stay excluded and
+    # resolve upward through the host's shared fallback.
+    # Store directories must be writable while cp descends into @dsh-std.
+    run cp -rL --no-preserve=mode ${dshTui}/package "$target"
+    run mkdir -p "$target/node_modules"
+    run cp -rL --no-preserve=mode ${dshTui}/node_modules/. "$target/node_modules/"
     # The profile patch below references a local plugin. Keep it a real file
     # so Node resolves the profile-relative import rather than a Nix-store
     # symlink, and reconcile only this file owned by the TUI deployment.
@@ -415,16 +469,15 @@ in
     else
       # Keep user-added dependencies and bundle layers, but ensure the
       # declarative TUI bundle and the in-box base layer are present exactly
-      # once. Remove the previous TUI profile's separate dsh-auth bundle:
-      # upstream mounts it via the TUI's /oauth row instead.
+      # once. Remove the former auth dependency and bundle: OAuth is now
+      # compiled into the TUI package and mounted via its /oauth row.
       # The store path makes the package source explicit without asking
       # pnpm to mutate the profile during activation.
       run ${pkgs.jq}/bin/jq \
         --arg bundle '@deepseek-harness-tui/dsh-tui' \
         --arg source 'file:${dshTui}/package' \
         --arg authBundle '@deepseek-harness-tui/dsh-auth' \
-        --arg authSource 'file:${dshAuth}' \
-        '.dependencies = ((.dependencies // {}) + {($bundle): $source, ($authBundle): $authSource})
+        '.dependencies = ((.dependencies // {}) + {($bundle): $source} | del(.[$authBundle]))
         | .dsh = (.dsh // {})
         | .dsh.profile = (.dsh.profile // {})
         | .dsh.profile.bundles = (((.dsh.profile.bundles // [])

@@ -35,7 +35,7 @@
  import { logMouseDebug } from "../../utils/debug.js";
  import { logError } from "../../utils/log.js";
  import { EventEmitter } from "../events/emitter.js";
-@@ -237,6 +238,8 @@
+@@ -243,6 +244,8 @@
  	// Multi-click tracking for double/triple-click text selection. A click
  	// within MULTI_CLICK_TIMEOUT_MS and MULTI_CLICK_DISTANCE of the previous
  	// click increments clickCount; otherwise it resets to 1.
@@ -44,7 +44,7 @@
  	lastClickTime = 0;
  	lastClickCol = -1;
  	lastClickRow = -1;
-@@ -909,6 +912,17 @@
+@@ -927,6 +930,17 @@
  			setTerminalFocused(true);
  		}
  
@@ -62,7 +62,7 @@
  		// Handle Ctrl+Z (suspend) using parsed key to support both raw (\x1a) and
  		// CSI u format (\x1b[122;5u) from Kitty keyboard protocol terminals
  		if (item.name === "z" && item.ctrl && SUPPORTS_SUSPEND) {
-@@ -935,8 +949,7 @@
+@@ -953,8 +967,7 @@
  		) {
  			const step =
  				(item.name === "wheelup" || item.name === "wheelleft") ? -3 : 3;
@@ -74,7 +74,7 @@
  			const consumed = app.props.onWheelAt(
 --- a/src/screens/Chat.tsx
 +++ b/src/screens/Chat.tsx
-@@ -40,6 +40,7 @@
+@@ -50,6 +50,7 @@
  import { ApprovalPanel } from '../components/approvals/ApprovalPanel.js'
  import { ExtensionDialog } from '../components/ExtensionDialog.js'
  import type { DOMElement } from '../ink/dom.js'
@@ -82,7 +82,7 @@
  import { useSearchHighlight } from '../ink/hooks/use-search-highlight.js'
  import { useTerminalTitle } from '../ink/hooks/use-terminal-title.js'
  import { useTerminalFocus } from '../ink/hooks/use-terminal-focus.js'
-@@ -2887,7 +2888,7 @@
+@@ -3312,7 +3313,7 @@
          overlay.kind !== 'none' &&
          (overlay.kind !== 'workspace-picker' || workspaceTargets.length > 0)
        if (overlayModal) return

@@ -22,11 +22,10 @@
     - id: approval-tweaks
       name: 'dsh-baizhu-approval'
 
-    # dsh-TUI 的 dsh-auth 子模块：提供 OpenAI Codex/ChatGPT 订阅 OAuth、
-    # 自动浏览器登录、凭据刷新及 /auth 命令。包文件由 dsh.nix 的激活
-    # 步骤真实拷贝到本 profile，避免 Nix store 符号链接破坏 ESM 解析。
+    # dsh-TUI 0.12 的内置 OAuth：沿用 dshAuth 服务和原凭据路径。
+    # 只挂载 OAuth 入口，不加载 TUI bundle；包由 Nix 激活部署为真实文件。
     - id: dsh-auth
-      name: '@deepseek-harness-tui/dsh-auth'
+      name: '@deepseek-harness-tui/dsh-tui/oauth'
       inject: [llm, commands]
 
     # TUI's /provider is local to the terminal UI. Give Web a matching

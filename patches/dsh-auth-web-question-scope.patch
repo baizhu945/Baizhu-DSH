@@ -1,32 +1,32 @@
---- a/src/service.ts
-+++ b/src/service.ts
+--- a/src/dsh-adapter/oauth/service.ts
++++ b/src/dsh-adapter/oauth/service.ts
 @@ -11,6 +11,7 @@
  import { Service } from '@deepseek-ai/cordis'
  import type { Context } from '@deepseek-ai/cordis'
  import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 +import type { AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
- import { asStoredCredential, CredentialFile, type StoredOAuthCredential } from './credentials.js'
+ import { asStoredCredential, CredentialFile } from './credentials.js'
  import { oauthOf } from './profiles.js'
  import { QuestionBridge, type AskFn } from './interaction.js'
-@@ -62,7 +63,7 @@
+@@ -70,7 +71,7 @@
     * @throws Error when no interactive surface is present, the provider is
     *   unknown, a login is already running, or the flow itself fails.
     */
 -  login(provider?: string, signal?: AbortSignal): Promise<DshAuthLoginResult>
 +  login(provider?: string, signal?: AbortSignal, agent?: AskUserQuestionRequest['agent']): Promise<DshAuthLoginResult>
-   /** Remove one provider's stored credential; resolves whether one existed. */
+   /** Cancel an active sign-in and remove the stored credential; resolves whether one existed. */
    logout(provider: string): Promise<boolean>
  }
-@@ -81,7 +82,7 @@
+@@ -90,7 +91,7 @@
    profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>
    store: CredentialFile
    /** The interactive ask surface, resolved per call so mounting order never matters. */
 -  resolveAsk: () => AskFn | undefined
 +  resolveAsk: (agent?: AskUserQuestionRequest['agent']) => AskFn | undefined
-   logger: { warn(message: string): void }
- }
- 
-@@ -156,8 +157,8 @@
+   /** Optional upstream account service; older hosts have only pi-ai routes. */
+   resolveDeepSeekAccount?: () => DeepSeekAccountAuth | undefined
+   /** The active Host callback listener's browser-accessible loopback origin. */
+@@ -195,8 +196,8 @@
  
    return {
      providers: statusOf,
@@ -37,10 +37,9 @@
        let target = provider
        if (target === undefined) {
          if (ask === undefined) {
-
---- a/src/index.ts
-+++ b/src/index.ts
-@@ -41,6 +41,7 @@
+--- a/src/dsh-adapter/oauth/index.ts
++++ b/src/dsh-adapter/oauth/index.ts
+@@ -47,6 +47,7 @@
  import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
  import type { LlmAdapter, LlmModelInfo } from '@deepseek-ai/dsh-llm'
  import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
@@ -48,10 +47,10 @@
  import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
  import type { PiAiAdapterOptions } from '@deepseek-ai/dsh-llm-pi-ai'
  import { CredentialFile, defaultCredentialsFile } from './credentials.js'
-@@ -214,9 +215,11 @@
-   const api = createDshAuthApi({
-     profiles,
-     store,
+@@ -226,9 +227,11 @@
+     resolveDeepSeekAccount: () => deepSeekAccountFrom(ctx),
+     coupons: service.coupons,
+     resolveCallbackOrigin: callbackOrigin.resolve,
 -    resolveAsk: () => {
 +    resolveAsk: (agent?: AskUserQuestionRequest['agent']) => {
        const questions = ctx.get('userQuestions')
@@ -60,12 +59,11 @@
 +        ...request, ...(agent === undefined ? {} : { agent }),
 +      })
      },
-     logger: ctx.logger,
    })
-
---- a/src/command.ts
-+++ b/src/command.ts
-@@ -44,7 +44,7 @@
+   service.api = api
+--- a/src/dsh-adapter/oauth/command.ts
++++ b/src/dsh-adapter/oauth/command.ts
+@@ -46,7 +46,7 @@
      }
      if (verb === 'login') {
        try {
@@ -73,4 +71,80 @@
 +        const result = await api.login(target, invocation.signal, invocation.agent)
          return {
            kind: 'success',
-           text: `Signed in to ${result.oauthLabel} (${result.provider}); token expires `
+           text: `Signed in to ${result.oauthLabel} (${result.provider})`
+--- a/scripts/verify-oauth.mjs
++++ b/scripts/verify-oauth.mjs
+@@ -614,6 +614,7 @@
+   console.log('service api')
+   const apiStore = new CredentialFile(join(root, 'api', 'credentials.json'))
+   let loginDeviceId
++  let loginPromptAnswer
+   const fakeProvider = {
+     id: 'fake',
+     name: 'Fake Provider',
+@@ -621,7 +622,8 @@
+       oauth: {
+         name: 'Fake (subscription)',
+         loginLabel: 'Sign in with Fake',
+-        async login(_interaction, options) {
++        async login(interaction, options) {
++          loginPromptAnswer = await interaction.prompt({ type: 'manual_code', message: 'Fixture sign-in code' })
+           loginDeviceId = options?.getDeviceId?.()
+           return {
+             type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 3_600_000,
+@@ -638,10 +640,11 @@
+     },
+   }
+   const fakeProfile = { provider: 'fake', displayName: 'Fake Provider', streamIdleTimeoutMs: 300_000, retryPolicy: { mode: 'normal', maxRetries: 2, retryDelayMs: () => 1 }, configuredMaxTokens: new Map(), piProvider: fakeProvider, maxRequestImageBytes: 1, requestImagePixelBudget: 1, requestImageMaxBytes: 1 }
++  let resolvedAgent
+   const api = createDshAuthApi({
+     profiles: new Map([['fake', fakeProfile]]),
+     store: apiStore,
+-    resolveAsk: () => fakeAsk,
++    resolveAsk: agent => { resolvedAgent = agent; return fakeAsk },
+   })
+   ok((await api.providers())[0].signedIn === false, 'status reports unsigned providers')
+   const login = await api.login('fake')
+@@ -649,6 +652,12 @@
+   ok(loginDeviceId === apiStore.getOrCreateDeviceId()
+     && (await apiStore.read('fake'))?.clientId === 'oaiapp_issued',
+   'service passes pi-ai 0.87.1 login options and preserves flow-specific credential fields')
++  ok(resolvedAgent === undefined, 'two-argument login keeps the unscoped ask surface')
++  const webAgent = { sessionId: 'web-oauth-fixture' }
++  await api.login('fake', undefined, webAgent)
++  ok(resolvedAgent === webAgent && loginPromptAnswer === 'typed-answer'
++    && asked.at(-1)?.questions[0]?.question === 'Fixture sign-in code',
++  'optional third login Agent reaches the ask resolver while a fake OAuth flow actually asks a question')
+   ok((await api.providers())[0].signedIn === true, 'status reports the signed-in provider')
+   ok(await api.logout('fake'), 'logout removes the credential')
+   ok(readFileSync(join(root, 'api', 'device-id'), 'utf8').trim() === loginDeviceId,
+@@ -945,6 +954,29 @@
+     ok(accountCommand.kind === 'success' && accountCommand.text.includes('DeepSeek')
+       && !accountCommand.text.includes('token expires') && !accountCommand.text.includes('1970'),
+     '/auth login deepseek-account uses the Host flow and omits token-expiry copy')
++    await service.api.logout(DEEPSEEK_ACCOUNT_PROVIDER)
++    const scopedQuestions = []
++    ctx.get('userQuestions').ask = async request => {
++      scopedQuestions.push(request)
++      const question = request.questions[0]
++      return { answers: [{ id: question.id, selected: [question.options[0].label] }] }
++    }
++    const scopedSignal = new AbortController().signal
++    const scopedApiLogin = await service.api.login(undefined, scopedSignal, webAgent)
++    ok(scopedApiLogin.provider === DEEPSEEK_ACCOUNT_PROVIDER && scopedQuestions.length > 0
++      && scopedQuestions.every(request => request.agent === webAgent)
++      && scopedQuestions[0].signal === scopedSignal,
++    'mounted Web api.login(provider, signal, agent) scopes actual questions to the third Agent argument')
++    await service.api.logout(DEEPSEEK_ACCOUNT_PROVIDER)
++    scopedQuestions.length = 0
++    const commandAgent = { sessionId: 'web-command-fixture' }
++    const scopedCommand = await registeredCommands[0].handler({
++      rawInput: 'login', signal: scopedSignal, agent: commandAgent,
++    })
++    ok(scopedCommand.kind === 'success' && scopedQuestions.length > 0
++      && scopedQuestions.every(request => request.agent === commandAgent)
++      && scopedQuestions[0].signal === scopedSignal,
++    'Web /auth login scopes actual questions to invocation.agent rather than the last API caller')
+     ok(ctx.get('webServer') === sharedWebServer,
+       'DeepSeek sign-in reuses an existing Web callback listener')
+     await fiber.dispose()

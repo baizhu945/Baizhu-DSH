@@ -21,6 +21,11 @@ const { structuredPatch } = requireFromDsh('diff')
 
 const MODEL_CATALOG_PATH = nodePath.join(dshHome, '.agent-presets/codex/codex-models.json')
 const FALLBACK_PROMPT_PATH = nodePath.join(dshHome, '.agent-presets/codex/codex-default-prompt.md')
+const DEFAULT_MODE_PATH = nodePath.join(dshHome, '.agent-presets/codex/codex-default-mode.md')
+// Upstream keeps the default-mode collaboration text in the client rather than
+// the catalog. Ship it as a preset-owned copy instead of re-deriving it from the
+// Plan template, so Default mode reads exactly like Codex Default mode.
+const DEFAULT_MODE_TEMPLATE = await readText(DEFAULT_MODE_PATH, '')
 const RUN_CODE = 'run_code'
 // DSH reserves run_code as its transport name. Keep that host-only name
 // behind the Codex-scoped exec facade so the model sees the upstream name.
@@ -32,6 +37,25 @@ const REQUEST_PERMISSIONS_TOOL = 'request_permissions'
 const SKILL = 'skill'
 const WEB_RUN = 'web__run'
 const WEB_SEARCH = 'web_search'
+const SEND_USER_MESSAGE_ASYNC = 'send_user_message_async'
+const REQUEST_USER_INPUT_ASYNC = 'request_user_input_async'
+// Upstream declares these inside a `clock` namespace object, so the wire name
+// is a namespace plus a function. This transport can only declare plain
+// function tools, and the Responses API rejects any name outside
+// `^[a-zA-Z0-9_-]+$`, so a dot is not an option. `clock__*` is exactly the
+// identifier Codex itself generates for these tools inside `exec`
+// (`code_mode_name_for_tool_name`), so the model meets the same name either way.
+const CLOCK_TIME = 'clock__curr_time'
+const CLOCK_SLEEP = 'clock__sleep'
+// Any tool name the Codex preset declares must satisfy the provider's pattern;
+// a single rejected name fails the whole request rather than one tool.
+const WIRE_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/
+// DSH's subagent runtime bounds live children well below this; the hint exists
+// so the model plans a fan-out it can actually finish.
+const SUBAGENT_CONCURRENCY = 4
+// Persistent mode is upstream's opt-in reasoning effort. DSH has no equivalent
+// effort id, so track it per session behind the same on/off shape.
+const persistentModes = new WeakMap()
 // Match the selected official catalog row.  The preset still mounts the local
 // skill provider so rows that opt in (for example GPT-5.4) work normally, but
 // Luna/terra/sol do not receive an unadvertised local-Skills surface.
@@ -52,21 +76,32 @@ const V2_NAMES = new Set([
   'collaboration__interrupt_agent',
   'collaboration__list_agents',
 ])
+// dsh-native tool names that have no OpenAI Codex CLI equivalent. The Codex
+// preset reaches the same capabilities through `exec_command`, `apply_patch`
+// and the `collaboration__*` / `multi_agent_v1__*` shapes, so these must stay
+// out of both the direct surface and the nested Code Mode SDK.
 const DSH_NATIVE_TOOLS = new Set([
   'ask_user_question',
   'bash',
   'create_goal',
   'edit',
+  'exit_plan_mode',
   'get_goal',
   'glob',
   'grep',
+  'interrupt_agent',
   'job_kill',
   'job_list',
   'job_output',
+  'list_agents',
+  'list_subagent_models',
   'pwsh',
   'read',
   'read_image',
+  'send_message',
   'str_replace_editor',
+  'subagent',
+  'subagent_fork',
   'terminal_close',
   'terminal_list',
   'terminal_open',
@@ -76,6 +111,7 @@ const DSH_NATIVE_TOOLS = new Set([
   'todo_write',
   'update_goal',
   'web_fetch',
+  'workflow',
   'write',
 ])
 
@@ -247,6 +283,16 @@ function readableValue(value, title) {
 const DEFAULT_PROFILE = Object.freeze({
   toolMode: 'native',
   multiAgentVersion: 'none',
+  // Model-owned instruction blocks. A catalog row that omits them keeps the
+  // generic Codex prompt, exactly like `ModelInfo::default()` upstream.
+  persistentInstructions: '',
+  collaborationModeDefault: undefined,
+  collaborationModePlan: undefined,
+  multiAgentRoleRoot: undefined,
+  multiAgentRoleSubagent: undefined,
+  approvalMessages: null,
+  permissionMessages: null,
+  experimentalTools: Object.freeze([]),
   // Match Codex's model_info_from_slug fallback: an unknown model does not
   // positively advertise the model-specific patch surface.
   applyPatchToolType: 'none',
@@ -284,6 +330,12 @@ function officialRows(value) {
 function modelTokenBudget(row) {
   const value = row?.model_messages?.token_budget
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  // `ModelTokenBudgetConfig::enabled` is `#[serde(default)]`, so an absent key
+  // means disabled, and upstream `Session::token_budget` returns before touching
+  // any message field when the flag is false. Every catalog row currently ships
+  // with token budgeting off, which is why Codex never shows the model
+  // `get_context_remaining`, `new_context` or `<context_window_guidance>`.
+  if (value.enabled !== true) return undefined
   if (!Number.isInteger(value.reminder_threshold_tokens) || value.reminder_threshold_tokens < 0) return undefined
   if (!Number.isInteger(value.auto_compact_fallback_buffer_tokens) || value.auto_compact_fallback_buffer_tokens < 0) return undefined
   if (typeof value.reminder_message_template !== 'string'
@@ -400,6 +452,56 @@ function modelInstructionsForRow(row) {
   return template.replaceAll('{{ personality }}', personality)
 }
 
+/**
+ * Read one optional catalog text block.
+ *
+ * Upstream resolves these through the same chain everywhere: the catalog row
+ * wins, and only a missing/blank entry falls back to a bundled default. Keep
+ * that rule so a future upstream text change arrives with the catalog bump
+ * instead of being silently masked by a local copy.
+ */
+function catalogText(row, key, fallback) {
+  const value = row?.model_messages?.[key]
+  if (typeof value !== 'string') return fallback
+  const trimmed = value.trim()
+  return trimmed === '' ? fallback : value
+}
+
+/** `model_messages.collaboration_modes` is keyed per mode, not a single text. */
+function catalogModeText(row, mode) {
+  const value = row?.model_messages?.collaboration_modes?.[mode]
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined
+}
+
+/** `model_messages.multi_agent.role` carries the root and subagent persona text. */
+function catalogMultiAgentRole(row, role) {
+  const value = row?.model_messages?.multi_agent?.role?.[role]
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined
+}
+
+/**
+ * Surface an unknown model id instead of silently serving the bundled
+ * fallback prompt.
+ *
+ * A slug the pinned catalog does not know means the model runs on the legacy
+ * generic Codex instructions with none of its per-model rows, so its tool mode,
+ * collaboration generation and model-facing text blocks are all wrong. That is
+ * a catalog-pin problem, not something the model can work around.
+ */
+const unknownModelWarnings = new Set()
+
+function warnUnknownModel(model) {
+  const id = String(model || '').trim()
+  if (id === '' || unknownModelWarnings.has(id)) return
+  unknownModelWarnings.add(id)
+  process.emitWarning(
+    `codex-model-parity: model "${id}" is not in the pinned official catalog; `
+    + 'it is falling back to the generic Codex instructions and a default tool surface. '
+    + 'Re-pin dsh-codex.nix if this model exists upstream.',
+    'codex-model-parity:unknown-model',
+  )
+}
+
 function normalizeShellType(value) {
   if (value === 'shell_command' || value === 'default' || value === 'local' || value === 'unified_exec') {
     return 'unified_exec'
@@ -426,7 +528,10 @@ function normalizeToolMode(value) {
 function profileForModel(model) {
   const id = modelTail(model)
   const row = modelRowFor(model)
-  if (row === undefined) return { ...DEFAULT_PROFILE, model: id, instructions: FALLBACK_INSTRUCTIONS }
+  if (row === undefined) {
+    warnUnknownModel(model)
+    return { ...DEFAULT_PROFILE, model: id, instructions: FALLBACK_INSTRUCTIONS }
+  }
   const toolMode = normalizeToolMode(row.tool_mode)
   const multiAgentVersion = row.multi_agent_version === 'v1' || row.multi_agent_version === 'v2'
     ? row.multi_agent_version
@@ -435,6 +540,16 @@ function profileForModel(model) {
     ...DEFAULT_PROFILE,
     model: id,
     instructions: modelInstructionsForRow(row),
+    persistentInstructions: catalogText(row, 'persistent_instructions', ''),
+    collaborationModeDefault: catalogModeText(row, 'default', ''),
+    collaborationModePlan: catalogModeText(row, 'plan', ''),
+    multiAgentRoleRoot: catalogMultiAgentRole(row, 'root'),
+    multiAgentRoleSubagent: catalogMultiAgentRole(row, 'subagent'),
+    approvalMessages: row.model_messages?.approvals ?? null,
+    permissionMessages: row.model_messages?.permissions ?? null,
+    experimentalTools: Array.isArray(row.experimental_supported_tools)
+      ? row.experimental_supported_tools.filter(name => typeof name === 'string')
+      : [],
     toolMode,
     multiAgentVersion,
     applyPatchToolType: typeof row.apply_patch_tool_type === 'string' ? row.apply_patch_tool_type : 'freeform',
@@ -589,15 +704,29 @@ function isCodeModeOnlyDirectTool(name, profile) {
     || name === WAIT_TOOL
     || name === NEW_CONTEXT_TOOL
     || name === REQUEST_PERMISSIONS_TOOL
+    || name === REQUEST_USER_INPUT_ASYNC
+    || name === CLOCK_TIME
+    || name === CLOCK_SLEEP
     || name === 'update_plan'
     || name === 'request_user_input'
     || (profile?.multiAgentVersion === 'v1' && V1_NAMES.has(name))
     || (profile?.multiAgentVersion === 'v2' && V2_NAMES.has(name))
 }
 
+/** Official catalog keys that unlock the async user-input tool. */
+function asyncUserInputAdvertised(profile) {
+  return profile.experimentalTools.includes(REQUEST_USER_INPUT_ASYNC)
+    || profile.experimentalTools.includes(SEND_USER_MESSAGE_ASYNC)
+}
+
 function modelToolAllowed(ctx, profile, name, agent, nested, toolArguments) {
   if (DSH_NATIVE_TOOLS.has(name)) return false
   if (!nested && name === RUN_CODE) return false
+  // Upstream registers these from `experimental_supported_tools` and marks them
+  // DirectModelOnly, so they stay out of the nested Code Mode SDK.
+  if (name === REQUEST_USER_INPUT_ASYNC) return asyncUserInputAdvertised(profile) && !nested
+  if (name === CLOCK_TIME) return profile.experimentalTools.includes('clock')
+  if (name === CLOCK_SLEEP) return profile.experimentalTools.includes('clock') && !nested
   if (!nested && profile.toolMode === 'code_mode_only' && !isCodeModeOnlyDirectTool(name, profile)) return false
   if (!nested && profile.toolMode === 'native' && (name === CODE_MODE_TOOL || name === WAIT_TOOL)) return false
   if (nested && (name === RUN_CODE || name === CODE_MODE_TOOL || name === WAIT_TOOL)) return false
@@ -777,11 +906,10 @@ function quotedToolList(names) {
   return quoted.slice(0, -1).join(', ') + ', and ' + quoted.at(-1)
 }
 
-function modelInstructions(profile) {
-  if (profile.toolMode !== 'code_mode_only') return profile.instructions
+function codeModeBoundary(profile) {
+  if (profile.toolMode !== 'code_mode_only') return undefined
   const directBoundary = quotedToolList(codeModeOnlyDirectToolNames(profile))
-  const base = typeof profile.instructions === 'string' ? profile.instructions.trim() : ''
-  const boundary = [
+  return [
     '<codex_code_mode_boundary>',
     `The selected Codex model uses Code Mode. ${directBoundary} are the only tools you can call directly.`,
     'Do not emit a top-level tool call naming any other tool, even if that name appears in general Codex instructions.',
@@ -791,7 +919,114 @@ function modelInstructions(profile) {
       : 'The `skill` tool is not available for this model; do not call it directly or through the `tools` SDK.',
     '</codex_code_mode_boundary>',
   ].join('\n')
-  return [base, boundary].filter(text => text !== '').join('\n\n')
+}
+
+/**
+ * Upstream `CollaborationModeInstructions` wraps the active mode in
+ * `<collaboration_mode>` markers and re-sends it whenever the mode changes.
+ * Codex ships `default.md` and `plan.md`; a catalog row may override either.
+ * The Plan template already reaches the model through dsh's `plan:policy`
+ * section, so this only supplies Default mode; the assemble hook wraps the
+ * Plan section in the same markers.
+ */
+function collaborationModeBlock(ctx, agent, profile) {
+  if (planModeActive(ctx, agent)) return undefined
+  const text = profile.collaborationModeDefault ?? DEFAULT_MODE_TEMPLATE
+  if (typeof text !== 'string' || text.trim() === '') return undefined
+  return ['<collaboration_mode>', text.trim(), '</collaboration_mode>'].join('\n')
+}
+
+/**
+ * Upstream enables persistent mode only for `ReasoningEffort::Persistent`, so
+ * the catalog text stays dormant by default. DSH has no matching effort id,
+ * so the preset exposes it as an explicit opt-in that mirrors the official
+ * "Persistent" entry in the reasoning-effort picker.
+ */
+function persistentModeBlock(profile, persistent) {
+  const template = profile.persistentInstructions
+  if (!persistent || typeof template !== 'string' || template.trim() === '') return undefined
+  const channel = profile.experimentalTools.includes(SEND_USER_MESSAGE_ASYNC)
+    ? ' via functions.send_user_message_async'
+    : ''
+  return [
+    '<persistent_mode>',
+    template.trim().replaceAll('{{ approval_request_channel }}', channel),
+    '</persistent_mode>',
+  ].join('\n')
+}
+
+function persistentModeEnabled(session) {
+  return session !== undefined && persistentModes.get(session) === true
+}
+
+function multiAgentRoleBlock(profile) {
+  const text = profile.multiAgentRoleRoot
+  if (text === undefined) return undefined
+  return ['<multi_agent_role>', text, '</multi_agent_role>'].join('\n')
+}
+
+/**
+ * The bundled `multi_agent.usage_hint` upstream appends whenever a
+ * collaboration surface is available. Two facts matter to the model and are
+ * otherwise invisible: the concurrency ceiling, and that agents share one
+ * filesystem rather than getting isolated checkouts.
+ */
+function multiAgentUsageHintBlock(profile) {
+  if (profile.multiAgentVersion === 'none') return undefined
+  const namespace = profile.multiAgentVersion === 'v2' ? 'collaboration' : 'multi_agent_v1'
+  return [
+    '<multi_agent_usage_hint>',
+    `Note that collaboration tools cannot be called from inside \`exec\`. Call ${quotedToolList(profile.multiAgentVersion === 'v2' ? [...V2_NAMES] : [...V1_NAMES])} only as direct tool calls, since they are intentionally absent from the \`exec\` \`tools\` namespace.`,
+    'All agents share the same directory. In detail:',
+    '- All agents have access to the same container and filesystem as you.',
+    '- All agents use the same current working directory.',
+    '- As a result, edits made by one agent are immediately visible to all other agents.',
+    `Give each delegated coding task a disjoint write set so parallel agents do not overwrite each other.`,
+    `There are ${SUBAGENT_CONCURRENCY} available concurrency slots, meaning that up to ${SUBAGENT_CONCURRENCY} agents can be active at once, including you.`,
+    `Spawned agents inherit your current model by default; prefer leaving \`model\` unset. This preset exposes the \`${namespace}\` namespace only.`,
+    '</multi_agent_usage_hint>',
+  ].join('\n')
+}
+
+/**
+ * Upstream sends `<model_switch>` at the head of the developer bundle when the
+ * selected model changes. DSH rebuilds the system prompt per request instead,
+ * so the equivalent is a one-shot marker that re-anchors the model on the
+ * freshly assembled instructions without duplicating them.
+ */
+function modelSwitchBlock(session, model) {
+  const id = String(model || '').trim()
+  if (id === '' || session === undefined) return undefined
+  if (lastPromptedModel.get(session) === id) return undefined
+  lastPromptedModel.set(session, id)
+  return [
+    '<model_switch>',
+    `The user was previously using a different model. The model is now \`${id}\`, and the instructions that follow describe this model. Continue the conversation according to them.`,
+    '</model_switch>',
+  ].join('\n')
+}
+
+const lastPromptedModel = new WeakMap()
+
+/** Add the upstream `<collaboration_mode>` envelope around a mode template. */
+function wrapCollaborationMode(text) {
+  if (typeof text !== 'string' || text.trim() === '') return text
+  if (text.startsWith('<collaboration_mode>')) return text
+  return ['<collaboration_mode>', text.trim(), '</collaboration_mode>'].join('\n')
+}
+
+function modelInstructions(profile, ctx, agent) {
+  const base = typeof profile.instructions === 'string' ? profile.instructions.trim() : ''
+  const session = agent?.session
+  return [
+    modelSwitchBlock(session, profile.model),
+    base,
+    codeModeBoundary(profile),
+    collaborationModeBlock(ctx, agent, profile),
+    persistentModeBlock(profile, session === undefined ? false : persistentModeEnabled(session)),
+    multiAgentRoleBlock(profile),
+    multiAgentUsageHintBlock(profile),
+  ].filter(block => block !== undefined && block !== '').join('\n\n')
 }
 
 function rewriteCodeModeName(text, profileOrCodeModeOnly = false) {
@@ -2449,6 +2684,216 @@ async function waitForSerialTurn(previous, signal) {
   }
 }
 
+/**
+ * The `clock` namespace upstream builds for a catalog row that advertises the
+ * `"clock"` experimental tool. `curr_time` reads the clock; `sleep` waits and
+ * ends early when new input arrives for the active turn.
+ */
+function registerClockTools(ctx) {
+  const CLOCK_DESCRIPTION = 'Tools for reading and waiting on time.'
+  const MAX_SLEEP_DURATION_MS = 12 * 60 * 60 * 1000
+
+  ctx.tools.register(defineTool({
+    name: CLOCK_TIME,
+    description: CLOCK_DESCRIPTION + ' curr_time',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          current_time: { type: 'string', required: true, description: 'Current UTC time formatted as YYYY-MM-DD HH:MM:SS UTC.' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: 'It is ' + value.current_time + '.' }],
+    },
+    async execute(_args, execution) {
+      return { current_time: formatUtc(new Date()) }
+    },
+    presentCall() {
+      return { card: 'generic', title: 'Current time', kind: 'other' }
+    },
+    presentResult(_args, result) {
+      return result.isError
+        ? genericToolError('Time lookup failed', result)
+        : { card: 'generic', title: 'Current time', content: result.content }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: CLOCK_SLEEP,
+    description: 'Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time.',
+    parameters: {
+      duration_ms: {
+        type: 'number',
+        required: true,
+        description: `How long to sleep in milliseconds. Must be between 1 and ${MAX_SLEEP_DURATION_MS}.`,
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          elapsed_ms: { type: 'number', required: true, description: 'Wall-clock milliseconds actually waited.' },
+          interrupted: { type: 'boolean', required: true, description: 'True when new user input ended the sleep early.' },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.interrupted
+          ? `Slept ${value.elapsed_ms} ms before new input arrived.`
+          : `Slept ${value.elapsed_ms} ms.`,
+      }],
+    },
+    async execute(args, execution) {
+      const requested = args.duration_ms
+      if (!Number.isFinite(requested) || requested < 1 || requested > MAX_SLEEP_DURATION_MS) {
+        throw new Error(`duration_ms must be between 1 and ${MAX_SLEEP_DURATION_MS}`)
+      }
+      const startedAt = Date.now()
+      const interrupted = await sleepUntilInput(ctx, execution, Math.floor(requested))
+      return { elapsed_ms: Date.now() - startedAt, interrupted }
+    },
+    presentCall(args) {
+      return { card: 'generic', title: `Wait ${formatDuration(args.duration_ms)}`, kind: 'other' }
+    },
+    presentResult(_args, result) {
+      return result.isError
+        ? genericToolError('Wait failed', result)
+        : { card: 'generic', title: 'Waited', content: result.content }
+    },
+  }))
+}
+
+function formatUtc(date) {
+  const iso = date.toISOString()
+  return iso.slice(0, 10) + ' ' + iso.slice(11, 19) + ' UTC'
+}
+
+function formatDuration(ms) {
+  const seconds = Math.round(ms / 1000)
+  return seconds >= 60 ? `${Math.round(seconds / 60)} minutes` : `${seconds} seconds`
+}
+
+/**
+ * Wait for `durationMs`, returning early when the user steers new input into
+ * the turn. dsh publishes a pending user question the same way Codex does, so
+ * the caller can keep working instead of stalling the turn.
+ */
+function sleepUntilInput(ctx, execution, durationMs) {
+  const signal = execution.signal
+  return new Promise(resolve => {
+    let timer
+    let dispose
+    const finish = interrupted => {
+      clearTimeout(timer)
+      if (dispose !== undefined) dispose()
+      resolve(interrupted)
+    }
+    timer = setTimeout(() => finish(false), durationMs)
+    const session = execution.agent?.session
+    if (ctx !== undefined && ctx.on !== undefined && session !== undefined) {
+      dispose = ctx.on('session/event', (subject, event) => {
+        if (subject !== session || event.type !== 'user/message') return
+        finish(true)
+      })
+    }
+    if (signal !== undefined) {
+      if (signal.aborted) { finish(true); return }
+      signal.addEventListener('abort', () => finish(true), { once: true })
+    }
+  })
+}
+
+/**
+ * `request_user_input_async` is registered by upstream for a catalog row that
+ * advertises either the current or the legacy experimental key. It returns
+ * immediately and the reply arrives later as a new user message, which is
+ * exactly how dsh's user-question projection already delivers answers.
+ */
+function registerAsyncUserInput(ctx) {
+  ctx.tools.register(defineTool({
+    name: REQUEST_USER_INPUT_ASYNC,
+    description: 'Ask the user one or more questions during ongoing work. Use this tool only to request missing information, preferences, constraints, clarification, or approval. The tool returns immediately without ending the turn or waiting for a reply; any reply arrives asynchronously as a new user message. Keep questions concise, self-contained, and easy to understand, using a level of detail appropriate to the user and task. The UI always allows a free-text answer, including when suggested options are provided. A preselected option is not submitted automatically.',
+    parameters: {
+      questions: {
+        type: 'array',
+        required: true,
+        description: 'One or more self-contained questions to present together, in display order.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            options: {
+              type: 'array',
+              description: 'Suggested answers, in display order. Put the recommended answer first; the first option is preselected by default. The user can select one option or enter a free-text answer. Do not include an Other option or a free-text placeholder; the UI provides free-text input automatically. Omit options for a free-text-only question.',
+              items: { type: 'string' },
+            },
+            title: { type: 'string', required: true, description: 'The complete question shown to the user, including any context needed to answer it.' },
+          },
+        },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { accepted: { type: 'boolean', required: true } },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.accepted ? 'Question sent to the user. Continue working; the reply arrives as a new message.' : 'The question could not be delivered.',
+      }],
+    },
+    async execute(args, exec) {
+      const agent = exec.agent
+      if (agent === undefined) throw new Error('request_user_input_async requires a live agent')
+      if (agent.session?.header?.parentSession !== undefined) {
+        throw new Error('request_user_input_async can only be used by the root thread')
+      }
+      if (!Array.isArray(args.questions) || args.questions.length === 0) {
+        throw new Error('request_user_input_async requires at least one question')
+      }
+      const questions = args.questions.map((question, index) => ({
+        id: 'async_' + String(index + 1),
+        question: question.title,
+        ...Array.isArray(question.options) && question.options.length > 0
+          ? { options: question.options.map(label => ({ label })) }
+          : {},
+      }))
+      let ask
+      try {
+        ask = ctx.get('userQuestions')
+      } catch {
+        throw new Error('this session has no user-question service, so a non-blocking question cannot be delivered')
+      }
+      // Deliver without awaiting: the answer arrives as a later user message,
+      // so the model keeps working instead of parking the turn.
+      void ask.ask({ questions, agent }).catch(() => undefined)
+      return { accepted: true }
+    },
+    presentCall(args) {
+      return genericToolCall('Asked the user', args.questions?.[0]?.title, 'other')
+    },
+    presentResult(_args, result) {
+      return result.isError ? genericToolError('Question failed', result) : genericToolResult('Question sent', result)
+    },
+  }))
+}
+
+function genericToolCall(title, summary, kind = 'other') {
+  return { card: 'generic', title, kind, ...(summary === undefined ? {} : { content: [{ type: 'text', text: summary }] }) }
+}
+
+function genericToolResult(title, result) {
+  return { card: 'generic', title, content: result.content }
+}
+
+function genericToolError(title, result) {
+  return genericToolResult(title, result)
+}
+
 function registerModelParity(ctx) {
   ctx.tools.guard(execution => {
     const agent = execution.agent
@@ -2521,7 +2966,18 @@ function registerModelParity(ctx) {
       .filter(section => profile.toolMode !== 'native' || section.name !== 'tools:sdk')
       .map(section => {
         if (section.name === 'deployment:persona-prefix' || section.name === 'deployment:persona') {
-          return { ...section, text: modelInstructions(profile) }
+          // The catalog's instructions_template is literal text upstream: Codex
+          // only substitutes `{{ personality }}` itself and never runs a
+          // renderer over it. The GPT-6 templates contain braces that are not
+          // prompt variables at all (for example the Apps connector syntax
+          // `[$app-name](app://{{connector_id}})`), so the assembled text must
+          // not be interpolated by the host.
+          return { ...section, text: modelInstructions(profile, ctx, agent), interpolate: false }
+        }
+        if (section.name === 'plan:policy') {
+          // Upstream wraps the active collaboration mode in these markers so a
+          // model that saw Plan mode can recognize when Default resumes.
+          return { ...section, text: wrapCollaborationMode(section.text) }
         }
         if (isPtcOnly(section.name)) {
           return { ...section, text: rewriteCodeModeName(section.text, profile) }
@@ -2539,33 +2995,95 @@ function registerModelParity(ctx) {
     if (tokenBudgetText !== '') contexts.push({ name: 'codex:token-budget', text: tokenBudgetText })
     return { ...assembled, sections, contexts, tools }
   })
+
+  // Codex reaches persistent mode through a reasoning effort named
+  // "Persistent". DSH's effort ids come from the provider adapter, so expose the
+  // same opt-in as an explicit session toggle scoped to this preset.
+  ctx.inject(['commands'], commandCtx => {
+    commandCtx.commands.register({
+      name: 'codex-persistent',
+      description: 'Turn Codex persistent mode on or off for this session (upstream reasoning effort "Persistent")',
+      input: { hint: '<on|off>' },
+      handler: ({ agent, rawInput }) => {
+        const requested = rawInput.trim().toLowerCase()
+        if (requested === '') {
+          const on = persistentModeEnabled(agent.session)
+          return { kind: 'success', text: `Codex persistent mode is ${on ? 'on' : 'off'} (use \`/codex-persistent on\` or \`off\`)` }
+        }
+        if (requested !== 'on' && requested !== 'off') {
+          return { kind: 'error', text: 'Persistent mode takes `on` or `off`.' }
+        }
+        const profile = profileForModel(currentModel(agent))
+        if (requested === 'on' && profile.persistentInstructions === '') {
+          return { kind: 'error', text: `Model ${profile.model} does not advertise persistent mode in the official catalog.` }
+        }
+        persistentModes.set(agent.session, requested === 'on')
+        ctx.emit('system-prompt/change')
+        return {
+          kind: 'success',
+          text: requested === 'on'
+            ? 'Codex persistent mode on: the model now keeps working until the goal is handled.'
+            : 'Codex persistent mode off.',
+        }
+      },
+    })
+  })
 }
 
 export const name = 'codex-model-parity'
+// `userQuestions` stays a soft dependency: a profile that does not mount the
+// question service still loads this preset, and the tool reports the missing
+// capability only if the model actually calls it.
 export const inject = ['tools', 'systemPrompt', 'subagents', 'agents']
 
 export function apply(ctx) {
   registerContextBudgetTools(ctx)
   registerCodeModeAlias(ctx)
+  registerClockTools(ctx)
+  registerAsyncUserInput(ctx)
   registerV2Agents(ctx)
   registerModelParity(ctx)
+  assertWireSafeToolNames(ctx)
+}
+
+/**
+ * Fail loudly if the Codex preset ever declares a name the provider rejects.
+ *
+ * The Responses API pattern-matches every entry in `tools`, so one bad name
+ * fails the entire request and the session cannot run at all. A dotted
+ * `clock.curr_time` did exactly that during development; checking at load
+ * turns that class of mistake into a preset error instead of a dead session.
+ */
+function assertWireSafeToolNames(ctx) {
+  const unsafe = ctx.tools.schemas()
+    .map(schema => schema.name)
+    .filter(name => typeof name === 'string' && !WIRE_NAME_PATTERN.test(name))
+  if (unsafe.length > 0) {
+    throw new Error('codex-model-parity: tool names rejected by the provider pattern: '
+      + unsafe.join(', '))
+  }
 }
 
 export {
   codeModePreview,
   codeModeSyntaxValid,
+  collaborationModeBlock,
   contextTokensRemaining,
   directPatchContent,
+  modelTokenBudget,
   modelToolAllowed,
   modelInstructions,
+  multiAgentUsageHintBlock,
   normalizeCodeModeSource,
   officialRuntimeProgram,
   normalizeShellType,
   normalizeToolMode,
   patchWebSearchSchema,
+  persistentModeBlock,
   profileForModel,
   modelRowFor,
   registerCodeModeAlias,
+  registerClockTools,
   registerModelParity,
   rewriteCodeModeSdk,
   registerV2Agents,
@@ -2578,4 +3096,5 @@ export {
   v2Status,
   validateV2TaskName,
   waitForV2MailboxUpdate,
+  wrapCollaborationMode,
 }

@@ -4,6 +4,14 @@
  * The deployment-wide permission preset table deliberately remains untouched.
  * This plugin supplies Codex aliases and the smallest policy projection DSH
  * can enforce without inventing a second global sandbox service.
+ *
+ * `network` mirrors upstream's `NetworkSandboxPolicy`: danger-full-access maps
+ * to `Disabled` and therefore reports network as enabled, while the managed
+ * read-only and workspace-write profiles report it as restricted. dsh's file
+ * sandbox has no network dimension, so the declared restriction is enforced
+ * where the model can act on it — a network grant has to be asked for through
+ * `request_permissions` / `additional_permissions`, exactly as upstream
+ * requires — rather than by dropping packets.
  */
 const createRequire = process.getBuiltinModule('node:module').createRequire
 const nodePath = process.getBuiltinModule('node:path')
@@ -16,18 +24,21 @@ const CODEX_PROFILES = Object.freeze({
   'codex-read-only': Object.freeze({
     sandbox: 'read-only',
     approval: 'ask',
+    network: 'restricted',
     name: 'Codex Read Only',
     description: 'Codex-compatible read-only sandbox with on-request approval.',
   }),
   'codex-on-request': Object.freeze({
     sandbox: 'workspace-write',
     approval: 'ask',
+    network: 'restricted',
     name: 'Codex On Request',
     description: 'Codex-compatible workspace writes with on-request escalation.',
   }),
   'codex-full-access': Object.freeze({
     sandbox: 'danger-full-access',
     approval: 'never',
+    network: 'enabled',
     name: 'Codex Full Access',
     description: 'Codex-compatible unrestricted file access without approval prompts.',
   }),
@@ -115,24 +126,41 @@ function activeGrant(agent) {
 
 function policyFor(agent, standing) {
   const grant = activeGrant(agent)
-  if (grant?.writeRoot === undefined || standing.mode === 'danger-full-access') return standing
+  const base = withNetwork(standing, standing.mode === 'danger-full-access')
+  if (grant === undefined || standing.mode === 'danger-full-access') return base
   // DSH has one writable root rather than Codex's set of path entries. A
   // grant inside the standing workspace can safely widen read-only to the
   // existing workspace root; an external grant is handled only per target.
-  if (pathIsWithin(standing.workspaceRoot, grant.writeRoot)) {
-    return { ...standing, mode: 'workspace-write' }
+  if (grant.writeRoot !== undefined && pathIsWithin(standing.workspaceRoot, grant.writeRoot)) {
+    return { ...base, mode: 'workspace-write' }
   }
-  return standing
+  return base
 }
 
 function policyForTargets(agent, standing, targets) {
   const grant = activeGrant(agent)
-  if (grant?.writeRoot === undefined || standing.mode === 'danger-full-access') return standing
+  const base = withNetwork(standing, standing.mode === 'danger-full-access')
+  if (grant === undefined || standing.mode === 'danger-full-access') return base
   const paths = targets.map(target => String(target))
-  if (paths.length > 0 && paths.every(path => pathIsWithin(grant.writeRoot, path))) {
-    return { ...standing, mode: 'workspace-write', workspaceRoot: grant.writeRoot }
+  if (grant.writeRoot !== undefined && paths.length > 0 && paths.every(path => pathIsWithin(grant.writeRoot, path))) {
+    return { ...base, mode: 'workspace-write', workspaceRoot: grant.writeRoot }
   }
   return policyFor(agent, standing)
+}
+
+/**
+ * Attach the network policy the model is told about.
+ *
+ * A turn-scoped grant that included network access wins for the rest of the
+ * turn, which is the upstream behaviour for `request_permissions`: granted
+ * permissions "apply automatically to later shell-like commands".
+ */
+function networkPolicyFor(agent, standing) {
+  return policyFor(agent, standing).network
+}
+
+function withNetwork(standing, enabled) {
+  return standing.network === enabled ? standing : { ...standing, network: enabled }
 }
 
 function currentProfile(agent, permissionPresets, sandboxPolicy, approval) {
@@ -159,6 +187,7 @@ export function apply(ctx) {
     current: agent => currentProfile(agent, ctx.get('permissionPresets'), ctx.get('sandboxPolicy'), ctx.get('approval')),
     policyFor,
     policyForTargets,
+    networkPolicyFor,
     clear: agent => grants.delete(agent),
     async request(agent, execution, permissions, reason) {
       const normalized = normalizePermissionRequest(agent, permissions)
@@ -218,4 +247,4 @@ export function apply(ctx) {
   })
 }
 
-export { CODEX_PROFILES, commonDirectory, normalizePermissionRequest, policyFor, policyForTargets, turnKey }
+export { CODEX_PROFILES, commonDirectory, networkPolicyFor, normalizePermissionRequest, policyFor, policyForTargets, turnKey, withNetwork }

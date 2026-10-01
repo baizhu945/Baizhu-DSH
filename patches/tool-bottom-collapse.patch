@@ -379,3 +379,33 @@ index 60b061a..92d5604 100644
    'render.failedAbdicated': 'Rendering failed in {slot}; the default UI was restored:',
    'render.failedHeld': 'Rendering failed in {slot}:',
    'a11y.defining': 'Defining the plugin',
+diff --git a/packages/client/ui-tool/tests/tool-row.client.spec.tsx b/packages/client/ui-tool/tests/tool-row.client.spec.tsx
+--- a/packages/client/ui-tool/tests/tool-row.client.spec.tsx
++++ b/packages/client/ui-tool/tests/tool-row.client.spec.tsx
+@@ -296,7 +296,7 @@
+     expect(view.getByText('List files')).toBeTruthy()
+     expect(view.getByText(/"a": 1/)).toBeTruthy()
+     expect(view.container.querySelector('[class*="ioCard"]')).not.toBeNull()
+-    fireEvent.click(view.getByRole('button'))
++    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
+     expect(view.queryByTestId('tool-icon')).not.toBeNull()
+     expect(view.getByText('List files')).toBeTruthy()
+   })
+@@ -324,2 +324,12 @@
++  it('collapses from the bottom button without reopening the disclosure', () => {
++    const view = render(<ToolRow {...rowProps} />)
++    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
++    expect(view.getByText(/"a": 1/)).toBeTruthy()
++    fireEvent.click(view.getByRole('button', { name: t('row.collapse') }))
++    expect(view.queryByText(/"a": 1/)).toBeNull()
++    expect(view.container.querySelector('[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false')
++    expect(view.queryByRole('button', { name: t('row.collapse') })).toBeNull()
++  })
++
+   it('formats the argument body only while expanding it', () => {
+     const stringify = vi.spyOn(JSON, 'stringify')
+@@ -341,3 +351,3 @@
+-    fireEvent.click(view.getByRole('button'))
++    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
+     expect(bodyFormatCalls()).toBe(1)
+     expect(view.queryByText(/"a": 1/)).toBeNull()

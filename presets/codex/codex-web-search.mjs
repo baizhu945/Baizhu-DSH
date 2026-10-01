@@ -20,14 +20,14 @@ const dshHome = process.env.DSH_HOME ?? `${process.env.HOME ?? '/home/baizhu945'
 const requireFromDsh = createRequire(`${dshHome}/profiles/codex-web-search.cjs`)
 const toolsEntry = requireFromDsh.resolve('@deepseek-ai/dsh-tools')
 const { defineTool } = await import(toolsEntry)
-// Import the credential store directly: the package's main entry also mounts
-// Cordis/provider peers that a preset's module does not need, and a shared
-// profile fallback cannot resolve those peers before the host intercepts it.
-const dshAuthManifest = requireFromDsh.resolve('@deepseek-harness-tui/dsh-auth/package.json')
-const { CredentialFile } = await import(pathToFileURL(nodePath.join(nodePath.dirname(dshAuthManifest), 'lib/credentials.js')).href)
+// Import the built-in OAuth credential store directly, not the TUI/plugin
+// entry (which mounts Cordis/provider peers unnecessary to this preset).
+// The credential format and default dsh-auth path remain unchanged in 0.12.
+const dshTuiManifest = requireFromDsh.resolve('@deepseek-harness-tui/dsh-tui/package.json')
+const { CredentialFile } = await import(pathToFileURL(nodePath.join(nodePath.dirname(dshTuiManifest), 'lib/types/dsh-adapter/oauth/credentials.js')).href)
 
 // Reuse only the OAuth token refresh implementation. No dsh web provider is
-// loaded; the credential document remains owned by dsh-auth.
+// loaded; the credential document remains owned by the built-in OAuth plugin.
 // Recent DSH resolves profile modules at runtime instead of leaving a shared
 // node_modules link. The Nix dsh launcher supplies the pi-ai instance owned
 // by dsh-llm-pi-ai; the fallback preserves older standalone test profiles.
@@ -55,10 +55,6 @@ let refreshChain = Promise.resolve()
 
 async function readCredential() {
   return credentialStore.read('openai-codex')
-}
-
-async function writeCredential(value) {
-  await credentialStore.modify('openai-codex', async () => value)
 }
 
 function decodeJwtPayload(token) {
@@ -103,31 +99,39 @@ async function accessToken(signal) {
     }
   }
 
-  const refresh = async () => {
-    const current = await readCredential()
+  const refresh = () => refreshCodexCredential(credentialStore, openaiCodexOAuth.refresh, signal)
+  const currentRefresh = refreshChain.then(refresh, refresh)
+  refreshChain = currentRefresh.then(() => undefined, () => undefined)
+  return currentRefresh
+}
+
+// TUI 0.12's store serializes the whole credential document across instances
+// and processes. Hold that lock during refresh, not merely during its final
+// write: otherwise another request can rotate the same refresh token, or a
+// completed logout/new login can be overwritten by an older network result.
+async function refreshCodexCredential(store, refresh, signal) {
+  let credential
+  await store.modify('openai-codex', async current => {
+    if (signal.aborted) throw new Error('web.run was aborted')
     if (current === undefined || typeof current.access !== 'string' || typeof current.refresh !== 'string') {
       throw new Error('OpenAI Codex web search credentials disappeared; run /auth login openai-codex again')
     }
     if (typeof current.expires === 'number' && current.expires - Date.now() > REFRESH_SKEW_MS) {
-      return {
-        token: current.access,
-        accountId: typeof current.accountId === 'string' ? current.accountId : accountIdFromToken(current.access),
-      }
+      credential = current
+      return undefined
     }
-    const refreshed = await openaiCodexOAuth.refresh(current, signal)
+    const refreshed = await refresh(current, signal)
+    if (signal.aborted) throw new Error('web.run was aborted')
     if (refreshed?.access === undefined || refreshed.refresh === undefined) {
       throw new Error('OpenAI Codex web search OAuth refresh returned incomplete credentials')
     }
-    await writeCredential(refreshed)
-    return {
-      token: refreshed.access,
-      accountId: typeof refreshed.accountId === 'string' ? refreshed.accountId : accountIdFromToken(refreshed.access),
-    }
+    credential = refreshed
+    return refreshed
+  })
+  return {
+    token: credential.access,
+    accountId: typeof credential.accountId === 'string' ? credential.accountId : accountIdFromToken(credential.access),
   }
-
-  const currentRefresh = refreshChain.then(refresh, refresh)
-  refreshChain = currentRefresh.then(() => undefined, () => undefined)
-  return currentRefresh
 }
 
 function parseResponseEnvelope(body) {
@@ -880,4 +884,4 @@ export function apply(ctx) {
   registerWebSearch(ctx)
 }
 
-export { parseResponseBody, parseResponseEnvelope, searchCommands, requestCodexSearch as requestCodexSearchForTest }
+export { parseResponseBody, parseResponseEnvelope, searchCommands, refreshCodexCredential, requestCodexSearch as requestCodexSearchForTest }
