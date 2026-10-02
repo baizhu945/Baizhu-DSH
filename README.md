@@ -17,9 +17,12 @@
 dsh.nix
 ├── 构建 DSH 源码与 pnpm 依赖
 ├── 应用 patches/                          # UI、会话和模型修复
-├── 导入 skills.nix 和 presets/
+├── 导入 skills.nix、desktop.nix 和 presets/
 ├── 部署 .dsh/profile 的运行时 patch/plugin
 └── 安装 dsh、Node.js、rg、bubblewrap、dsh-web
+
+desktop.nix                                 # 官方 Electron Desktop 的 Nix 移植
+desktop-tests/                              # 隔离回归测试（临时 HOME/DSH_HOME/Xvfb）
 
 profiles/web/                               # 浏览器交互
 profiles/headless/                          # 一次性/JSONL 驱动
@@ -55,11 +58,40 @@ dsh --profile headless --help
 
 使用官方 `headless-startup` 和 `headless-runner`，保留上游支持的 `--session-id` / `--json`；不再安装 cc-connect 的 `--jsonl` 桥或扩展参数。原有独立 `cc-connect` 服务仍由 `agent/cc-connect.nix` 管理，若要继续使用它，需另行适配其 dsh 调用协议。
 
+### Desktop（Electron）
+
+```bash
+dsh-desktop
+```
+
+`desktop.nix` 用官方 `apps/desktop` 源码构建出真正的 Electron Desktop，不是 Wine、不是 PWA，也不是把 Web 窗口包一层：
+
+- **原生源码移植**。Electron 44 直接运行官方 `apps/desktop`；`patches/desktop-nix-linux.patch` 提供 Nix 路径解析、插件继承及 Linux 生命周期适配，不依赖 Windows/macOS 安装包。Nix 专属启动逻辑由 `DSH_DESKTOP_NIX=1` 启用。
+- **Host 与包操作使用 Nix Node 22**。Electron 只跑 UI 进程；私有 Desktop Host、pnpm 和包脚本使用与 runtime 构建一致的 Node 22，不需要在启动时按 Electron ABI 重编译原生模块。
+- **独立的 Desktop profile，共享兼容扩展**。会话、技能和用户 preset 沿用 `~/.dsh`；桌面的插件状态及配置保存在 `~/.dsh/profiles/desktop`，启动时读取其他 profiles 的兼容扩展，而不改写源 profile。渲染进程仍是 `sandbox: true` + `contextIsolation: true` + `nodeIntegration: false`。
+- **Node 与 Office 依赖**。payload 使用指向 store 的符号链接，Python 侧带 numpy / pandas / python-docx / python-pptx / openpyxl / pillow / lxml / xlsxwriter；`load_workspace_dependencies` 就地使用，不向 `~/.dsh` 拷贝。Electron 自身的浏览器数据独立保存在 `~/.config/dsh-desktop`（可用 `DSH_DESKTOP_USER_DATA_DIR` 覆盖）。DOCX→PDF 走 LibreOffice Kit 的 WASM 引擎（上游没有 Linux 原生包）。
+- **更新走 Home Manager**。应用内没有 updater（菜单里的 “Check for Updates” 已隐藏），也不注入官方强制更新清单。
+- **Linux 上的账号身份**。嵌入的账号视图按上游 `platformClientHeaders(null, …)` 如实报告 `x-client-platform: web`，既不冒充 macOS 也不伪造 `desktop-linux`；发送方与鉴权校验未放宽。**官方是否接受 Linux 账号登录不作保证**。
+- Linux 关闭窗口走正常退出流程；有运行中任务时仍会询问，取消退出会保留窗口。
+
+#### 自动继承插件与 preset
+
+每次重新启动桌面版都会重新发现扩展，不只接入 Codex 和 OAuth：
+
+- 读取其他 profiles 中安装的兼容插件包、已选择的扩展 bundle 及 profile patch；Web 优先，其次 headless、dsh-tui 和其他 profile。共享 `profiles/node_modules` 中的插件也参与发现。纯依赖库不是待启用的插件。
+- 保留原来的启用/禁用状态；桌面自己安装的版本、自定义 bundle 和 `cordis.patch.yml` 优先。继承层使用独立的 `dsh-desktop-inherited-plugins` bundle，不覆盖桌面的模型、界面设置或凭据；移除该 bundle 后不会在下次启动时强行重新启用。
+- 终端 UI、headless/ACP/SDK 启动器及传输配置不会移入桌面；TUI 中可独立运行的 Host 扩展仍可继承。不兼容的版本不会被自动豁免，跳过原因会写入启动诊断。
+- 自动读取 `~/.dsh/.agent-presets/*/agent.cordis.yml`，并沿用 `preset.yml` 的显示元数据；已有注册项不重复注册。技能继续使用共享的技能目录。
+- 同步只读取源 profiles，不复制或重写 OAuth 凭据；实际登录仍使用原来的共享凭据存储。不在启动时运行包管理器，也不把整个 Web/TUI 的 `node_modules` 覆盖到桌面。新装插件或修改源配置后，完全退出再启动 `dsh-desktop` 即可重新同步。
+- 发现结果和跳过原因保存在 `~/.dsh/profiles/desktop/.desktop-plugin-inheritance-report.json`；已安装但未启用的插件包可以被发现，但不会仅因安装而自动启用。
+
+例如现有 Web 配置中的 Confirm、审批面板、Codex registrar、`/auth`、`/provider` 都会进入继承层；以后添加的兼容第三方扩展也使用同一机制，而不是额外维护名字白名单。终端专属的场景、状态栏、快捷键和对话框不会自动变成桌面 UI。
+
 ## Web 权限与审批体验
 
 `profiles/web/cordis.patch.yml` 把 `confirm` 设为新会话默认，并把 approval 默认策略固定为 `ask`。读取、搜索和技能加载保持顺畅；写文件和执行命令通过 `confirm-writes.mjs` 转交审批服务。
 
-审批面板由 `dsh-baizhu-approval` 的 client half 接管，提供：
+审批面板由 `dsh-baizhu-approval` 的 client half 通过 `ui-approval/render` 展示事件接管。原生插件仍独占 composer 与 Tool 详情 slot，审批请求、会话归属及应答协议不变，插件提供：
 
 - **拒绝 / 允许一次 / 总是允许** 三个按钮；
 - `Esc` 拒绝，`Ctrl/Cmd+Enter` 允许一次，`Ctrl/Cmd+Shift+Enter` 总是允许；

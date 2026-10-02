@@ -1,0 +1,47 @@
+--- a/packages/client/ui-approval/src/client/index.ts
++++ b/packages/client/ui-approval/src/client/index.ts
+@@ -1,4 +1,5 @@
+ /** Browser approval consumer over the existing scoped Remote Event waterfall. */
++import { createElement, type ReactNode } from 'react'
+ import type { Context as ClientContext } from '@deepseek-ai/cordis'
+ import type {} from '@deepseek-ai/dsh-api-remotes/client'
+ import type {} from '@deepseek-ai/dsh-api-session-controller/client'
+@@ -9,7 +10,7 @@
+ import type {} from '@deepseek-ai/dsh-client-locale/client'
+ import type { ShortcutCommandId } from '@deepseek-ai/dsh-client-shortcuts/client'
+ import { ApprovalPanel } from './ApprovalPanel.tsx'
+-import { PendingApproval } from './contract/slots.ts'
++import { PendingApproval, type ApprovalComposerProps } from './contract/slots.ts'
+ import { en, zh } from './locales.ts'
+ 
+ export type {
+@@ -21,6 +22,15 @@
+ } from './contract/slots.ts'
+ export type { ApprovalKey } from './locales.ts'
+ 
++declare module '@deepseek-ai/cordis' {
++  interface Events {
++    /** Optional synchronous presentation only; native request ownership and answers stay unchanged.
++     * @mode bail
++     */
++    'ui-approval/render'(props: ApprovalComposerProps): ReactNode | undefined
++  }
++}
++
+ /** Required services: Agent scopes, Remote Events, Session UI, Slot registry, and copy. */
+ export const inject = ['sessions', 'remote', 'uiSession', 'slots', 'locale']
+ 
+@@ -100,7 +110,12 @@
+     children: {
+       'conversation.approval.detail': { kind: 'single', scope: 'session' },
+     },
+-  }, ApprovalPanel))
++  }, (props: ApprovalComposerProps): ReactNode => {
++    // This native entry still owns the child slot and supplies its authorized
++    // renderSlot/resolveReason props. Extensions may replace presentation only.
++    const presentation = ctx.bail('ui-approval/render', props)
++    return presentation === undefined ? createElement(ApprovalPanel, props) : presentation
++  }))
+   ctx.remote.$on('approval/request', function (request, next) {
+     return answerApproval(ctx, this, request, next, registerPendingInteraction)
+   })

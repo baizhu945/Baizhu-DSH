@@ -17,7 +17,7 @@ const nodeHttps = process.getBuiltinModule('node:https')
 const nodePath = process.getBuiltinModule('node:path')
 const { pathToFileURL } = process.getBuiltinModule('node:url')
 const dshHome = process.env.DSH_HOME ?? `${process.env.HOME ?? '/home/baizhu945'}/.dsh`
-const requireFromDsh = createRequire(`${dshHome}/profiles/codex-web-search.cjs`)
+const requireFromDsh = createRequire(process.env.DSH_CODEX_REQUIRE_ANCHOR || `${dshHome}/profiles/codex-web-search.cjs`)
 const toolsEntry = requireFromDsh.resolve('@deepseek-ai/dsh-tools')
 const { defineTool } = await import(toolsEntry)
 // Import the built-in OAuth credential store directly, not the TUI/plugin

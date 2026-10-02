@@ -5,30 +5,36 @@ import vm from 'node:vm'
 
 const source = readFileSync(new URL('../node_modules/dsh-baizhu-approval/client.js', import.meta.url), 'utf8')
 
-test('Web approval client keeps the host composer and localized reason contract', () => {
+test('Web approval presenter keeps native owned detail and localized reason without a second composer', () => {
   let bundle
   vm.runInNewContext(source, { window: { __ModuleLoader__: { load: value => { bundle = value } } } })
   assert.equal(bundle.id, 'dsh-baizhu-approval')
   const fakeReact = { createElement: (type, props) => ({ type, props }) }
   const plugin = bundle.factory(name => name === 'react' ? fakeReact : { Button: () => {} })
-  let registration
+  let presenter
+  const disposers = []
   const ctx = {
-    effect() {},
-    locale: { register() {}, resolveText: value => value.zh },
-    slots: {
-      inject: (_name, register) => register(),
-      register: (options, component) => { registration = { options, component } },
+    effect(setup) { disposers.push(setup()) },
+    on(event, handler) {
+      assert.equal(event, 'ui-approval/render')
+      presenter = handler
+      return () => { presenter = undefined }
     },
+    locale: { register: () => () => {}, bind: () => key => key },
+    // No slots API is supplied: presentation must not register/rename/bypass a slot.
   }
   plugin.apply(ctx)
-  assert.equal(registration.options.priority, 0.5)
   const reason = { en: 'Approval needed', zh: '需要审批' }
-  assert.equal(registration.options.inject().resolveReason(reason), '需要审批')
-  const panel = registration.component({
-    matched: { key: '1', reason: 'audit text', displayReason: reason },
-    resolveReason: value => value.zh,
-    renderSlot() {},
-    t() {},
-  })
+  const renderSlot = () => 'native tool detail'
+  const resolveReason = value => value.zh
+  const matched = { key: '1', reason: 'audit text', displayReason: reason }
+  const element = presenter({ matched, resolveReason, renderSlot, t: () => 'native' })
+  assert.equal(element.props.renderSlot, renderSlot)
+  assert.equal(element.props.resolveReason, resolveReason)
+  assert.equal(element.props.matched, matched)
+  const panel = element.type(element.props)
   assert.equal(panel.props.reason, '需要审批')
+  assert.equal(panel.props.renderSlot, renderSlot)
+  for (const dispose of disposers.reverse()) dispose?.()
+  assert.equal(presenter, undefined)
 })

@@ -16,7 +16,7 @@
 const createRequire = process.getBuiltinModule('node:module').createRequire
 const nodePath = process.getBuiltinModule('node:path')
 const dshHome = process.env.DSH_HOME ?? `${process.env.HOME ?? '/home/baizhu945'}/.dsh`
-const requireFromDsh = createRequire(`${dshHome}/profiles/codex-permissions.cjs`)
+const requireFromDsh = createRequire(process.env.DSH_CODEX_REQUIRE_ANCHOR || `${dshHome}/profiles/codex-permissions.cjs`)
 const sandboxPolicyEntry = requireFromDsh.resolve('@deepseek-ai/dsh-sandbox-policy')
 const { setSandboxMode } = await import(sandboxPolicyEntry)
 

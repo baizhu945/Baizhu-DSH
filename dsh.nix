@@ -45,6 +45,9 @@ let
       ./patches/tool-bottom-collapse.patch
       ./patches/bash-command-hscroll.patch
       ./patches/web-fetch-clash-fake-ip.patch
+      # Native approval remains the sole composer/detail-slot owner. The user
+      # addon may replace its presentation without changing request/answer semantics.
+      ./patches/approval-presenter.patch
       # Nix Node exposes internals through --expose-internals; its addon getter
       # probe is incompatible with the packaged Node 22 and 24 binaries.
       ./patches/profile-resolution-expose-internals.patch
@@ -162,6 +165,8 @@ in
     ./skills.nix
     ./presets/codex/dsh-codex.nix
     ./tui.nix
+    # Official Electron Desktop, packaged against the same immutable runtime above.
+    ./desktop.nix
   ];
 
   home.packages = [

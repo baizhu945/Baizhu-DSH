@@ -14,9 +14,9 @@
           - pwsh
           - terminal_send
 
-    # 审批面板插件(approval-always-allow + approval-keyboard 两个源码补丁
-    # 的插件迁移):内置面板仍可工作,本插件以 composer chain 更高优先级
-    # 接管审批 UI,提供「总是允许」第三按钮与 Esc/Ctrl+Enter 快捷键。
+    # 审批面板插件：通过原生 ui-approval/render 展示事件接管 UI，
+    # 不重复声明 composer/详情 slot，也不改变审批请求与应答协议。
+    # 提供「总是允许」第三按钮与 Esc/Ctrl+Enter 快捷键。
     # 双半包:host 半体为空,client 半体经 package.json 的 dsh.client 声明加载
     # (包本体由 home-manager 安装到本 profile 的 node_modules)。
     - id: approval-tweaks

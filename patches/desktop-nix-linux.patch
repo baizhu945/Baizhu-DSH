@@ -1,0 +1,233 @@
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -78,6 +78,34 @@
+ /** Error-level console output of the primary window, attached to crash reports. */
+ const rendererConsole = new RendererConsoleTail()
+ 
++/**
++ * Nix-packaged Linux shell. Upstream resolves its runtime from Electron's own executable or
++ * from a signed ASAR payload beside the application; a Nix package has neither, so the
++ * launcher passes every path explicitly and this flag activates that resolution. Windows,
++ * macOS, and the development tree keep the untouched upstream branches.
++ */
++const nixMode = process.env.DSH_DESKTOP_NIX === '1'
++
++/**
++ * Read one path the Nix launcher must supply.
++ * @param variable - Environment variable carrying an absolute path.
++ * @returns The non-empty value.
++ */
++function nixRuntimePath(variable: string): string {
++  const value = process.env[variable]
++  if (value === undefined || value === '') {
++    throw new Error(`dsh desktop: ${variable} is required for a Nix-packaged launch`)
++  }
++  return value
++}
++
++// A stable application name keeps the Linux desktop entry, the userData directory, and the
++// single-instance lock consistent; it is set before the logs path and the lock are resolved.
++if (nixMode) {
++  app.setName('DeepSeek Harness')
++  if (process.platform === 'linux') app.setDesktopName('dsh-desktop.desktop')
++}
++
+ // Platform-conventional logs directory (macOS ~/Library/Logs/<name>, otherwise under userData);
+ // set before ready so the first fatal report already resolves under it.
+ app.setAppLogsPath()
+@@ -149,6 +177,16 @@
+ }
+ 
+ function runtimeResources(): RuntimeResources {
++  if (nixMode) {
++    // The Host and every package script run on the store's own Node, so nothing in the
++    // runtime tree is ever rebuilt against Electron's ABI.
++    return {
++      node: nixRuntimePath('DSH_DESKTOP_HOST_NODE'),
++      nodeBin: nixRuntimePath('DSH_DESKTOP_NODE_BIN'),
++      pnpm: nixRuntimePath('DSH_DESKTOP_PNPM_ENTRY'),
++      dsh: nixRuntimePath('DSH_DESKTOP_DSH_DIR'),
++    }
++  }
+   const development = !app.isPackaged
+   const node = process.execPath
+   const nodeBin = development ? join(app.getAppPath(), 'scripts', 'node-bin') : join(process.resourcesPath, 'runtime', 'bin')
+@@ -226,6 +264,10 @@
+       visualEffectState: 'active' as const,
+       backgroundColor: '#00000000',
+     } : {}),
++    // Linux takes its icon from the desktop entry, and this shell has no tray to fall back
++    // on, so the window names the generic cross-platform asset explicitly.
++    ...(nixMode && process.platform === 'linux'
++      ? { icon: join(app.getAppPath(), 'resources', 'icon.png') } : {}),
+     webPreferences: {
+       preload,
+       nodeIntegration: false,
+@@ -318,10 +360,10 @@
+   const updateJournal = journalDirectory === undefined ? undefined : new DesktopUpdateJournal(journalDirectory, app.getVersion())
+   const resources = runtimeResources()
+   const paths = resolveDesktopPaths()
+-  const development = !app.isPackaged
+-  const primaryRuntime = development
+-    ? developmentPrimaryRuntime()
+-    : join(process.resourcesPath, 'runtime', 'primary-runtime')
++  const development = !app.isPackaged && !nixMode
++  const primaryRuntime = nixMode
++    ? nixRuntimePath('DSH_DESKTOP_PRIMARY_RUNTIME_DIR')
++    : (development ? developmentPrimaryRuntime() : join(process.resourcesPath, 'runtime', 'primary-runtime'))
+   const activeProject = paths.profile
+   const manager = new DesktopProjectManager(paths, resources)
+   // Dock and Finder launches inherit only launchd's environment; every Host shares one login-shell read.
+@@ -438,7 +480,10 @@
+     return next.promise
+   }
+   const platformView = new DesktopPlatformView(join(app.getAppPath(), 'lib', 'preload-platform-account.cjs'),
+-    () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US', process.platform === 'win32' ? 'win32' : 'darwin')
++    // Linux is not a Platform desktop client. null reports the supported web wire identity
++    // instead of claiming a macOS or Windows one, matching the Host's Linux default.
++    () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US',
++    process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : null)
+   const backend = new DesktopBackendController((onFailure) => {
+     const hostInspectPort = developmentHostInspectPort(development)
+     const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject,
+@@ -922,8 +967,11 @@
+     updates.dispose()
+   })
+ 
+-  const applicationIconPath = development ? join(app.getAppPath(), 'resources', 'icon-windows.png')
+-    : join(process.resourcesPath, 'icon.png')
++  // The unpackaged development tree is built on Windows and only carries the Windows asset;
++  // a Nix Linux package ships the generic cross-platform icon instead.
++  const applicationIconPath = nixMode ? join(app.getAppPath(), 'resources', 'icon.png')
++    : (development ? join(app.getAppPath(), 'resources', 'icon-windows.png')
++      : join(process.resourcesPath, 'icon.png'))
+   app.setAboutPanelOptions({
+     applicationName: 'DeepSeek Harness',
+     applicationVersion: app.getVersion(),
+@@ -952,7 +1000,9 @@
+         click: () => { void showAbout().catch((error: unknown) => { console.error(error) }) } }
+       : { label: currentDesktopLocale().messages.aboutMenu, role: 'about' },
+     { type: 'separator' },
+-    { label: currentDesktopLocale().messages.checkUpdatesMenu, click: () => { void openUpdatePrompt(true) } },
++    // A Nix package is updated through Home Manager. There is no app-update.yml to query and
++    // the in-app updater has nothing to offer, so the row is not shown.
++    ...(nixMode ? [] : [{ label: currentDesktopLocale().messages.checkUpdatesMenu, click: () => { void openUpdatePrompt(true) } }]),
+     ...process.platform === 'darwin' || process.platform === 'win32'
+       ? [{ label: currentDesktopLocale().messages.cliCommandMenu, click: () => { void commandManager.show() } }] : [],
+     ...development ? [
+@@ -1071,6 +1121,14 @@
+     // Closing hides: the page and the Host keep running, and the next show resumes the same document.
+     window.on('close', (event) => {
+       if (quitting || shellInstallerOwnsQuit || sessionEnding) return
++      // Linux has no tray. Ask to quit rather than hide; keep the window visible if
++      // the existing before-quit confirmation is cancelled. finishQuit owns hiding
++      // only after approval. Windows and macOS retain their hide-on-close behavior.
++      if (nixMode && process.platform === 'linux') {
++        event.preventDefault()
++        app.quit()
++        return
++      }
+       event.preventDefault()
+       if (updateDialog.isOpen) { updateDialog.focus(); return }
+       const hide = (): void => {
+--- a/apps/desktop/src/platform-view.ts
++++ b/apps/desktop/src/platform-view.ts
+@@ -50,10 +50,11 @@
+   /**
+    * @param preload - bundled sandboxed Platform preload path.
+    * @param getLocale - current resolved Desktop language.
+-   * @param platform - operating system this shell runs on, reported to Platform.
++   * @param platform - operating system this shell runs on, reported to Platform; null
++   *   identifies a client that is not a Platform desktop build.
+    */
+   constructor(private readonly preload: string, private readonly getLocale: () => PlatformLocale,
+-    private readonly platform: 'darwin' | 'win32') {}
++    private readonly platform: 'darwin' | 'win32' | null) {}
+ 
+   /** @param next - private Host credentials; identity enrichment preserves an already open temporary document. */
+   setSession(next: PlatformSession | null): void {
+--- a/apps/desktop/src/project-manager.ts
++++ b/apps/desktop/src/project-manager.ts
+@@ -1,5 +1,6 @@
+ /** Desktop profile initialization and native recovery. */
+ 
++import { execFileSync } from 'node:child_process'
+ import {
+   existsSync,
+   fsyncSync,
+@@ -87,10 +88,28 @@
+       migrateProfileSettings(this.paths.profile)
+       createPluginProfile(this.paths.profile)
+       removeLinkProjections(this.paths.profile)
++      // Every Nix launch refreshes the portable extension snapshot while the profile
++      // operation lock is held. main.ts calls this only after owning the Electron
++      // single-instance lock; a second window cannot edit a running Host's graph.
++      if (process.env.DSH_DESKTOP_NIX === '1') {
++        const node = process.env.DSH_DESKTOP_HOST_NODE
++        const sync = process.env.DSH_DESKTOP_PLUGIN_SYNC
++        if (!node || !sync) throw new Error('desktop plugins: DSH_DESKTOP_HOST_NODE and DSH_DESKTOP_PLUGIN_SYNC are required')
++        execFileSync(node, ['--expose-internals', sync, this.runtime.dsh, this.paths.profile], { stdio: 'inherit' })
++      }
+     })
+   }
+ 
+   private async withLock<T>(operation: () => T | Promise<T>): Promise<T> {
++    // Check before even writing the profile lock or initialization files: a user
++    // alias must not turn a Desktop operation into a source-profile mutation.
++    if (process.env.DSH_DESKTOP_NIX === '1') {
++      for (const path of [this.paths.profile, join(this.paths.profile, 'node_modules')]) {
++        if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) {
++          throw new Error(`desktop project: refusing user symlink boundary ${path}`)
++        }
++      }
++    }
+     mkdirSync(this.paths.profile, { recursive: true, mode: 0o700 })
+     const lockPath = join(realpathSync(this.paths.profile), 'lock')
+     let descriptor: number
+--- a/apps/desktop-host/src/index.ts
++++ b/apps/desktop-host/src/index.ts
+@@ -1,6 +1,7 @@
+ /** Launch the Desktop profile through the Web application and report its URL to Electron. */
+ 
+ import { delimiter, join } from 'node:path'
++import { pathToFileURL } from 'node:url'
+ import { inspect } from 'node:util'
+ import { loadLayeredEnv, loadProfileDirectory, reportSkippedBundles } from '@deepseek-ai/dsh-app-boot'
+ import { runProfile } from '@deepseek-ai/dsh/profile-boot'
+@@ -90,6 +91,13 @@
+   })
+   process.once('disconnect', () => { void stop() })
+   const { ctx } = await application
++  // Preset registry diagnostics can await Host Loader settlement. Install the generic
++  // user registrar after application boot, never inside a pending declarative row.
++  if (process.env.DSH_DESKTOP_NIX === '1') {
++    const registrar = process.env.DSH_DESKTOP_PRESET_REGISTRAR
++    if (!registrar) throw new Error('desktop presets: DSH_DESKTOP_PRESET_REGISTRAR is required')
++    await ctx.plugin(await import(pathToFileURL(registrar).href))
++  }
+   control.updateTasks = installDesktopUpdateTaskControl(ctx)
+   control.quitInspection = installDesktopQuitInspection(ctx)
+   await ctx.plugin(desktopOffice, {
+--- a/apps/desktop-host/src/office.ts
++++ b/apps/desktop-host/src/office.ts
+@@ -20,13 +20,19 @@
+   readonly runtimeDir: string
+ }
+ 
++/** Nix-packaged shell: an immutable store payload is consumed in place rather than copied. */
++const nixMode = process.env.DSH_DESKTOP_NIX === '1'
++
+ /**
+  * Enable offline Office authoring and structural checks in the Desktop profile.
+  * @param ctx - Profile scope; child plugins declare their own service requirements.
+  * @param config - Bundled payload source and Harness-home installation root.
+  */
+ export async function apply(ctx: Context, config: Config): Promise<void> {
+-  await ctx.plugin(workspaceDependencies, config)
++  // A Nix payload is already an immutable store tree with every dependency resolved by Nix.
++  // Passing only `source` keeps workspace dependencies in place; forwarding `root` and
++  // `runtimeDir` would dereference and copy the payload wholesale under the harness home.
++  await ctx.plugin(workspaceDependencies, nixMode ? { source: config.source } : config)
+   const archive = runtimeArchivePath(config.runtimeDir) === undefined ? undefined : dirname(realpathSync(config.runtimeDir))
+   const manifest = fileURLToPath(import.meta.resolve('@deepseek-ai/libreoffice-kit/package.json'))
+   const packageRoot = dirname(archive === undefined ? manifest : join(`${archive}.unpacked`, relative(archive, manifest)))
