@@ -239,3 +239,39 @@ index cbdd08d8a..4aab1de7d 100644
  }
  
  /** Fully identified request handed from the registry to a backend. */
+diff --git a/packages/api/session-controller/src/commands.ts b/packages/api/session-controller/src/commands.ts
+--- a/packages/api/session-controller/src/commands.ts
++++ b/packages/api/session-controller/src/commands.ts
+@@ -54,6 +54,13 @@
+   SessionRequestId,
+ } from './types.ts'
+ 
++/** Optional trusted preset service; native core remains the model-capability authority. */
++declare module '@deepseek-ai/cordis' {
++  interface Context {
++    readonly codexNativeInputAdmission?: Readonly<{ usesNativeModelAdmission: true }>
++  }
++}
++
+ interface SessionReadState {
+   readonly id: SessionId
+   readonly header: SessionHeader
+@@ -336,7 +343,17 @@
+     const hasImage = request.content.some(part => part.type === 'image')
+     const admit = async (): Promise<SessionPromptValue> => {
+       try {
+-        if (hasImage) {
++        // Only the exact live Agent's isolated preset may delegate model admission.
++        // serviceFor addresses the current mounted revision's private service realm.
++        // This does not bypass attachment bytes/media/receipt validation below.
++        const nativeAdmission = hasImage
++          ? this.ctx.get('agentPresets')?.serviceFor(agent, 'codexNativeInputAdmission')
++            ?? agent.ctx.get('codexNativeInputAdmission')
++          : undefined
++        const delegatesModelAdmission = hasImage && this.ctx.agents.get(agent.id) === agent
++          && nativeAdmission?.usesNativeModelAdmission === true
++          && nativeAdmission !== this.ctx.get('codexNativeInputAdmission')
++        if (hasImage && !delegatesModelAdmission) {
+           const current = this.agents.selectionFor(agent).current
+           const model = await this.ctx.llm.resolveModelInfo(current.provider, current.model)
+           if (model.inputModalities !== undefined && !model.inputModalities.includes('image')) {

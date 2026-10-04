@@ -1,0 +1,38 @@
+diff --git a/models-manager/src/model_info.rs b/models-manager/src/model_info.rs
+--- a/models-manager/src/model_info.rs
++++ b/models-manager/src/model_info.rs
+@@ -17,6 +17,34 @@ pub const BASE_INSTRUCTIONS: &str = include_str!("../prompt.md");
+ const PERSONALITY_SECTION_HEADER: &str = "# Personality";
+ 
+ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig) -> ModelInfo {
++    // Context-only exception, before the normal user-config maximum clamp.
++    // The manager retains the requested slug, including one safe namespace.
++    let slug = model
++        .slug
++        .split_once('/')
++        .filter(|(namespace, suffix)| {
++            !namespace.is_empty()
++                && namespace
++                    .bytes()
++                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
++                && !suffix.contains('/')
++        })
++        .map_or(model.slug.as_str(), |(_, suffix)| suffix);
++    let needs_extended_context = ["gpt-6", "gpt-5.6"].into_iter().any(|family| {
++        slug == family
++            || slug
++                .strip_prefix(family)
++                .is_some_and(|suffix| suffix.starts_with('-') || suffix.starts_with('.'))
++    });
++    // Unknown-model fallback metadata remains upstream's default.
++    if !model.used_fallback_model_metadata && needs_extended_context {
++        if model.context_window == Some(272_000) {
++            model.context_window = Some(1_050_000);
++        }
++        if matches!(model.max_context_window, Some(272_000 | 872_000)) {
++            model.max_context_window = Some(1_050_000);
++        }
++    }
+     if let Some(context_window) = config.model_context_window {
+         model.context_window = Some(
+             model

@@ -1,14 +1,12 @@
 { pkgs, lib, ... }:
 
 let
-  # OpenAI/codex model catalog @ 799324821d36a822923cee7814d3b80f7ec3cf99.
-  # The catalog is mounted only below the Codex preset. Its instructions_template
-  # and capability fields are read by codex-model-parity.mjs per request, so a
-  # model switch changes the model-facing contract without touching other
-  # agent presets or the host model registry.
-  # Keep this rev aligned with the reference commit recorded in agent.cordis.yml.
+  # The runtime and catalog share immutable official release source. This is a private
+  # dependency of this preset, not a pkgs overlay or a global Codex upgrade.
+  codexRuntime = import ./codex-runtime.nix { inherit pkgs lib; };
+  codexRevision = codexRuntime.rev;
   codexModelsSource = pkgs.fetchurl {
-    url = "https://raw.githubusercontent.com/openai/codex/799324821d36a822923cee7814d3b80f7ec3cf99/codex-rs/models-manager/models.json";
+    url = "https://raw.githubusercontent.com/openai/codex/${codexRevision}/codex-rs/models-manager/models.json";
     hash = "sha256-/SGb2fBhJ4J19SiTn4L1TS65ffSyXCOwIq2+SIE9kgs=";
   };
 
@@ -16,7 +14,8 @@ let
   # 872K extension cap. Patch the preset-owned copy to the same 1.05M window
   # as dsh's pi-ai catalog while retaining the existing GPT-5.6 corrections;
   # editing ~/.dsh directly would be overwritten by Home Manager.
-  # This widening is deliberate; the patch is the only place it is applied.
+  # This reference artifact retains the user's exact widening. The private
+  # native core applies the same two-field exception to live/bundled metadata.
   codexModels = pkgs.runCommand "dsh-codex-models-gpt56-context" {
     nativeBuildInputs = [ pkgs.python3 ];
   } ''
@@ -25,21 +24,28 @@ let
     python3 ${./patches/fix-gpt56-context.py} "$out"
   '';
 
-  # Keep the official generic Codex prompt as the fallback for model ids not
-  # present in the pinned catalog. Known models use catalog instructions.
-  codexPrompt = lib.concatMapStringsSep "\n" (line: "      ${line}") (
-    lib.splitString "\n" (lib.removeSuffix "\n" (builtins.readFile ./codex-default-prompt.md))
-  );
-
-  # Codex's PTY backend must not assume /bin/bash: NixOS intentionally keeps
-  # /bin minimal, while terminal-bash otherwise defaults to that FHS path.
   codexComposition = pkgs.replaceVars ./agent.cordis.yml {
-    bashPath = "${pkgs.bashInteractive}/bin/bash";
-    inherit codexPrompt;
+    codexBinary = "${codexRuntime}/bin/codex";
+    inherit codexRevision;
+    codexRuntimeVersion = codexRuntime.runtimeVersion;
   };
 
-  # Keep the shell path override scoped to the Codex surface. Other dsh
-  # presets continue to use their own tool definitions and shell defaults.
+  # Bundle relative ESM imports together. Individually sourced Home Manager
+  # files realpath into separate /nix/store files and lose adjacent imports.
+  codexNative = pkgs.runCommand "dsh-codex-native-${builtins.substring 0 7 codexRevision}" {} ''
+    mkdir -p $out
+    cp ${./codex-native.mjs} $out/codex-native.mjs
+    cp ${./codex-app-server.mjs} $out/codex-app-server.mjs
+    cp ${./codex-native-auth.mjs} $out/codex-native-auth.mjs
+    cp ${./codex-native-observation.mjs} $out/codex-native-observation.mjs
+    cp ${./codex-native-usage.mjs} $out/codex-native-usage.mjs
+    cp ${./native-input-admission.mjs} $out/native-input-admission.mjs
+    cp ${./codex-native-interaction.mjs} $out/codex-native-interaction.mjs
+    cp ${./codex-native-presentation.mjs} $out/codex-native-presentation.mjs
+  '';
+
+  # Retain the inactive compatibility files for legacy tests/reference only.
+  # They are not mounted by agent.cordis.yml and cannot alter native requests.
   codexSurface = pkgs.replaceVars ./codex-surface.mjs {
     bashPath = "${pkgs.bashInteractive}/bin/bash";
   };
@@ -48,6 +54,10 @@ in
   home.file = {
     ".dsh/.agent-presets/codex/agent.cordis.yml".source = codexComposition;
     ".dsh/.agent-presets/codex/preset.yml".source = ./preset.yml;
+    ".dsh/.agent-presets/codex/native".source = codexNative;
+    ".dsh/.agent-presets/codex/bin/codex".source = "${codexRuntime}/bin/codex";
+    ".dsh/.agent-presets/codex/bin/codex-code-mode-host".source = "${codexRuntime}/bin/codex-code-mode-host";
+    ".dsh/.agent-presets/codex/README.md".source = ./README.md;
     ".dsh/.agent-presets/codex/codex-surface.mjs".source = codexSurface;
     ".dsh/.agent-presets/codex/codex-model-parity.mjs".source = ./codex-model-parity.mjs;
     ".dsh/.agent-presets/codex/codex-models.json".source = codexModels;

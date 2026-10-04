@@ -381,3 +381,100 @@ index 0fe5bd6..ca0041d 100644
    return {
      toolName: name,
      text: name,
+
+# Native observations only: apply these hunks after the existing Codex UI patch.
+diff --git a/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts b/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
+--- a/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
++++ b/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
+@@ -112,4 +112,16 @@
+ function codexApplyPatchDiffs(block: ToolCallBlock): DiffHunk[] | null {
++  const parsed = parsedToolCall(block)
++  if (parsed?.name === 'apply_patch' && parsed.args._codex_native === true) {
++    // Native patch text is a human fallback, not a recoverable before-image.
++    if (!('kind' in block) || block.isError) return null
++    const meta = typeof block.meta === 'object' && block.meta !== null && !Array.isArray(block.meta)
++      ? block.meta as Record<string, unknown> : undefined
++    const item = typeof meta?.item === 'object' && meta.item !== null && !Array.isArray(meta.item)
++      ? meta.item as Record<string, unknown> : undefined
++    if (item?.success === false || (typeof item?.status === 'string' && ['failed', 'declined', 'rejected', 'interrupted', 'cancelled'].includes(item.status))) return null
++    const applied = appliedDiffs(block.meta)
++    return applied !== null && applied !== 'empty' && applied.every(diff => diff.path.trim() !== '') ? applied : null
++  }
+   const input = codexPatchInput(block)
+   if (input === null) return null
+   if ('kind' in block) {
+diff --git a/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts b/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
+--- a/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
++++ b/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
+@@ -383,6 +383,11 @@
+   const parsed = parseArgs(argsRaw)
+   if (typeof parsed !== 'object' || parsed === null) return firstLine(argsRaw)
+   const args = parsed as Record<string, unknown>
++  // Native observations already carry a human projection; never expose args.item.
++  if (args._codex_native === true) {
++    const human = pickString(args, ['description', 'input'])
++    return human === undefined ? 'Native tool observation' : firstLine(human)
++  }
+   if ((variant === 'code' || variant === 'edit') && typeof args.input === 'string' && args.input !== '') {
+     if (args.input.trimStart().startsWith('*** Begin Patch')) return 'Apply patch'
+     if (variant === 'code') {
+@@ -428,6 +433,13 @@
+   if (argsRaw === '') return null
+   const parsed = parseArgs(argsRaw)
+   if (parsed === undefined) return argsRaw
++  if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
++    const args = parsed as Record<string, unknown>
++    if (args._codex_native === true) {
++      return typeof args.input === 'string' ? args.input
++        : typeof args.description === 'string' ? args.description : null
++    }
++  }
+   // The code row's expanded body IS the program (monospace via the row's
+   // variant styling), not the args JSON envelope around it.
+   if (variant === 'code' && typeof parsed === 'object' && parsed !== null) {
+diff --git a/packages/client/ui-tool/src/client/tool/models/terminal-card-model.ts b/packages/client/ui-tool/src/client/tool/models/terminal-card-model.ts
+--- a/packages/client/ui-tool/src/client/tool/models/terminal-card-model.ts
++++ b/packages/client/ui-tool/src/client/tool/models/terminal-card-model.ts
+@@ -307,6 +307,24 @@
+     }
+   }
+   if (block.isError || (call.kind === 'shell' && call.persistent) || isSpilledShellCall(block)) return null
++  if (parsed.args._codex_native === true) {
++    // Only marked native observations use exact captured metadata. Do not parse
++    // their human fallback as stdout or infer exit code 0 when it is unknown.
++    if (typeof block.meta !== 'object' || block.meta === null || Array.isArray(block.meta)) return null
++    const meta = block.meta as Record<string, unknown>
++    if (typeof meta.output !== 'string') return null
++    const exitCode = typeof meta.exitCode === 'number' && Number.isInteger(meta.exitCode) ? meta.exitCode : undefined
++    return {
++      copy,
++      card: {
++        cwd,
++        output: meta.output,
++        exitCode,
++        signal: exitCode === undefined && typeof meta.signal === 'string' ? meta.signal : undefined,
++        running: false,
++      },
++    }
++  }
+   const output = singleResultText(block)
+   if (output === undefined) return null
+   const status = call.kind === 'terminal-send' ? { output } : parseExitStatus(output)
+diff --git a/packages/client/ui-trajectory/src/client/layout.ts b/packages/client/ui-trajectory/src/client/layout.ts
+--- a/packages/client/ui-trajectory/src/client/layout.ts
++++ b/packages/client/ui-trajectory/src/client/layout.ts
+@@ -1115,6 +1115,14 @@
+     const args = JSON.parse(argsRaw) as unknown
+     if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
+       const record = args as Record<string, unknown>
++      if (record._codex_native === true) {
++        return {
++          toolName: name,
++          text: typeof record.description === 'string' && record.description.trim() !== ''
++            ? record.description.trim() : name,
++          ...typeof record.input === 'string' ? { previewMarkdown: record.input } : {},
++        }
++      }
+       if (name === 'exec' && typeof record.input === 'string') {
+         return {
+           text: typeof record.description === 'string' && record.description.trim() !== ''

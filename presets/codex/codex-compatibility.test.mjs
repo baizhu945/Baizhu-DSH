@@ -56,7 +56,9 @@ import {
 import { apply as applyCodexWebSearch, parseResponseBody, parseResponseEnvelope, requestCodexSearchForTest, searchCommands } from './codex-web-search.mjs'
 import { apply as applyCodexPermissions, CODEX_PROFILES, commonDirectory, normalizePermissionRequest } from './codex-permissions.mjs'
 
-const agentComposition = readFileSync(new URL('./agent.cordis.yml', import.meta.url), 'utf8')
+// Legacy emulation regressions remain useful, but native runtime isolation is
+// tested in codex-native.test.mjs. This composition is no longer enabled.
+const agentComposition = readFileSync(new URL('./agent.compat.cordis.yml', import.meta.url), 'utf8')
 
 const V2_NAMES_FOR_TEST = ['collaboration__spawn_agent', 'collaboration__send_message', 'collaboration__followup_task', 'collaboration__wait_agent', 'collaboration__interrupt_agent', 'collaboration__list_agents']
 const V1_NAMES_FOR_TEST = ['multi_agent_v1__spawn_agent', 'multi_agent_v1__send_input', 'multi_agent_v1__resume_agent', 'multi_agent_v1__wait_agent', 'multi_agent_v1__close_agent']

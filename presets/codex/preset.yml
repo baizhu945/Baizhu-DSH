@@ -1,3 +1,3 @@
 name: Codex Mode
-description: 贴近当前 Codex CLI 的本地编码 Agent：官方 catalog 驱动的 exec Code Mode、unified exec、完整 apply_patch、Plan、图片、V1/V2 多代理和 Responses Lite web.run；Skills 严格按所选官方模型的能力开关暴露。主机仍掌管最终权限。
+description: 原生官方 Codex 核心（固定 GitHub HEAD）：模型指令、freeform 工具、Code Mode、沙箱、Skills、子代理与压缩由官方实现；DSH 只桥接用户输入、审批与可读卡片。权限仅作用于本 Codex 会话，自定义上下文长度保留。
 order: 2
