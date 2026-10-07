@@ -1,6 +1,9 @@
-{ dsh, pkgs, lib, ... }:
+{ dsh, ... }:
 
 let
+  pkgs = import ./pinned-nixpkgs.nix { };
+  lib = pkgs.lib;
+
   inherit (lib)
     concatStringsSep
     lessThan
@@ -362,4 +365,9 @@ in
   _module.args.dshDesktopRuntime = dshDesktopRuntime;
 
   home.packages = [ dshDesktop ];
+  home.file.".local/share/dsh-nix-build-inputs/desktop".source = import ./keep-build-inputs.nix {
+    inherit pkgs;
+    name = "dsh-desktop";
+    packages = [ dshDesktopRuntime ];
+  };
 }

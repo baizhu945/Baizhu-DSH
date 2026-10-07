@@ -1,4 +1,4 @@
-{ pkgs, lib ? pkgs.lib }:
+{ pkgs ? import ../../pinned-nixpkgs.nix { }, lib ? pkgs.lib }:
 
 # Private preset runtime, not an overlay or a replacement for pkgs.codex.
 # Based on nixpkgs' codex recipe. Use upstream release-prepared source:
@@ -124,7 +124,11 @@ pkgs.rustPlatform.buildRustPackage (finalAttrs: {
     runHook postInstallCheck
   '';
 
-  passthru = { inherit rev v8Version runtimeVersion; };
+  passthru = {
+    inherit rev v8Version runtimeVersion;
+    # Retained by the preset's Home Manager build-input link farm.
+    buildSources = [ v8Archive v8Binding ];
+  };
   meta = {
     description = "Pinned upstream Codex CLI/app-server and code-mode host for the Codex preset";
     homepage = "https://github.com/openai/codex";

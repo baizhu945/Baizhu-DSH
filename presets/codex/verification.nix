@@ -1,4 +1,4 @@
-{ pkgs ? import <nixpkgs> {} }:
+{ pkgs ? import ../../pinned-nixpkgs.nix { } }:
 let
   runtime = import ./codex-runtime.nix { inherit pkgs; };
   # Independent upstream baseline: identical source/dependencies, without the

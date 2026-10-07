@@ -1,6 +1,9 @@
-{ config, pkgs, lib, dshTui, ... }:
+{ config, lib, dshTui, ... }:
 
 let
+  pkgs = import ./pinned-nixpkgs.nix { };
+  runtimePath = import ./runtime-path.nix { inherit pkgs; };
+
   # deepseek-harness dsh-v0.2.0-rc.2 (2026-09-29)
   dshSrc = pkgs.fetchFromGitHub {
     owner = "deepseek-ai";
@@ -141,10 +144,17 @@ let
     meta = {
       description = "DeepSeek Harness — plugin-based agent harness (everything is a plugin)";
       homepage = "https://github.com/deepseek-ai/deepseek-harness";
-      license = lib.licenses.mit;
+      license = pkgs.lib.licenses.mit;
       mainProgram = "dsh";
     };
   };
+
+  # Keep PATH isolation outside the full source build, so adding the private
+  # launcher does not itself recompile the CLI or Desktop runtime.
+  dshLauncher = pkgs.writeShellScriptBin "dsh" ''
+    export PATH="${runtimePath}:$PATH"
+    exec ${dsh}/bin/dsh "$@"
+  '';
 
   # Files copied by dshPlugins rather than linked through home.file. The
   # previous manifest lets activation remove only files it owned when a
@@ -162,26 +172,23 @@ in
   _module.args.dsh = dsh;
 
   imports = [
-    ./skills.nix
     ./presets/codex/dsh-codex.nix
     ./tui.nix
+   
     # Official Electron Desktop, packaged against the same immutable runtime above.
     ./desktop.nix
   ];
 
   home.packages = [
-    dsh
-    # dsh 运行时依赖(必须):
-    pkgs.nodejs_22 # dsh 子进程/spawn helper 需要 node 在 PATH
-    pkgs.pnpm_11  # TUI doctor/插件管理器的 profile 包操作使用同一主版本
-    pkgs.ripgrep   # dsh-tool-fs-search 通过 ctx.subprocess 调用 rg
-    pkgs.bubblewrap # dsh sandbox-local 的 Linux 沙箱后端(workspace-write/read-only 模式需要;
-                    # 探测方式:spawnSync('bwrap', ...);缺它则报 "no sandbox backend usable")
-    pkgs.curl       # dsh-web.sh 的 HTTP ready/token 检测
+    dshLauncher
+    # Generic tools are private launcher dependencies, not global profile
+    # packages: a later channel update must not introduce binary collisions.
 
     # 便捷启动(生命周期与浏览器窗口绑定,脚本主体见 ./dsh-web.sh):
     # 用法:dsh-web [port]  (默认 3080;浏览器可用 DSH_BROWSER 覆盖)
-    (pkgs.writeShellScriptBin "dsh-web" (builtins.readFile ./dsh-web.sh))
+    (pkgs.writeShellScriptBin "dsh-web" (''
+      export PATH="${dsh}/bin:${runtimePath}:$PATH"
+    '' + builtins.readFile ./dsh-web.sh))
   ];
 
   home.file = {
@@ -190,6 +197,12 @@ in
     # Keep build-only pnpm stores in the Home Manager generation closure so GC
     # does not discard them while the installed DSH packages remain in use.
     ".local/share/dsh-nix-pnpm-deps/dsh".source = dshPnpmDeps;
+    ".local/share/dsh-nix-build-inputs/nixpkgs".source = pkgs.path;
+    ".local/share/dsh-nix-build-inputs/cli".source = import ./keep-build-inputs.nix {
+      inherit pkgs;
+      name = "dsh-cli";
+      packages = [ dsh dshPnpmDeps ];
+    };
 
     ".dsh/profiles/web/plugins/confirm-writes.mjs".source = ./profiles/web/plugins/confirm-writes.mjs;
 

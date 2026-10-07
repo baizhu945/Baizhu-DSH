@@ -1,6 +1,9 @@
-{ config, pkgs, lib, ... }:
+{ config, lib, ... }:
 
 let
+  pkgs = import ./pinned-nixpkgs.nix { };
+  runtimePath = import ./runtime-path.nix { inherit pkgs; };
+
   # Pin the upstream release and its submodules. GitHub source archives omit
   # submodule contents; materialize them below before fetching pnpm deps.
   # v0.12.0 embeds OAuth and supports both dsh 0.2.0 release candidates.
@@ -381,10 +384,12 @@ let
   '';
 
   dshTuiLauncher = pkgs.writeShellScriptBin "dsh-tui" ''
+    export PATH="${runtimePath}:$PATH"
     exec ${pkgs.nodejs_22}/bin/node ${dshTui}/package/bin/dsh-tui.js "$@"
   '';
 
   dstLauncher = pkgs.writeShellScriptBin "dst" ''
+    export PATH="${runtimePath}:$PATH"
     exec ${pkgs.nodejs_22}/bin/node ${dshTui}/package/bin/dsh-tui.js "$@"
   '';
 in
@@ -401,6 +406,12 @@ in
   home.file = {
     ".local/share/dsh-nix-pnpm-deps/dsh-std".source = dshStdPnpmDeps;
     ".local/share/dsh-nix-pnpm-deps/dsh-tui".source = dshTuiPnpmDeps;
+    ".local/share/dsh-nix-build-inputs/tui".source = import ./keep-build-inputs.nix {
+      inherit pkgs;
+      name = "dsh-tui";
+      packages = [ dshTui dshStdPnpmDeps dshTuiPnpmDeps ];
+      extraInputs = [ dshTuiSrc dshEcosystemSpecSrc dshStdSrc ];
+    };
   };
 
   # This is a real file deployment rather than a home.file symlink.  The TUI

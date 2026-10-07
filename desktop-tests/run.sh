@@ -58,9 +58,9 @@ fi
 
 # Actual Xvfb invocation (merely installing xvfb-run does not isolate DISPLAY).
 # wm-close.py sends WM_DELETE_WINDOW directly; no window-manager destruction shortcut.
-export DSH_TEST_X11_LIBRARY="$(nix-instantiate --eval --raw --expr 'let pkgs = import <nixpkgs> {}; in "${pkgs.libx11}/lib/libX11.so.6"')"
+# shell.nix supplies the pinned X11 library and test tools, never the channel.
 echo "== electron-smoke (xvfb)"
-if nix-shell -p xvfb-run xdotool python3 --run "exec xvfb-run -a env DSH_DESKTOP_TEST_XVFB=1 '$DSH_DESKTOP_HOST_NODE' --expose-internals '$HERE/electron-smoke.mjs'" \
+if nix-shell "$HERE/shell.nix" --run "exec xvfb-run -a env DSH_DESKTOP_TEST_XVFB=1 '$DSH_DESKTOP_HOST_NODE' --expose-internals '$HERE/electron-smoke.mjs'" \
     >"$ARTIFACTS/electron-smoke.log" 2>&1; then
   tail -n 20 "$ARTIFACTS/electron-smoke.log"
 else

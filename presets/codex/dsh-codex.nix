@@ -1,6 +1,9 @@
-{ pkgs, lib, ... }:
+{ ... }:
 
 let
+  pkgs = import ../../pinned-nixpkgs.nix { };
+  lib = pkgs.lib;
+
   # The runtime and catalog share immutable official release source. This is a private
   # dependency of this preset, not a pkgs overlay or a global Codex upgrade.
   codexRuntime = import ./codex-runtime.nix { inherit pkgs lib; };
@@ -52,6 +55,12 @@ let
 in
 {
   home.file = {
+    ".local/share/dsh-nix-build-inputs/codex".source = import ../../keep-build-inputs.nix {
+      inherit pkgs;
+      name = "dsh-codex";
+      packages = [ codexRuntime codexRuntime.cargoDeps ];
+      extraInputs = [ codexModelsSource ];
+    };
     ".dsh/.agent-presets/codex/agent.cordis.yml".source = codexComposition;
     ".dsh/.agent-presets/codex/preset.yml".source = ./preset.yml;
     ".dsh/.agent-presets/codex/native".source = codexNative;
