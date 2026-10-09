@@ -1,0 +1,6 @@
+# Appended to the exact standard declaration from the immutable host SDK.
+# This is a bootstrap data row, NOT @deepseek-ai/dsh-mcp. Registration is eager;
+# rea-runtime.mjs must defer all subprocess work until an REA Agent needs it.
+- id: rea-bootstrap
+  name: './runtime/rea-runtime.mjs'
+  config: @systemPackageConfigJson@

@@ -1,4 +1,4 @@
-{ pkgs ? import ../../pinned-nixpkgs.nix { }, lib ? pkgs.lib }:
+{ pkgs ? (import ../../environment.nix { }).pkgs, lib ? pkgs.lib }:
 
 # Private preset runtime, not an overlay or a replacement for pkgs.codex.
 # Based on nixpkgs' codex recipe. Use upstream release-prepared source:

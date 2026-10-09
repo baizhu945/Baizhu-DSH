@@ -1,7 +1,7 @@
 { dsh, ... }:
 
 let
-  pkgs = import ./pinned-nixpkgs.nix { };
+  inherit (import ./environment.nix { }) pkgs keepBuildInputs;
   lib = pkgs.lib;
 
   inherit (lib)
@@ -365,7 +365,7 @@ in
   _module.args.dshDesktopRuntime = dshDesktopRuntime;
 
   home.packages = [ dshDesktop ];
-  home.file.".local/share/dsh-nix-build-inputs/desktop".source = import ./keep-build-inputs.nix {
+  home.file.".local/share/dsh-nix-build-inputs/desktop".source = keepBuildInputs {
     inherit pkgs;
     name = "dsh-desktop";
     packages = [ dshDesktopRuntime ];

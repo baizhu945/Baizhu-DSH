@@ -1,8 +1,7 @@
 { config, lib, ... }:
 
 let
-  pkgs = import ./pinned-nixpkgs.nix { };
-  runtimePath = import ./runtime-path.nix { inherit pkgs; };
+  inherit (import ./environment.nix { }) pkgs runtimePath keepBuildInputs;
 
   # Pin the upstream release and its submodules. GitHub source archives omit
   # submodule contents; materialize them below before fetching pnpm deps.
@@ -406,7 +405,7 @@ in
   home.file = {
     ".local/share/dsh-nix-pnpm-deps/dsh-std".source = dshStdPnpmDeps;
     ".local/share/dsh-nix-pnpm-deps/dsh-tui".source = dshTuiPnpmDeps;
-    ".local/share/dsh-nix-build-inputs/tui".source = import ./keep-build-inputs.nix {
+    ".local/share/dsh-nix-build-inputs/tui".source = keepBuildInputs {
       inherit pkgs;
       name = "dsh-tui";
       packages = [ dshTui dshStdPnpmDeps dshTuiPnpmDeps ];

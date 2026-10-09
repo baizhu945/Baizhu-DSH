@@ -1,8 +1,7 @@
 { config, lib, dshTui, ... }:
 
 let
-  pkgs = import ./pinned-nixpkgs.nix { };
-  runtimePath = import ./runtime-path.nix { inherit pkgs; };
+  inherit (import ./environment.nix { }) pkgs runtimePath keepBuildInputs;
 
   # deepseek-harness dsh-v0.2.0-rc.2 (2026-09-29)
   dshSrc = pkgs.fetchFromGitHub {
@@ -173,6 +172,7 @@ in
 
   imports = [
     ./presets/codex/dsh-codex.nix
+    ./rea.nix
     ./tui.nix
    
     # Official Electron Desktop, packaged against the same immutable runtime above.
@@ -198,7 +198,7 @@ in
     # does not discard them while the installed DSH packages remain in use.
     ".local/share/dsh-nix-pnpm-deps/dsh".source = dshPnpmDeps;
     ".local/share/dsh-nix-build-inputs/nixpkgs".source = pkgs.path;
-    ".local/share/dsh-nix-build-inputs/cli".source = import ./keep-build-inputs.nix {
+    ".local/share/dsh-nix-build-inputs/cli".source = keepBuildInputs {
       inherit pkgs;
       name = "dsh-cli";
       packages = [ dsh dshPnpmDeps ];

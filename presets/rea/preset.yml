@@ -1,0 +1,4 @@
+id: rea
+name: REA
+order: 6
+description: Standard DSH coding tools with an explicitly selected, lazily connected REA 6.1 reverse-engineering MCP server.
