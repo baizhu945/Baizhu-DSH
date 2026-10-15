@@ -167,6 +167,7 @@ export async function mountHost(runtime, boundary, budget, ledger, auth, live, {
     await plugin('@deepseek-ai/dsh-storage-domain', { backend: 'json' })
     await plugin('@deepseek-ai/dsh-workspace')
     await plugin('@deepseek-ai/dsh-fs-local')
+    await plugin('@deepseek-ai/dsh-working-directory')
     await plugin('@deepseek-ai/dsh-file-reference-local')
     await plugin('@deepseek-ai/dsh-typert-registry')
     await plugin('@deepseek-ai/dsh-commands')

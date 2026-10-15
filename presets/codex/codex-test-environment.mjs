@@ -1,5 +1,5 @@
 /** Offline test inputs; never guess an obsolete store hash or a /tmp checkout. */
-import { realpathSync, existsSync } from 'node:fs'
+import { realpathSync, existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 
@@ -9,13 +9,28 @@ export const installedBinary = path.join(preset, 'bin/codex')
 export const installedCatalog = path.join(preset, 'codex-models.json')
 export const requireIntegration = process.env.DSH_CODEX_REQUIRE_NATIVE_TESTS === '1'
 
+/** Follow literal Nix launcher execs without executing shell code or guessing store hashes. */
+export function dshRuntimeFromBinary(binary) {
+  const visited = new Set()
+  for (let depth = 0; depth < 8; depth++) {
+    const resolved = realpathSync(binary)
+    if (visited.has(resolved)) break
+    visited.add(resolved)
+    const root = path.dirname(path.dirname(resolved))
+    if (existsSync(path.join(root, 'packages/core/agent-loop'))) return root
+    const forwarded = /^exec\s+["']?(\/[^\s"']+\/bin\/dsh)["']?(?:\s|$)/m.exec(readFileSync(resolved, 'utf8'))?.[1]
+    if (!forwarded) break
+    binary = forwarded
+  }
+  throw new Error('DSH launcher does not identify a runtime directory')
+}
+
 export function installedDshRoot() {
   const candidates = [path.join(home, '.nix-profile/bin/dsh'), '/run/current-system/sw/bin/dsh',
     ...String(process.env.PATH ?? '').split(path.delimiter).filter(Boolean).map(directory => path.join(directory, 'dsh'))]
   for (const binary of candidates) {
     try {
-      const root = path.dirname(path.dirname(realpathSync(binary)))
-      if (existsSync(path.join(root, 'packages/core/agent-loop'))) return root
+      return dshRuntimeFromBinary(binary)
     } catch {}
   }
   throw new Error('Cannot locate installed DSH. Supply DSH_CODEX_TEST_DSH_ROOT or run bash verify.sh with a DSH runtime directory.')

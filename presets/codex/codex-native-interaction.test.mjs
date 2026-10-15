@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createRequire } from 'node:module'
+import { installedDshRoot, requireIntegration } from './codex-test-environment.mjs'
 import {
   CODEX_NATIVE_PROFILES, nativePolicyFor, handleNativeRequest,
   handleNativeAsyncQuestions, nativeUserInput,
@@ -448,13 +449,14 @@ test('auth refresh is only an injected callback, produces exact official respons
 })
 
 test('installed DSH ApprovalService + Cordis preserve identity, audit, and host never on a local native facade', async t => {
-  const anchor = '/nix/store/bd2xniw1ymxc545042qy39p67wzgax0a-dsh-0.2.0-rc.2/packages/interaction/user-approval/'
   let ApprovalService, Context
   try {
-    ;({ ApprovalService } = await import(`${anchor}lib/types/index.js`))
-    const require = createRequire(`${anchor}package.json`)
+    const root = process.env.DSH_CODEX_TEST_DSH_ROOT ?? installedDshRoot()
+    const require = createRequire(`${root}/apps/cli/package.json`)
+    ;({ ApprovalService } = await import(require.resolve('@deepseek-ai/dsh-user-approval')))
     ;({ Context } = await import(require.resolve('@deepseek-ai/cordis')))
   } catch (error) {
+    if (requireIntegration) throw error
     if (error.code === 'ERR_MODULE_NOT_FOUND' || error.code === 'MODULE_NOT_FOUND') return t.skip('Installed DSH store path is unavailable on this machine')
     throw error
   }
@@ -741,13 +743,14 @@ test('an answerer cannot mutate private offered labels to invent a native answer
 })
 
 test('installed DSH UserQuestionService enforces exact live root and cancellation stays bounded even if answerer ignores it', async t => {
-  const anchor = '/nix/store/bd2xniw1ymxc545042qy39p67wzgax0a-dsh-0.2.0-rc.2/packages/interaction/user-questions/'
   let UserQuestionService, Context
   try {
-    ;({ UserQuestionService } = await import(`${anchor}lib/types/index.js`))
-    const require = createRequire(`${anchor}package.json`)
+    const root = process.env.DSH_CODEX_TEST_DSH_ROOT ?? installedDshRoot()
+    const require = createRequire(`${root}/apps/cli/package.json`)
+    ;({ UserQuestionService } = await import(require.resolve('@deepseek-ai/dsh-user-questions')))
     ;({ Context } = await import(require.resolve('@deepseek-ai/cordis')))
   } catch (error) {
+    if (requireIntegration) throw error
     if (error.code === 'ERR_MODULE_NOT_FOUND' || error.code === 'MODULE_NOT_FOUND') return t.skip('Installed DSH store path is unavailable on this machine')
     throw error
   }

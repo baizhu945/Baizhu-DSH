@@ -1,5 +1,28 @@
 # Opt-in native live validation
 
+## DSH 0.2.1-alpha.2 update receipt — 2026-10-13
+
+The updated host passed 387 active native tests with no failures/skips, including
+real authless native shell/patch/Code Mode execution, the new UI argument view,
+same-thread directory changes, strict JSONL/cold controller restore and approval
+identity. Real native/ptc host registration views plus late global tools retain
+the scoped observer and cannot add DSH execution capabilities to native Codex.
+Workspace Write preserves the original runtime workspace roots and rejects
+navigation outside its granted roots or into protected metadata (including a
+worktree's external gitdir); Read Only and Full Access follow live cwd normally.
+
+The live preflight passed without account/model activity. A single authorized
+instructions probe passed genuine existing-account login, GPT-6 Luna routing,
+global instruction marker delivery and actual JSONL admission: one generation,
+12167 observed native tokens, zero original-provider calls and zero native tool
+executions. Its limits were two generations, 24000 tokens and 120 seconds.
+Receipt: `work/dsh-update/compat-native-live-instructions-final.log`;
+private synthetic artifacts: `/tmp/dsh-codex-live-SfsSzd`.
+The preceding 8192-token attempt stopped at the first 11956-token usage report;
+it was not counted as a complete live pass. No tools/all live suite was rerun.
+Independent patched-vs-bare Codex binary comparisons were not repeated: the
+official Codex runtime source/version/patch are unchanged in this host update.
+
 `verify.sh` and `codex-*.test.mjs` **never run this harness**. Ownership here is limited to `live-native-host.mjs`, `live-support.mjs`, and this document; production bridge/Core/Nix changes belong to the parent.
 
 ## CLI and authorization
@@ -145,10 +168,12 @@ Model-level observations that are recorded but never used as pass criteria: whet
 
 `mirrorUserInstructions` copies the DSH user-global instruction file into the private native
 home so the official core loads it through its own native path. Candidates follow DSH exactly
-(`AGENTS.md`, `CLAUDE.md`, `AGENTS.local.md`, `CLAUDE.local.md`, concatenated in that order with
-trimmed duplicates collapsed), because DSH concatenates rather than overriding. `~/.codex` is used
+(`.dsh/AGENTS.md` then `$DSH_AGENTS_HOME/AGENTS.md`, default `~/.agents`, with
+trimmed duplicates collapsed). Project-only CLAUDE/.local candidates are not
+promoted to that global group. `~/.codex` is used
 only when DSH has no such file, an explicitly configured `globalInstructionsHome` keeps native
-override precedence, symlinked or oversized files mirror nothing (with a warning) rather than a
+override precedence. Immutable Home Manager store symlinks are supported;
+other symlinked or oversized files mirror nothing rather than a
 partial or escaping prompt, and source removal deletes the mirror. Project `AGENTS.md` discovery
 stays entirely upstream from the session cwd. Regression: `native-user-instructions.test.mjs`.
 Live proof (`--suite instructions`, receipt `/tmp/codex-real-luna-private-instructions-3.log`):

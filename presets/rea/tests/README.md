@@ -1,12 +1,22 @@
 # Independent REA preset acceptance
 
-Current source pin: REA 6.1.0, 138 tools / 6 prompts. `catalog.mjs` records
+Current source pin: REA 6.4.0 at a2d8b94dd50dab8d966239dd63ab84718aa8b4b4,
+187 tools / 6 prompts. `catalog.mjs` records
 all exact canonical ordered names; the package install gate checks names/effects
 and upstream Ghidra budget parsing/forwarding. Changes from 5.0.0: add
 inspect_binary_layout, inspect_recorded_crash, inspect_evm_interface,
 observe_native_calls, trace_dylib_resolution; remove set_current_document.
 The 134-tool logs and 5.0.0 store paths below are retained historical evidence,
-not fresh 6.1.0 validation. New package and exact-SDK fixture runs are pending.
+not fresh 6.4.0 validation. New package and exact-SDK fixture runs are pending.
+The archived 6.1 schema patch is not applied: upstream canonical patterns fix
+ObjC/NUL/lookahead portability. The live schema gate still scans every input
+and output pattern with JavaScript Unicode and Rust engines and compares
+affected wire constraints with canonical validation, including newline cases.
+The root-path producer now rejects newline-separated normalization loopholes.
+Real acceptance requests complete JS/EVM payloads explicitly and exercises the
+new target-free inspect_analysis_view retained EVM bytecode paging workflow.
+Real Codex compatibility remains a parent-run deployment gate; JS/Rust alone
+does not establish that client integration.
 
 Scope: only this `tests/` directory. No Home-Manager switch, live profile write,
 Codex modification, provider installation, REA setup or paid model call.
@@ -63,7 +73,7 @@ Prompt, section metadata and generated TS/Python SDK remain exact comparisons.
 
 - `host-smoke.mjs`: each actual non-REA preset starts clean twice, all tools,
   prompt, schema, TS/Python SDK and complete first requests match.
-- `fixture-smoke.mjs`: checks our genuine newline stdio MCP138 fixture against
+- `fixture-smoke.mjs`: checks our genuine newline stdio MCP187 fixture against
   the installed actual MCP client, readonly DSH pipeline and physical cleanup.
   This is **not** a claim about the new lazy bootstrap.
 - `import-guard.mjs`: monkeypatches Node's public file/probe/process operations
@@ -74,7 +84,7 @@ Prompt, section metadata and generated TS/Python SDK remain exact comparisons.
   composition constraints, ordinary headless unchanged; immutable Codex source
   SHA-256 inventory.
 - `fixture-tests.mjs`: every non-REA preset absent-vs-registered-bootstrap full
-  equality, cold roster/lease, selected root first pre-step, 138 tools/first
+  equality, cold roster/lease, selected root first pre-step, 187 tools/first
   request and readonly call, repeat-turn reuse, parallel-root isolation,
   physical cleanup, blank warm/cold REA-to-standard recomposition, first-turn
   selection lock, public `applyChildComposition`/toolFilter, default child
@@ -84,7 +94,7 @@ Prompt, section metadata and generated TS/Python SDK remain exact comparisons.
   actual PermissionPresetService Read Only deny / Full Access allow / Workspace
   ask. Upstream MCP deliberately uses exclusive scheduling rather than treating
   readOnlyHint as a parallel-execution grant.
-- `real-acceptance.mjs`: selected actual REA catalog138, static JS fixture graph,
+- `real-acceptance.mjs`: selected actual REA catalog187, static JS fixture graph,
   tiny C fixture compiled by the preinstalled `cc`, Ghidra native analysis and
   pseudocode, all through actual DSH ToolRuntime. JDK/Ghidra/Chromium paths are
   read from deployed Config, never guessed. A fake model alone supplies the

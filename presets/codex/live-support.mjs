@@ -6,6 +6,7 @@ import os from 'node:os'
 import { createRequire } from 'node:module'
 import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
+import { dshRuntimeFromBinary } from './codex-test-environment.mjs'
 
 export const MODEL = 'gpt-6-luna'
 export const PROVIDER = 'openai-codex'
@@ -126,7 +127,7 @@ export async function discover(options, original) {
   for (const name of ['dsh', 'bwrap', 'bash', 'env', 'printf', 'git', 'patch', 'sleep', 'head', 'test', 'nix-store'])
     bins[name] = await binary(name, original.PATH)
   bins.node = await fs.realpath(process.execPath)
-  const dsh = await fs.realpath(options.dshRoot ?? path.dirname(path.dirname(bins.dsh)))
+  const dsh = await fs.realpath(options.dshRoot ?? dshRuntimeFromBinary(bins.dsh))
   const canonicalUserHome = path.resolve(original.HOME || os.homedir())
   const canonicalHome = path.resolve(original.DSH_HOME || path.join(canonicalUserHome, '.dsh'))
   // Canonical credential pathname is recorded only in memory, never stat/read in preflight.

@@ -1,6 +1,8 @@
+diff --git a/packages/boot/app-boot/src/profile-resolution/resolver.ts b/packages/boot/app-boot/src/profile-resolution/resolver.ts
+index 85c53066..0ea6a6ec 100644
 --- a/packages/boot/app-boot/src/profile-resolution/resolver.ts
 +++ b/packages/boot/app-boot/src/profile-resolution/resolver.ts
-@@ -612,18 +612,23 @@
+@@ -611,18 +611,23 @@ class ResolutionRouter {
  
  function internalModules(): InternalModules {
    const require = createRequire(import.meta.url)
@@ -30,3 +32,99 @@
      defaultResolve(
        specifier: string,
        context: { parentURL?: string; conditions?: readonly string[] },
+diff --git a/packages/boot/app-boot/tests/profile-resolution.spec.ts b/packages/boot/app-boot/tests/profile-resolution.spec.ts
+index 82cf24b0..4eaff86c 100644
+--- a/packages/boot/app-boot/tests/profile-resolution.spec.ts
++++ b/packages/boot/app-boot/tests/profile-resolution.spec.ts
+@@ -29,6 +29,11 @@ import {
+ } from '../src/profile.ts'
+ import { registerHooksThreadStacks } from './hooks-thread-stack.ts'
+ 
++const runtimeRequire = createRequire(import.meta.url)
++const requireBuiltin: (id: string) => unknown = process.execArgv.includes('--expose-internals')
++  ? id => runtimeRequire(id)
++  : (runtimeRequire('node-addon-require-builtin') as { requireBuiltin(id: string): unknown }).requireBuiltin
++
+ const roots: string[] = []
+ const registrations: RuntimeInterception[] = []
+ 
+@@ -76,10 +81,7 @@ function conditionalPkg(dir: string, name: string, importMarker: number, require
+ }
+ 
+ async function importFrom(specifier: string, parent: string): Promise<Record<string, unknown>> {
+-  const addon = createRequire(import.meta.url)('node-addon-require-builtin') as {
+-    requireBuiltin(id: string): unknown
+-  }
+-  const loader = addon.requireBuiltin('internal/modules/esm/loader') as {
++  const loader = requireBuiltin('internal/modules/esm/loader') as {
+     getOrInitializeCascadedLoader(): {
+       import(specifier: string, parent: string, attributes: ImportAttributes): Promise<Record<string, unknown>>
+     }
+@@ -90,10 +92,7 @@ async function importFrom(specifier: string, parent: string): Promise<Record<str
+ function resolveFrom(
+   specifier: string, parent: string | undefined, attributes: ImportAttributes = {}, skipSyncHooks = false,
+ ): string {
+-  const addon = createRequire(import.meta.url)('node-addon-require-builtin') as {
+-    requireBuiltin(id: string): unknown
+-  }
+-  const loader = addon.requireBuiltin('internal/modules/esm/loader') as {
++  const loader = requireBuiltin('internal/modules/esm/loader') as {
+     getOrInitializeCascadedLoader(): {
+       getOrCreateModuleJob?: unknown
+       resolveSync(
+@@ -853,8 +852,7 @@ describe('runtime resolution', { concurrent: false }, () => {
+     expect(resolveFrom('fs', parent)).toBe('node:fs')
+     expect(resolveFrom('node:path', pathToFileURL(join(f.root, 'outside.mjs')).href, {}, true)).toBe('node:path')
+ 
+-    const addon = createRequire(import.meta.url)('node-addon-require-builtin') as { requireBuiltin(id: string): unknown }
+-    const internal = addon.requireBuiltin('internal/modules/cjs/loader') as {
++    const internal = requireBuiltin('internal/modules/cjs/loader') as {
+       Module: {
+         _resolveFilename(
+           request: string, parent: { filename?: string } | undefined, isMain: boolean,
+@@ -1363,8 +1361,7 @@ describe('runtime resolution', { concurrent: false }, () => {
+     registrations.push(registration)
+     expect(await importFrom('conditional-lib', pathToFileURL(join(f.profile.dir, 'entry.mjs')).href))
+       .toMatchObject({ marker: 21 })
+-    const addon = createRequire(import.meta.url)('node-addon-require-builtin') as { requireBuiltin(id: string): unknown }
+-    const internal = addon.requireBuiltin('internal/modules/cjs/loader') as {
++    const internal = requireBuiltin('internal/modules/cjs/loader') as {
+       Module: {
+         new(id?: string): { filename?: string; paths?: string[] }
+         _nodeModulePaths(path: string): string[]
+@@ -1393,8 +1390,7 @@ describe('runtime resolution', { concurrent: false }, () => {
+     conditionalPkg(f.installed, 'conditional-lib', 11, 12)
+     const registration = installRuntimeInterception(await resolutionOf(f))
+     registrations.push(registration)
+-    const addon = createRequire(import.meta.url)('node-addon-require-builtin') as { requireBuiltin(id: string): unknown }
+-    const internal = addon.requireBuiltin('internal/modules/cjs/loader') as {
++    const internal = requireBuiltin('internal/modules/cjs/loader') as {
+       Module: {
+         new(id?: string): { filename?: string; paths?: string[] }
+         _nodeModulePaths(path: string): string[]
+@@ -1420,8 +1416,7 @@ describe('runtime resolution', { concurrent: false }, () => {
+     const f = fixture()
+     const registration = installRuntimeInterception(await resolutionOf(f))
+     registrations.push(registration)
+-    const addon = createRequire(import.meta.url)('node-addon-require-builtin') as { requireBuiltin(id: string): unknown }
+-    const internal = addon.requireBuiltin('internal/modules/cjs/loader') as {
++    const internal = requireBuiltin('internal/modules/cjs/loader') as {
+       Module: {
+         new(id?: string): { children: unknown[]; filename?: string; paths?: string[] }
+         _nodeModulePaths(path: string): string[]
+diff --git a/vitest.shared.ts b/vitest.shared.ts
+index 7c6ca2be..197ed80f 100644
+--- a/vitest.shared.ts
++++ b/vitest.shared.ts
+@@ -6,7 +6,10 @@ const decoratorSyntax = /^\s*@[A-Za-z_$][\w$]*/m
+  * Worker arguments that keep process-wide Web Storage from shadowing jsdom storage.
+  * Node lists the positive spelling in `allowedNodeEnvironmentFlags` for this negatable flag.
+  */
+-export const vitestExecArgv = process.allowedNodeEnvironmentFlags.has('--webstorage') ? ['--no-webstorage'] : []
++export const vitestExecArgv = [
++  ...process.execArgv.filter(argument => argument === '--expose-internals'),
++  ...(process.allowedNodeEnvironmentFlags.has('--webstorage') ? ['--no-webstorage'] : []),
++]
+ 
+ /**
+  * Transform standard TypeScript decorators before Vite's default parser sees source files.

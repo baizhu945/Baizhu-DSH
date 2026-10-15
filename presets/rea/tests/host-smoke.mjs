@@ -2,6 +2,14 @@ import assert from 'node:assert/strict'
 import { temporaryHome, actualContext, discoverNonReaDefinitions, createAgent, snapshot, turn, stableRequest } from './sdk-host.mjs'
 const root = temporaryHome()
 const definitions = discoverNonReaDefinitions()
+const sample = 'Time sampled while preparing turn 1, step 1: 2026-10-13T10:24:59+00:00[UTC]\nBrowser time zone: fixed.\nElapsed: unchanged.'
+const projected = stableRequest({ messages: [
+  { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: sample }] },
+  { role: 'user', source: { kind: 'time-context', sections: [{ name: 'time-context', text: sample }] }, content: [{ type: 'text', text: sample }] },
+] })
+assert.equal(projected.messages[0].content[0].text, sample, 'Do not normalize user-authored text that resembles the context clock')
+assert.equal(projected.messages[1].content[0].text, sample.replace('2026-10-13T10:24:59+00:00[UTC]', '<sampled-request-time>'))
+assert.equal(projected.messages[1].source.sections[0].text, projected.messages[1].content[0].text)
 console.log('Actual installed SDK host; discovered every non-REA preset:', definitions.map(row => row.id).join(', '))
 for (const definition of definitions) {
   const views = [], requests = []

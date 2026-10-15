@@ -163,7 +163,8 @@ if (process.env.DSH_NATIVE_HOST_ISOLATED !== '1') {
     })
     await ctx.plugin(Loader)
     ctx.loader.builtins.group = Group
-    await kit.mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: PRIVATE }, tools: { mode: 'native' } })
+    await kit.mountAgentLoopTestDependencies(ctx, { workingDirectory: true, systemPrompt: { personaPrefix: PRIVATE }, tools: { mode: 'native' } })
+    await ctx.plugin(await module('@deepseek-ai/dsh-tool-working-directory'))
     await ctx.plugin(SandboxPolicy, { mode: 'workspace-write', workspaceRoot: cwd })
     await ctx.plugin(Approval, { policy: 'never' })
     // Native phase: real openai adapter configured with metadata/loopback endpoint only,
@@ -193,6 +194,8 @@ if (process.env.DSH_NATIVE_HOST_ISOLATED !== '1') {
     const { agent } = handle
     const marker = ctx.tools.get('codex_native_observer', agent)
     assert.ok(marker, 'Actual scoped marker must exist')
+    assert.equal(ctx.tools.get('working_directory', agent), undefined, 'New host-global tool remains outside native Codex execution')
+    assert.ok(ctx.tools.get('working_directory'), 'Other DSH agents retain the new host-global tool')
     const headersBefore = structuredClone(originalProviderConfig)
     const turn = async (input, expected) => {
       agent.followup(llm.createUserMessage({ source: { kind: 'user' }, content: [text(input)] }))
@@ -213,10 +216,15 @@ if (process.env.DSH_NATIVE_HOST_ISOLATED !== '1') {
     assert.equal(standardCount, 0, 'No original-provider HTTP in native scope')
     assert.equal(await fs.readFile(path.join(cwd, 'host-native-shell.txt'), 'utf8'), 'HOST_NATIVE_SHELL_OUTPUT\n')
     assert.equal(await fs.readFile(path.join(cwd, 'host-native-patch.txt'), 'utf8'), 'HOST_NATIVE_PATCH_FILE\n')
+    const currentDirectory = path.join(cwd, 'changed-directory')
+    await fs.mkdir(currentDirectory)
+    await ctx.workingDirectory.set(agent, currentDirectory)
+    assert.equal(agent.session.header.cwd, cwd, 'Changing live cwd preserves the original Session project')
     await turn('Follow up on the same official native thread.', 'HOST_NATIVE_FOLLOWUP_COMPLETE')
     assert.equal(nativeCount, 4)
     assert.equal(standardCount, 0)
     assert.ok(JSON.stringify(requests[3].body).includes('HOST_NATIVE_FIRST_COMPLETE'), 'Official native thread preserves its own history')
+    assert.ok(JSON.stringify(requests[3].body).includes(currentDirectory), 'Native turn uses the changed live working directory')
     const log = agent.session.snapshotEvents()
     const results = log.filter(event => event.type === 'tool/result')
     assert.equal(results.length, 2)
@@ -307,6 +315,7 @@ if (process.env.DSH_NATIVE_HOST_ISOLATED !== '1') {
         await plugin('@deepseek-ai/dsh-storage-domain', { backend: 'json' })
         await plugin('@deepseek-ai/dsh-workspace')
         await plugin('@deepseek-ai/dsh-fs-local')
+        await plugin('@deepseek-ai/dsh-working-directory')
         await plugin('@deepseek-ai/dsh-file-reference-local')
         await plugin('@deepseek-ai/dsh-typert-registry')
         await plugin('@deepseek-ai/dsh-commands')
@@ -384,6 +393,7 @@ if (process.env.DSH_NATIVE_HOST_ISOLATED !== '1') {
       })])
     } finally { clearTimeout(timer) }
     const agent = ctx.agents.get(sessionId), log = agent.session.snapshotEvents()
+    await fs.writeFile(path.join(work, 'offline-events.json'), JSON.stringify(log, null, 2))
     assert.equal(log.filter(event => event.type === 'turn/end').at(-1).data.reason.kind, 'completed')
     const calls = log.filter(event => event.type === 'tool/call'), results = log.filter(event => event.type === 'tool/result')
     const ads = log.filter(event => event.type === 'assistant/message' && event.data.message.source.privateNativeObservation)
@@ -456,11 +466,12 @@ async function checkReadableUi(require, work, cwd, log, results) {
     `export { diffCardModel } from ${JSON.stringify(path.join(models, 'diff-card-model.ts'))};`,
   ].join('\n'), resolveDir: DSH, loader: 'ts' }, outfile: bundle, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent' })
   const ui = await importFile(bundle)
+  const { PartialArguments } = await importFile(require.resolve('@deepseek-ai/dsh-util-values'))
   const cards = []
   for (const result of results) {
     const call = log.find(event => event.type === 'tool/call' && event.data.callId === result.data.message.toolCallId)
     const block = { kind: 'tool-result', seq: result.seq, time: result.time, callId: call.data.callId,
-      call: { name: call.data.name, argsRaw: call.data.arguments }, callTime: call.time,
+      call: { name: call.data.name, argsRaw: call.data.arguments }, args: PartialArguments.fromText(call.data.arguments), callTime: call.time,
       content: result.data.message.content, isError: result.data.message.isError, meta: result.data.meta, subCalls: [] }
     const row = ui.toolRowModel(call.data.name, block, cwd)
     const terminal = ui.terminalCardModel(block, cwd)
@@ -513,7 +524,7 @@ async function checkUnmarkedUiParity(esbuild, ui, work, cwd) {
   const previousModels = path.join(beforeRoot, relativeModels)
   await fs.mkdir(previousModels, { recursive: true })
   await fs.symlink(path.join(DSH, 'node_modules'), path.join(beforeRoot, 'node_modules'))
-  for (const filename of ['tool-call-model.ts', 'diff-card-model.ts', 'terminal-card-model.ts', 'raw-tool-call.ts'])
+  for (const filename of ['tool-call-model.ts', 'diff-card-model.ts', 'terminal-card-model.ts', 'raw-tool-call.ts', 'recorded-path.ts'])
     await fs.copyFile(path.join(DSH, relativeModels, filename), path.join(previousModels, filename))
   const patch = await fs.readFile(new URL('./patches/codex-readable-tools.patch', import.meta.url), 'utf8')
   const gateStart = patch.lastIndexOf('diff --git a/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts')
@@ -536,6 +547,7 @@ async function checkUnmarkedUiParity(esbuild, ui, work, cwd) {
     `export { diffCardModel } from ${JSON.stringify(path.join(previousModels, 'diff-card-model.ts'))};`,
   ].join('\n'), resolveDir: beforeRoot, loader: 'ts' }, outfile: bundle, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent' })
   const before = await importFile(bundle)
+  const { PartialArguments } = await importFile(createRequire(path.join(DSH, 'package.json')).resolve('@deepseek-ai/dsh-util-values'))
   const calls = [
     ['bash', { command: 'printf standard', description: 'Standard shell' }],
     ['pwsh', { command: 'Write-Output standard', description: 'Standard pwsh' }],
@@ -552,9 +564,9 @@ async function checkUnmarkedUiParity(esbuild, ui, work, cwd) {
   let cases = 0
   for (const [name, args] of calls) {
     const argsRaw = JSON.stringify(args)
-    const running = { phase: 'start', callId: 'standard-parity', name, argsRaw, turn: 1, step: 1, time: 1, subCalls: [] }
+    const running = { phase: 'start', callId: 'standard-parity', name, argsRaw, args: PartialArguments.fromText(argsRaw), turn: 1, step: 1, time: 1, subCalls: [] }
     const settled = { kind: 'tool-result', seq: 1, time: 2, callId: 'standard-parity', callTime: 1,
-      call: { name, argsRaw }, content: [text('plain standard output')], isError: false, subCalls: [],
+      call: { name, argsRaw }, args: PartialArguments.fromText(argsRaw), content: [text('plain standard output')], isError: false, subCalls: [],
       // Native-looking result metadata alone must NOT turn on the args marker gate.
       meta: { _codex_native: true, output: 'must not override plain output', exitCode: 77 } }
     for (const block of [running, settled, { ...settled, isError: true }]) {

@@ -1,6 +1,6 @@
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
-@@ -78,6 +78,34 @@
+@@ -79,6 +79,34 @@
  /** Error-level console output of the primary window, attached to crash reports. */
  const rendererConsole = new RendererConsoleTail()
  
@@ -35,7 +35,7 @@
  // Platform-conventional logs directory (macOS ~/Library/Logs/<name>, otherwise under userData);
  // set before ready so the first fatal report already resolves under it.
  app.setAppLogsPath()
-@@ -149,6 +177,16 @@
+@@ -150,6 +178,16 @@
  }
  
  function runtimeResources(): RuntimeResources {
@@ -52,7 +52,7 @@
    const development = !app.isPackaged
    const node = process.execPath
    const nodeBin = development ? join(app.getAppPath(), 'scripts', 'node-bin') : join(process.resourcesPath, 'runtime', 'bin')
-@@ -226,6 +264,10 @@
+@@ -227,6 +265,10 @@
        visualEffectState: 'active' as const,
        backgroundColor: '#00000000',
      } : {}),
@@ -63,7 +63,7 @@
      webPreferences: {
        preload,
        nodeIntegration: false,
-@@ -318,10 +360,10 @@
+@@ -320,10 +362,10 @@
    const updateJournal = journalDirectory === undefined ? undefined : new DesktopUpdateJournal(journalDirectory, app.getVersion())
    const resources = runtimeResources()
    const paths = resolveDesktopPaths()
@@ -78,7 +78,7 @@
    const activeProject = paths.profile
    const manager = new DesktopProjectManager(paths, resources)
    // Dock and Finder launches inherit only launchd's environment; every Host shares one login-shell read.
-@@ -438,7 +480,10 @@
+@@ -440,7 +482,10 @@
      return next.promise
    }
    const platformView = new DesktopPlatformView(join(app.getAppPath(), 'lib', 'preload-platform-account.cjs'),
@@ -90,7 +90,7 @@
    const backend = new DesktopBackendController((onFailure) => {
      const hostInspectPort = developmentHostInspectPort(development)
      const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject,
-@@ -922,8 +967,11 @@
+@@ -926,8 +971,11 @@
      updates.dispose()
    })
  
@@ -104,7 +104,7 @@
    app.setAboutPanelOptions({
      applicationName: 'DeepSeek Harness',
      applicationVersion: app.getVersion(),
-@@ -952,7 +1000,9 @@
+@@ -956,7 +1004,9 @@
          click: () => { void showAbout().catch((error: unknown) => { console.error(error) }) } }
        : { label: currentDesktopLocale().messages.aboutMenu, role: 'about' },
      { type: 'separator' },
@@ -115,7 +115,7 @@
      ...process.platform === 'darwin' || process.platform === 'win32'
        ? [{ label: currentDesktopLocale().messages.cliCommandMenu, click: () => { void commandManager.show() } }] : [],
      ...development ? [
-@@ -1071,6 +1121,14 @@
+@@ -1075,6 +1125,14 @@
      // Closing hides: the page and the Host keep running, and the next show resumes the same document.
      window.on('close', (event) => {
        if (quitting || shellInstallerOwnsQuit || sessionEnding) return

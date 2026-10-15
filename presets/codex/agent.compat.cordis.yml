@@ -1,4 +1,8 @@
 # Codex-compatible agent-plane composition for DeepSeek Harness.
+# Historical DSH 0.2.0 fixture only; NOT installed or mounted by this preset.
+# DSH 0.2.1 removed mixed `both` presentation and startContinuable; mounting
+# this archived facade on the new host would not preserve its Code Mode API.
+# The active agent.cordis.yml uses the official native Codex core instead.
 #
 # OpenAI/codex reference: official HEAD @ 2b7c279735d0d096cf7b34fe98938f46792f4d4f.
 # The Luna model instructions and web.run description are pinned verbatim from

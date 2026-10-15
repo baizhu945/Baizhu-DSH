@@ -1,10 +1,8 @@
 diff --git a/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css b/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
-index f59c04e..95c9875 100644
+index 0fe5aabf..506e5eb7 100644
 --- a/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
 +++ b/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
-@@ -79,5 +79,25 @@
- .thinkBody {
-   /* Indent under the title, which starts at leading (16 + delta) + gap 6. */
+@@ -75,3 +75,23 @@
    padding: 4px 0 4px calc(22px + var(--dsh-content-font-delta, 0px));
    min-width: 0;
  }
@@ -29,45 +27,45 @@ index f59c04e..95c9875 100644
 +  color: var(--dsw-alias-label-primary);
 +}
 diff --git a/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx b/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
-index 74a801d..1b56709 100644
+index 8bbd738f..7e9e4708 100644
 --- a/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
 +++ b/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
 @@ -1,6 +1,6 @@
  /** Assistant reasoning disclosure, independent of Tool-call presentation. */
  import { memo, useMemo } from 'react'
--import { DisclosureRow, IconThinkOutlineRegular, MarkdownText, TextShimmer } from '@deepseek-ai/dsh-client-ui-primitives'
-+import { DisclosureRow, IconChevronUpOutlineRegular, IconThinkOutlineRegular, MarkdownText, TextShimmer } from '@deepseek-ai/dsh-client-ui-primitives'
+-import { DisclosureRow, IconThinkOutlineRegular, TextShimmer } from '@deepseek-ai/dsh-client-ui-primitives'
++import { DisclosureRow, IconChevronUpOutlineRegular, IconThinkOutlineRegular, TextShimmer } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
  import type { ChatViewSlotProps, UseDisclosure, UsePresentation } from '../contract/slots.ts'
- import { markdownLabels } from '../markdown-labels.ts'
  import a11yCss from './accessibility.module.css'
-@@ -51,7 +51,7 @@ export const ReasoningRow = memo(function ReasoningRow({ text, running, usePrese
+@@ -52,7 +52,7 @@ export const ReasoningRow = memo(function ReasoningRow({ text, running, usePrese
    usePresentation: UsePresentation
    t: ChatViewSlotProps['t']
- }) {
+ } & Pick<PropsRenderSlots<'conversation.chat.reasoning.body'>, 'renderSlot'>) {
 -  const { expanded, toggle } = useDisclosure()
 +  const { expanded, toggle, setExpanded } = useDisclosure()
-   const labels = useMemo(() => markdownLabels(t), [t])
    const summaryText = running ? latestCompletedParagraphFirstLine(text) : firstLine(text)
    const summary = useMemo(() => summaryText.replaceAll('**', ''), [summaryText])
-@@ -68,8 +68,12 @@ export const ReasoningRow = memo(function ReasoningRow({ text, running, usePrese
+   const preview = usePresentation(policy => !expanded && summary !== ''
+@@ -70,8 +70,12 @@ export const ReasoningRow = memo(function ReasoningRow({ text, running, usePrese
    const content = useMemo(() => expanded ? (
      <div className={css.thinkBody}>
-       <MarkdownText text={text} streaming={running} labels={labels} variant="compact" />
+       {renderSlot('conversation.chat.reasoning.body', { text, running })}
 +      <button type="button" className={css.collapseButton} onClick={() => { setExpanded(false) }}>
 +        <IconChevronUpOutlineRegular size={14} />
 +        {t('row.collapse')}
 +      </button>
      </div>
--  ) : undefined, [expanded, labels, running, text])
-+  ) : undefined, [expanded, labels, running, setExpanded, t, text])
+-  ) : undefined, [expanded, renderSlot, running, text])
++  ) : undefined, [expanded, renderSlot, running, setExpanded, t, text])
  
    return (
      <div
 diff --git a/packages/client/ui-chat/src/client/locale.ts b/packages/client/ui-chat/src/client/locale.ts
-index 53a4999..ebf2f5c 100644
+index 5d24261a..7c24ac8f 100644
 --- a/packages/client/ui-chat/src/client/locale.ts
 +++ b/packages/client/ui-chat/src/client/locale.ts
-@@ -188,6 +188,7 @@ export const zh = {
+@@ -192,6 +192,7 @@ export const zh = {
    'command.title': '指令',
    'row.running': '运行中',
    'row.failed': '失败',
@@ -75,7 +73,7 @@ index 53a4999..ebf2f5c 100644
    'json.truncated': '… 已截断，共 {total} 字符',
    'clock.md': '{m}月{d}日',
    'clock.ymd': '{y}年{m}月{d}日',
-@@ -381,6 +382,7 @@ export const en = {
+@@ -389,6 +390,7 @@ export const en = {
    'command.title': 'Command',
    'row.running': 'Running',
    'row.failed': 'Failed',
@@ -83,11 +81,105 @@ index 53a4999..ebf2f5c 100644
    'json.truncated': '… truncated, {total} characters total',
    'clock.md': '{m}/{d}',
    'clock.ymd': '{y}-{m}-{d}',
+diff --git a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx b/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx
+index fbd21baf..36f54725 100644
+--- a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx
++++ b/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx
+@@ -31,10 +31,14 @@ describe('ReasoningRow', () => {
+     const view = render(<ReasoningRow useDisclosure={useDisclosure} text="Original thought" running={false}
+       usePresentation={useDetailedPresentation} renderSlot={extension} t={t} />)
+     expect(calls).not.toHaveBeenCalled()
+-    fireEvent.click(view.getByRole('button'))
++    fireEvent.click(view.getByRole('button', { name: /^思考/ }))
+     expect(calls).toHaveBeenCalledWith('conversation.chat.reasoning.body', { text: 'Original thought', running: false })
+     expect(view.getAllByText('Original thought')).toHaveLength(1)
+-    expect(view.getAllByRole('button')).toHaveLength(1)
++    expect(view.getAllByRole('button')).toHaveLength(2)
++    fireEvent.click(view.getByRole('button', { name: '折叠' }))
++    expect(view.queryByRole('button', { name: '折叠' })).toBeNull()
++    expect(view.getByRole('button', { name: /^思考/ }).getAttribute('aria-expanded')).toBe('false')
++    expect(view.container.querySelector('[class*="thinkBody"]')).toBeNull()
+   })
+ 
+   it.each([
+@@ -69,7 +73,7 @@ describe('ReasoningRow', () => {
+       text={'First line\n\nDetailed body'} running={false} usePresentation={usePresentation} t={t} />)
+     const root = view.container.querySelector('[data-variant="think"]')!
+     const summary = view.getByText('First line')
+-    const toggle = view.getByRole('button')
++    const toggle = view.getByRole('button', { name: /^思考/ })
+     for (const next of ['compact', 'standard', 'detailed', 'verbose', 'compact'] as const) {
+       act(() => { mode.set(next) })
+       expect(view.getByText('First line')).toBe(summary)
+@@ -87,7 +91,7 @@ describe('ReasoningRow', () => {
+     act(() => { reset.set(1) })
+     expect(toggle.getAttribute('aria-expanded')).toBe('false')
+     expect(view.queryByText('Detailed body')).toBeNull()
+-    expect(view.getByRole('button')).toBe(toggle)
++    expect(view.getByRole('button', { name: /^思考/ })).toBe(toggle)
+   })
+ 
+   it('keeps a running preview enabled in Compact and hides it on settlement without removing it', () => {
+@@ -113,23 +117,23 @@ describe('ReasoningRow', () => {
+         usePresentation={useDetailedPresentation}
+         t={t} blocks={[reasoning]} streaming renderMessageImages={renderMessageImages} />,
+     )
+-    expect(view.getByRole('button').getAttribute('aria-expanded')).toBe('false')
++    expect(view.getByRole('button', { name: /^思考/ }).getAttribute('aria-expanded')).toBe('false')
+     fireEvent.click(view.getByText('思考'))
+     view.rerender(
+       <AssistantMarkdown renderSlot={renderSlot} useDisclosure={useDisclosure} useGroupAction={useSearchableHidden}
+         usePresentation={useDetailedPresentation}
+         t={t} blocks={[reasoning, nextBlock]} streaming renderMessageImages={renderMessageImages} />,
+     )
+-    expect(view.getByRole('button').getAttribute('aria-expanded')).toBe('true')
++    expect(view.getByRole('button', { name: /^思考/ }).getAttribute('aria-expanded')).toBe('true')
+     view.rerender(
+       <AssistantMarkdown renderSlot={renderSlot} useDisclosure={useDisclosure} useGroupAction={useSearchableHidden}
+         usePresentation={useDetailedPresentation}
+         t={t} blocks={[reasoning, nextBlock]} streaming={false} renderMessageImages={renderMessageImages} />,
+     )
+-    expect(view.getByRole('button').getAttribute('aria-expanded')).toBe('true')
++    expect(view.getByRole('button', { name: /^思考/ }).getAttribute('aria-expanded')).toBe('true')
+     expect(view.getByText(/Check persistence/)).toBeTruthy()
+     fireEvent.click(view.getByText('思考'))
+-    expect(view.getByRole('button').getAttribute('aria-expanded')).toBe('false')
++    expect(view.getByRole('button', { name: /^思考/ }).getAttribute('aria-expanded')).toBe('false')
+   })
+ 
+   it('advances on completed paragraph first lines, then restores the settled first line', () => {
+@@ -143,7 +147,7 @@ describe('ReasoningRow', () => {
+       />,
+     )
+     expect(view.getByText('运行中')).toBeTruthy()
+-    expect(view.getByRole('button').getAttribute('aria-expanded')).toBe('false')
++    expect(view.getByRole('button', { name: /^思考/ }).getAttribute('aria-expanded')).toBe('false')
+     expect(view.getByText('Newest reasoning tokens').closest('[data-streaming]')?.getAttribute('data-streaming'))
+       .toBe('true')
+ 
+@@ -183,7 +187,7 @@ describe('ReasoningRow', () => {
+       />,
+     )
+     const settledSummary = view.getByText('Inspect the session')
+-    expect(view.getByRole('button').getAttribute('aria-expanded')).toBe('false')
++    expect(view.getByRole('button', { name: /^思考/ }).getAttribute('aria-expanded')).toBe('false')
+     expect(view.queryByText('运行中')).toBeNull()
+     expect(settledSummary.closest('[data-streaming]')).toBeNull()
+   })
+@@ -198,7 +202,7 @@ describe('ReasoningRow', () => {
+         renderMessageImages={renderMessageImages}
+       />,
+     )
+-    const row = view.getByRole('button')
++    const row = view.getByRole('button', { name: /^思考/ })
+ 
+     fireEvent.click(view.getByText('Inspect the session'))
+     expect(row.getAttribute('aria-expanded')).toBe('true')
 diff --git a/packages/client/ui-conversation/src/client/locales.ts b/packages/client/ui-conversation/src/client/locales.ts
-index 88ae069..2721e6d 100644
+index 4703ae34..f754e65c 100644
 --- a/packages/client/ui-conversation/src/client/locales.ts
 +++ b/packages/client/ui-conversation/src/client/locales.ts
-@@ -305,6 +305,7 @@ export const zh = {
+@@ -312,6 +312,7 @@ export const zh = {
    'row.input': '输入',
    'row.output': '输出',
    'row.inspect': '查看',
@@ -95,7 +187,7 @@ index 88ae069..2721e6d 100644
    'tool.title.search': '搜索',
    'tool.title.read': '读取',
    'tool.title.bash': '运行命令',
-@@ -675,6 +676,7 @@ export const en = {
+@@ -690,6 +691,7 @@ export const en = {
    'row.input': 'IN',
    'row.output': 'OUT',
    'row.inspect': 'Inspect',
@@ -104,10 +196,10 @@ index 88ae069..2721e6d 100644
    'tool.title.read': 'Read',
    'tool.title.bash': 'Bash',
 diff --git a/packages/client/ui-skill/src/client/SkillRow.module.css b/packages/client/ui-skill/src/client/SkillRow.module.css
-index 31abbe1..ed36e87 100644
+index 8c74cf67..a1fed765 100644
 --- a/packages/client/ui-skill/src/client/SkillRow.module.css
 +++ b/packages/client/ui-skill/src/client/SkillRow.module.css
-@@ -200,6 +200,27 @@
+@@ -183,6 +183,27 @@
    color: var(--dsw-alias-label-primary);
  }
  
@@ -136,7 +228,7 @@ index 31abbe1..ed36e87 100644
    position: absolute;
    width: 1px;
 diff --git a/packages/client/ui-skill/src/client/SkillRow.tsx b/packages/client/ui-skill/src/client/SkillRow.tsx
-index 0800bc7..102037b 100644
+index cee91367..a783f6b5 100644
 --- a/packages/client/ui-skill/src/client/SkillRow.tsx
 +++ b/packages/client/ui-skill/src/client/SkillRow.tsx
 @@ -1,6 +1,6 @@
@@ -147,7 +239,7 @@ index 0800bc7..102037b 100644
  } from '@deepseek-ai/dsh-client-ui-primitives'
  import type { StartedToolCallViewProps, ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
  import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
-@@ -163,6 +163,10 @@ function StartedSkillRow({ block, inspect, t }: Exclude<SkillRowProps, { phase:
+@@ -166,6 +166,10 @@ function StartedSkillRow({ block, inspect, t }: Exclude<SkillRowProps, { phase:
                {t('row.inspect')}
              </button>
            ) : null}
@@ -159,7 +251,7 @@ index 0800bc7..102037b 100644
        ) : null}
      </div>
 diff --git a/packages/client/ui-skill/src/client/locales.ts b/packages/client/ui-skill/src/client/locales.ts
-index 1028a82..4695186 100644
+index 1028a827..46951869 100644
 --- a/packages/client/ui-skill/src/client/locales.ts
 +++ b/packages/client/ui-skill/src/client/locales.ts
 @@ -12,6 +12,7 @@ export const zh = {
@@ -178,10 +270,10 @@ index 1028a82..4695186 100644
    'menu.userOnly': 'user-only',
  } satisfies Record<SkillKey, string>
 diff --git a/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css b/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
-index 0c57d41..c3fc22a 100644
+index 5be4d641..41c161c3 100644
 --- a/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
 +++ b/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
-@@ -193,6 +193,27 @@
+@@ -166,6 +166,27 @@
    color: var(--dsw-alias-label-primary);
  }
  
@@ -210,7 +302,7 @@ index 0c57d41..c3fc22a 100644
     and the terminal card scroll INSIDE their own surface instead, so the
     scrollbar sits within the rounded card. */
 diff --git a/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx b/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
-index c9279a2..c51cd5d 100644
+index b62d581d..21e5c908 100644
 --- a/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
 +++ b/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
 @@ -1,7 +1,7 @@
@@ -231,7 +323,7 @@ index c9279a2..c51cd5d 100644
    const terminalLabels = useMemo(() => terminalBlockLabels(t), [t])
    const diffLabels = useMemo(() => diffBlockLabels(t), [t])
    const readLabels = useMemo(() => readBlockLabels(t), [t])
-@@ -348,10 +348,14 @@ export const ToolRow = memo(function ToolRow({
+@@ -349,10 +349,14 @@ export const ToolRow = memo(function ToolRow({
            {t('row.inspect')}
          </button>
        )}
@@ -248,10 +340,10 @@ index c9279a2..c51cd5d 100644
    ])
    return (
 diff --git a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
-index c58a5df..72e6b51 100644
+index e6ba3f50..8987d7d9 100644
 --- a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
 +++ b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
-@@ -226,6 +226,27 @@
+@@ -233,6 +233,27 @@
    color: var(--dsw-alias-label-primary);
  }
  
@@ -280,19 +372,19 @@ index c58a5df..72e6b51 100644
  .visuallyHidden {
    position: absolute;
 diff --git a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
-index 47ae2d1..9caf196 100644
+index f23e369d..5732715a 100644
 --- a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
 +++ b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
-@@ -59,7 +59,7 @@ const StartedBashRow = memo(function StartedBashRow({ toolName, block, sessionId
+@@ -55,7 +55,7 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
      ? 'error'
      : model.state
    const status = stateStatus(state, t)
 -  const { expanded, toggle: toggleExpand } = useDisclosure()
 +  const { expanded, toggle: toggleExpand, setExpanded } = useDisclosure()
-   // Failures, persistent-shell results, and spill previews use a generic body;
-   // background acknowledgements and malformed calls remain collapsed.
-   const genericBody = terminal === null
-@@ -157,6 +157,10 @@ const StartedBashRow = memo(function StartedBashRow({ toolName, block, sessionId
+   const background = isBackgroundShellCall(block)
+   // Background launches expose their acknowledgement without assigning the
+   // job an exit status. Failures, persistent results, and spill previews also
+@@ -159,6 +159,10 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
                {t('row.inspect')}
              </button>
            )}
@@ -303,8 +395,62 @@ index 47ae2d1..9caf196 100644
          </div>
        )}
      </div>
+diff --git a/packages/client/ui-tool/tests/terminal-card.client.spec.tsx b/packages/client/ui-tool/tests/terminal-card.client.spec.tsx
+index a891bad7..0aed4a62 100644
+--- a/packages/client/ui-tool/tests/terminal-card.client.spec.tsx
++++ b/packages/client/ui-tool/tests/terminal-card.client.spec.tsx
+@@ -451,8 +451,8 @@ describe('BashRow terminal card', () => {
+     fireEvent.click(view.container.querySelector('[data-expandable]')!)
+     expect(view.getByText('a.ts  b.ts', RAW)).toBeTruthy()
+     expect(view.getByText('复制')).toBeTruthy()
+-    // Collapse back in place: the summary row returns, the card unmounts.
+-    fireEvent.click(view.container.querySelector('[data-expandable]')!)
++    // The local bottom action collapses the same upstream disclosure.
++    fireEvent.click(view.getByRole('button', { name: '折叠' }))
+     expect(view.queryByText(/a\.ts/)).toBeNull()
+     expect(view.getByText('List files')).toBeTruthy()
+   })
+diff --git a/packages/client/ui-tool/tests/tool-row.client.spec.tsx b/packages/client/ui-tool/tests/tool-row.client.spec.tsx
+index 30204727..da053d52 100644
+--- a/packages/client/ui-tool/tests/tool-row.client.spec.tsx
++++ b/packages/client/ui-tool/tests/tool-row.client.spec.tsx
+@@ -346,7 +346,7 @@ describe('ToolRow', () => {
+     expect(view.getByText('List files')).toBeTruthy()
+     expect(view.getByText(/"a": 1/)).toBeTruthy()
+     expect(view.container.querySelector('[class*="ioCard"]')).not.toBeNull()
+-    fireEvent.click(view.getByRole('button'))
++    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
+     expect(view.queryByTestId('tool-icon')).not.toBeNull()
+     expect(view.getByText('List files')).toBeTruthy()
+   })
+@@ -371,6 +371,16 @@ describe('ToolRow', () => {
+     expect(view.queryByRole('button', { name: /展开其余/ })).toBeNull()
+   })
+ 
++  it('collapses from the bottom button without reopening the disclosure', () => {
++    const view = render(<ToolRow {...rowProps} />)
++    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
++    expect(view.getByText(/"a": 1/)).toBeTruthy()
++    fireEvent.click(view.getByRole('button', { name: t('row.collapse') }))
++    expect(view.queryByText(/"a": 1/)).toBeNull()
++    expect(view.container.querySelector('[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false')
++    expect(view.queryByRole('button', { name: t('row.collapse') })).toBeNull()
++  })
++
+   it('formats the argument body only while expanding it', () => {
+     const stringify = vi.spyOn(JSON, 'stringify')
+     const bodyFormatCalls = () => stringify.mock.calls.filter(
+@@ -388,7 +398,7 @@ describe('ToolRow', () => {
+     expect(bodyFormatCalls()).toBe(1)
+     expect(view.getByText(/"a": 1/)).toBeTruthy()
+ 
+-    fireEvent.click(view.getByRole('button'))
++    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
+     expect(bodyFormatCalls()).toBe(1)
+     expect(view.queryByText(/"a": 1/)).toBeNull()
+   })
 diff --git a/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css b/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
-index c74fdc2..daa8b8b 100644
+index ca9e03ae..9a046480 100644
 --- a/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
 +++ b/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
 @@ -280,6 +280,27 @@
@@ -336,7 +482,7 @@ index c74fdc2..daa8b8b 100644
    position: absolute;
    width: 1px;
 diff --git a/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx b/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx
-index d33a4b9..827522a 100644
+index d33a4b9a..827522a1 100644
 --- a/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx
 +++ b/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx
 @@ -2,7 +2,7 @@
@@ -360,7 +506,7 @@ index d33a4b9..827522a 100644
        </DisclosureRow>
      </div>
 diff --git a/packages/extensions/ui-cordis/src/client/locales.ts b/packages/extensions/ui-cordis/src/client/locales.ts
-index 60b061a..92d5604 100644
+index 60b061ac..92d56043 100644
 --- a/packages/extensions/ui-cordis/src/client/locales.ts
 +++ b/packages/extensions/ui-cordis/src/client/locales.ts
 @@ -44,6 +44,7 @@ export const zh = {
@@ -379,33 +525,3 @@ index 60b061a..92d5604 100644
    'render.failedAbdicated': 'Rendering failed in {slot}; the default UI was restored:',
    'render.failedHeld': 'Rendering failed in {slot}:',
    'a11y.defining': 'Defining the plugin',
-diff --git a/packages/client/ui-tool/tests/tool-row.client.spec.tsx b/packages/client/ui-tool/tests/tool-row.client.spec.tsx
---- a/packages/client/ui-tool/tests/tool-row.client.spec.tsx
-+++ b/packages/client/ui-tool/tests/tool-row.client.spec.tsx
-@@ -296,7 +296,7 @@
-     expect(view.getByText('List files')).toBeTruthy()
-     expect(view.getByText(/"a": 1/)).toBeTruthy()
-     expect(view.container.querySelector('[class*="ioCard"]')).not.toBeNull()
--    fireEvent.click(view.getByRole('button'))
-+    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
-     expect(view.queryByTestId('tool-icon')).not.toBeNull()
-     expect(view.getByText('List files')).toBeTruthy()
-   })
-@@ -324,2 +324,12 @@
-+  it('collapses from the bottom button without reopening the disclosure', () => {
-+    const view = render(<ToolRow {...rowProps} />)
-+    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
-+    expect(view.getByText(/"a": 1/)).toBeTruthy()
-+    fireEvent.click(view.getByRole('button', { name: t('row.collapse') }))
-+    expect(view.queryByText(/"a": 1/)).toBeNull()
-+    expect(view.container.querySelector('[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false')
-+    expect(view.queryByRole('button', { name: t('row.collapse') })).toBeNull()
-+  })
-+
-   it('formats the argument body only while expanding it', () => {
-     const stringify = vi.spyOn(JSON, 'stringify')
-@@ -341,3 +351,3 @@
--    fireEvent.click(view.getByRole('button'))
-+    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
-     expect(bodyFormatCalls()).toBe(1)
-     expect(view.queryByText(/"a": 1/)).toBeNull()

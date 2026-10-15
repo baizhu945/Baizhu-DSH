@@ -23,7 +23,12 @@ PY
 if [[ $# -gt 0 ]]; then
   dsh_root=$(readlink -f "$1")
 else
-  dsh_root=$(dirname "$(dirname "$(readlink -f "$(command -v dsh)")")")
+  dsh_root=$("$VERIFY_NODE" --input-type=module - "$root/codex-test-environment.mjs" <<'NODE'
+import { pathToFileURL } from 'node:url'
+const { installedDshRoot } = await import(pathToFileURL(process.argv[2]).href)
+console.log(installedDshRoot())
+NODE
+)
 fi
 [[ -d "$dsh_root/packages/core/agent-loop" ]] || { echo 'Not a DSH runtime directory' >&2; exit 1; }
 export DSH_CODEX_TEST_DSH_ROOT="$dsh_root"
@@ -31,6 +36,13 @@ export DSH_NATIVE_HOST_ROOT="$dsh_root"
 export DSH_NATIVE_HOST_BINARY="$DSH_CODEX_TEST_BINARY"
 export DSH_NATIVE_HOST_CATALOG="$DSH_CODEX_TEST_CATALOG"
 export DSH_PI_AI_ROOT="$dsh_root/packages/llm/llm-pi-ai/node_modules/@earendil-works/pi-ai"
+# Query this runtime's own derivation for its clean UI baseline, including
+# structured attributes. Source/build inputs are retained by Home Manager.
+verifyDshDrv=$(nix-store --query --deriver "$dsh_root")
+DSH_NATIVE_UI_SOURCE=$(nix-store --query --binding __json "$verifyDshDrv" |
+  "$VERIFY_PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["src"])')
+export DSH_NATIVE_UI_SOURCE
+export DSH_NATIVE_UI_INSTALLED="$dsh_root"
 export DSH_CODEX_OBSERVATION_INTEGRATION=1
 export DSH_CODEX_REQUIRE_NATIVE_TESTS=1
 export PATH="$(dirname "$VERIFY_RUSTC"):$PATH"

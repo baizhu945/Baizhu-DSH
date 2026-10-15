@@ -17,7 +17,7 @@ assert.equal(config.env.GHIDRA_HEADLESS_MAXMEM, '8G')
 assert(config.toolCallTimeoutMs > Number(config.env.REA_GHIDRA_STARTUP_TIMEOUT_MS))
 assert.equal(config.serverName, 'rea'); assert.deepEqual(config.args, ['mcp'])
 assert(existsSync(config.command), `real REA executable missing: ${config.command}`)
-for (const key of ['GHIDRA_INSTALL_DIR', 'JAVA_HOME', 'REA_EVM_PRLIMIT_COMMAND']) assert(existsSync(config.env[key]), `${key} missing from installed config or unavailable`)
+for (const key of ['GHIDRA_INSTALL_DIR', 'JAVA_HOME', 'REA_EVM_PRLIMIT_COMMAND', 'REA_JAVASCRIPT_PRLIMIT_COMMAND', 'REA_TSHARK_PRLIMIT_COMMAND', 'REA_SIGROK_PRLIMIT_COMMAND', 'REA_FIRMWARE_PRLIMIT_COMMAND']) assert(existsSync(config.env[key]), `${key} missing from installed config or unavailable`)
 console.log(JSON.stringify({ runtimeRoot, presetRoot, tempHome: root, executable: config.command, GHIDRA_INSTALL_DIR: config.env.GHIDRA_INSTALL_DIR, JAVA_HOME: config.env.JAVA_HOME, chromium: config.env.REA_BROWSER_EXECUTABLE }))
 const { ctx, capture } = await actualContext(root, { definitions: discoverNonReaDefinitions(), reaDefinition: definition })
 const calls = []
@@ -38,7 +38,7 @@ try {
   await turn(handle.agent)
   assert.equal(capture.requests.length, 1)
   const catalog = ctx.tools.schemas(handle.agent).filter(row => row.name.startsWith('mcp__rea__'))
-  assert.equal(catalog.length, 138, 'REA 6.1 exact catalog changed')
+  assert.equal(catalog.length, 187, 'REA 6.4 exact catalog changed')
   assert.deepEqual(catalog.map(row => row.name.slice('mcp__rea__'.length)).sort(), [...expectedToolNames].sort())
   writeFileSync(join(root, 'catalog.json'), JSON.stringify(catalog, null, 2) + '\n')
   writeFileSync(join(root, 'complete-first-request.json'), JSON.stringify(stableRequest(capture.requests[0]), null, 2) + '\n')
@@ -54,16 +54,30 @@ try {
   mkdirSync(js, { recursive: true })
   writeFileSync(join(js, 'package.json'), JSON.stringify({ name: 'rea-dsh-offline-fixture', version: '1.0.0', type: 'module', main: 'index.js' }) + '\n')
   writeFileSync(join(js, 'index.js'), 'export function reaStaticFixture(value) { return value + 7; }\n')
-  const jsAnalysis = await call('analyze_javascript_application', { input_path: js, format: 'auto' })
+  const jsAnalysis = await call('analyze_javascript_application', { input_path: js, format: 'auto', detail: 'complete' })
   assert(JSON.stringify(jsAnalysis).includes('reaStaticFixture'), 'static JavaScript application graph omitted fixture symbol')
 
   const evmCarrier = join(root, 'workspace/runtime.hex')
   writeFileSync(evmCarrier, '0x60006000f3\n')
-  const evm = await call('inspect_evm_interface', { path: evmCarrier, encoding: 'hex' })
+  const evm = await call('inspect_evm_interface', { path: evmCarrier, encoding: 'hex', detail: 'complete' })
   const evmData = evm.value?.structuredContent
-  assert.equal(evmData.result.bytecode.hex, '60006000f3')
-  assert.equal(evmData.result.runtime_execution, 'not-performed')
-  assert.equal(evmData.result.evidence_kind, 'inferred')
+  assert.equal(evmData.normalized_result.bytecode.hex, '60006000f3')
+  assert.equal(evmData.normalized_result.runtime_execution, 'not-performed')
+  assert.equal(evmData.normalized_result.evidence_kind, 'inferred')
+  // New 6.4 target-free retained-Evidence workflow through actual DSH tools:
+  // summary receipt then exact bytecode paging, no RPC/credentials/execution.
+  const compact = await call('inspect_evm_interface', { path: evmCarrier, encoding: 'hex', detail: 'summary' })
+  const summary = compact.value?.structuredContent.normalized_result
+  assert.equal(summary.parent_operation, 'inspect_evm_interface')
+  assert.equal(summary.summary.runtime_execution, 'not-performed')
+  assert.equal(summary.summary.bytecode.hex, undefined)
+  const selected = await call('inspect_analysis_view', {
+    source: { kind: 'retained-evidence', evidence_id: summary.parent_evidence_id },
+    view: { kind: 'evm', facet: 'bytecode_hex', offset: 2, limit: 4 },
+  })
+  const page = selected.value?.structuredContent.normalized_result
+  assert.equal(page.parent_evidence_id, summary.parent_evidence_id)
+  assert.deepEqual(page.item, { text: '0060', unit: 'utf16-code-units' })
 
   // All native operations still go through the REAL approval and tool pipeline.
   // The fixture test user explicitly grants each request, with durable audit.
@@ -77,7 +91,7 @@ try {
   // open_binary returns target metadata only; the first deep query's evidence
   // identifies the actual analysis provider after complete startup analysis.
   const procedures = await call('list_procedures')
-  assert.equal(procedures.value?.structuredContent?.evidence?.provider?.id, 'ghidra', 'omitted provider_id did not select configured Ghidra')
+  assert.equal(procedures.value?.structuredContent?.provider?.id, 'ghidra', 'omitted provider_id did not select configured Ghidra')
   assert(JSON.stringify(procedures).includes('rea_fixture_add'), 'Ghidra did not recover native fixture function')
   const pseudo = await call('procedure_pseudo_code', { procedure: 'rea_fixture_add' })
   assert(JSON.stringify(pseudo).includes('7'), 'Ghidra decompilation missing constant 7')
@@ -88,7 +102,7 @@ try {
   const cleanView = await snapshot(ctx, clean.agent)
   assert(!JSON.stringify(cleanView).includes('mcp__rea__'))
   await clean.dispose()
-  console.log('PASS real catalog138 + static JavaScript + offline EVMole + Ghidra/JDK from Config through DSH tool pipeline; no paid model or real user auth')
+  console.log('PASS real catalog187 + static JavaScript + offline EVMole/retained-Evidence paging + Ghidra/JDK from Config through DSH tool pipeline; no paid model or real user auth')
   console.log('Artifacts:', root)
 } finally {
   if (handle) await handle.dispose()

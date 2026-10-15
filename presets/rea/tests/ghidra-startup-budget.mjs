@@ -8,13 +8,13 @@ const root = resolve(process.argv[2])
 const load = name => import(pathToFileURL(resolve(root, 'dist', name)).href)
 const { TOOL_CONTRACTS } = await load('contracts/toolContracts.js')
 const { TOOL_EFFECTS } = await load('contracts/toolEffects.js')
-assert.equal(expectedToolNames.length, 138)
+assert.equal(expectedToolNames.length, 187)
 assert.deepEqual(TOOL_CONTRACTS.map(row => row.name), expectedToolNames)
 assert.deepEqual(Object.keys(TOOL_EFFECTS).sort(), [...expectedToolNames].sort())
-const { parseConfig } = await load('config.js')
+const { parseConfig } = await load('config/parseConfig.js')
 const { GhidraProvider } = await load('ghidra/GhidraProvider.js')
 const { GhidraClient } = await load('ghidra/GhidraClient.js')
-const { DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS } = await load('config/ghidraStartupTimeout.js')
+const { DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS } = await load('config/providerStartupTimeout.js')
 const { silentLogger } = await load('logger.js')
 const config = value => {
   const result = parseConfig(value === undefined ? {} : { REA_GHIDRA_STARTUP_TIMEOUT_MS: value })
@@ -24,10 +24,11 @@ const config = value => {
 const original = config(undefined)
 assert.equal(original.ghidraStartupTimeoutMs, 330000)
 assert.equal(DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS, 330000)
-// Upstream accepts positive safe timer delays and falls back for invalid input.
-for (const value of ['1', '330000', '1800000', '86400000', '2147483647', '+1', '01', ' 1', '1 ', '1.0', '1e3']) assert.equal(config(value).ghidraStartupTimeoutMs, Number(value))
-for (const value of ['', '0', '-1', 'NaN', 'Infinity', '2147483648', '9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999']) {
-  assert.equal(config(value).ghidraStartupTimeoutMs, 330000, `invalid budget must fall back: ${value}`)
+// 6.4 accepts only positive decimal timer delays; invalid settings fail closed.
+for (const value of ['1', '330000', '1800000', '86400000', '2147483647']) assert.equal(config(value).ghidraStartupTimeoutMs, Number(value))
+for (const value of ['', '0', '-1', '+1', '01', ' 1', '1 ', '1.0', '1e3', 'NaN', 'Infinity', '2147483648', '9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999']) {
+  const result = parseConfig({ REA_GHIDRA_STARTUP_TIMEOUT_MS: value })
+  assert.equal(result.ok, false, `invalid budget must fail closed: ${value}`)
 }
 const host = {
   platform: 'linux', architecture: 'x64', readText: () => 'application.version=12.1.4\n', executable: () => true,
@@ -36,7 +37,7 @@ const host = {
 const target = { path: '/fixture/native', sha256: 'a'.repeat(64), kind: 'executable', format: 'elf', architecture: 'x86_64', availableArchitectures: ['x86_64'] }
 for (const value of [undefined, '1800000']) {
   let forwarded, launched = 0
-  const ghidra = new GhidraProvider({ ...config(value), ghidraInstallDir: '/fixture/ghidra' }, silentLogger, host, options => {
+  const ghidra = new GhidraProvider({ ...config(value), ghidraInstallDir: '/fixture/ghidra' }, silentLogger, {}, host, options => {
     forwarded = options
     // Use the actual client for cancellation; a pre-aborted signal must never
     // touch the target or launch, independent of the selected startup budget.
@@ -55,4 +56,4 @@ for (const value of [undefined, '1800000']) {
   assert.equal(launched, 0)
   await client.close()
 }
-console.log('PASS DSH Ghidra startup budget: upstream default330000, custom/timer-max/invalid fallback, actual factory forwarding, real-client cancellation without launch')
+console.log('PASS DSH Ghidra startup budget: upstream default330000, custom/timer-max/invalid fail-closed, actual factory forwarding, real-client cancellation without launch')

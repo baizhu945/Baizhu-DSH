@@ -42,9 +42,21 @@ trap cleanup EXIT INT TERM HUP
 # HTTP 服务已经监听;启动器不能再只把 2xx 当作 ready。
 httpReady() {
   local code
-  code="$(curl -sS -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || true)"
+  code="$(curl --connect-timeout 2 --max-time 5 -sS -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || true)"
   case "$code" in
     2*|3*|401|403|404) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# A listening server can return 401, but a valid launch token must produce
+# the authenticated redirect (303) or an already authorized successful page.
+# Never reuse an old log merely because its rejected token reached a listener.
+tokenReady() {
+  local code
+  code="$(curl --connect-timeout 2 --max-time 5 -sS -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || true)"
+  case "$code" in
+    2*|3*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -77,10 +89,10 @@ waitForTokenURL() {
 
 # 端口无实例时由本次运行启动服务,并记录 PID 供退出时回收
 if ! httpReady "$URL"; then
-  dsh web --no-open --port "${PORT}" > "${HOME}/.dsh-web.log" 2>&1 &
+  dsh web --no-open --host 127.0.0.1 --port "${PORT}" > "${HOME}/.dsh-web.log" 2>&1 &
   WEB_PID=$!
   OPEN_URL="$(waitForTokenURL || true)"
-  if [ -z "$OPEN_URL" ] || ! httpReady "$OPEN_URL"; then
+  if [ -z "$OPEN_URL" ] || ! tokenReady "$OPEN_URL"; then
     echo "dsh-web: 未获取到当前服务的 token URL,请查看日志: ~/.dsh-web.log" >&2
     kill "${WEB_PID}" 2>/dev/null || true
     WEB_PID=""
@@ -89,8 +101,8 @@ if ! httpReady "$URL"; then
   echo "dsh-web: 服务已启动 ${OPEN_URL} (pid ${WEB_PID})"
 else
   candidate="$(tokenURL || true)"
-  if [ -z "$candidate" ] || ! httpReady "$candidate"; then
-    echo "dsh-web: 已有服务但找不到有效 token URL;请运行 dsh --profile=web --no-open 并打开其打印的完整 URL" >&2
+  if [ -z "$candidate" ] || ! tokenReady "$candidate"; then
+    echo "dsh-web: 已有服务但找不到有效 token URL;请打开该实例启动时打印的完整 URL，或关闭该实例后重新运行 dsh-web" >&2
     exit 1
   fi
   OPEN_URL="$candidate"

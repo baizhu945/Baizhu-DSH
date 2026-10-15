@@ -1,8 +1,17 @@
 # Independent REA preset
 
 独立 DSH preset：`rea` / **REA**。它不是 Codex 模式扩展，完全不依赖 Pi 的配置。
-本目录 `rea-package.nix` 自行固定 REA 6.1.0 源码 commit、npm 依赖哈希和 Node 24
+本目录 `rea-package.nix` 自行固定 REA 6.4.0 源码 commit、npm 依赖哈希和 Node 24
 构建；不运行 `rea setup`，不安装全局 command，不修改普通 PATH、AGENTS 或 skills。
+
+## Schema 兼容验证
+
+6.4.0 upstream 已修复 Objective-C/NUL 正则，并使用无前瞻的路径/运行令牌
+名称表达式。本地 `schema-portability.patch` 原样归档，不再应用，避免重复修复。
+路径约束现在也拒绝换行后的 `//`、`.`、`..`、尾 `/`；这是 upstream 更严格
+的 canonical 语义，不伪装成 6.1 的完全等价行为。
+包构建验证真实 MCP 输入/输出中的全部正则，同时用 JS/Rust 与 AJV/Zod 对照；
+不从 Pi 目录导入补丁或测试。
 
 ## 使用
 
@@ -18,9 +27,9 @@ TUI 可通过 `/preset` 选择；已经开始 turn 的会话按 DSH 原生规则
 第一次深查询才触发 **完整** auto-analysis，大型可执行文件可能需要多分钟。
 分析期间不要盲目重启/重复查询，子代理不得使用 REA。
 
-REA 6.1.0 已原生支持 `REA_GHIDRA_STARTUP_TIMEOUT_MS`（#974），已移除旧本地补丁。
-upstream 用 Number 解析正安全整数（最大 `2147483647` ms）；未设置或非法值回退
-`330000` ms，配置和客户端始终包含解析后的预算；保留 upstream 取消语义。
+REA 6.4.0 继续原生支持 `REA_GHIDRA_STARTUP_TIMEOUT_MS`（#974），已移除旧本地补丁。
+upstream 仅接受无前导零的正十进制整数（最大 `2147483647` ms）；未设置默认
+`330000` ms，非法值 fail-closed；配置和客户端保留 upstream 取消语义。
 DSH REA 局部配置为 `1800000` ms（30 分钟）、`GHIDRA_HEADLESS_MAXMEM=8G`，
 外层 MCP tool-call 为 `1860000` ms（31 分钟）。不修改系统 Ghidra、全局环境或
 非 REA/Codex 会话；额外预算不保证大型目标一定能完成分析。
@@ -30,7 +39,7 @@ DSH REA 局部配置为 `1800000` ms（30 分钟）、`GHIDRA_HEADLESS_MAXMEM=8G
 - Registry 的 eager 注册只加载标准基础 composition 和无进程的 bootstrap。
 - roster、冷诊断、未选择 REA 的会话不会启动 MCP，也不注册 REA prompt/tools。
 - 第一次选中 REA 的实际根 Agent assembly，才在该 Agent 自有 scope 启动 MCP。
-- 模型看到 138 个 `mcp__rea__*` 操作、server 指令和 Evidence/Unknown 指导。
+- 模型看到 187 个 `mcp__rea__*` 操作、server 指令和 Evidence/Unknown 指导。
 - 父 Agent 的局部 REA scope 不被其子代理继承；原有全局 AGENTS/skills 保持不变。
 - 两个 REA 根会话有独立 MCP 实例，namespace 可以相同而不会共享数据库。
 - 空白会话从 REA 改成其他 preset、Agent 结束/销毁、Host unload 都撤销局部实例。
@@ -63,12 +72,12 @@ Confirm/Workspace Write/未知模式走宿主 approval；无应答 channel 时�
 minimal、cordis、codex；新发现的其他 preset 也会进入验收。
 
 包的 install-check 执行本目录 `tests/ghidra-startup-budget.mjs <reaPackage>/lib/rea-agents`，
-检查编译产物的默认/自定义/非法值回退、生产 clientFactory 实际转发及取消不启动进程。
-`tests/catalog.mjs` 固定 canonical TOOL_CONTRACTS 的完整 138 名称与顺序，并检查 effects 同集。
-构建正常生成 skills；运行时复制 bridge、third_party 和所需 scripts。新增 Python
+检查编译产物的默认/自定义/非法值拒绝、生产 clientFactory 实际转发及取消不启动进程。
+`tests/catalog.mjs` 固定 canonical TOOL_CONTRACTS 的完整 187 名称与顺序，并检查 effects 同集。
+构建正常生成 skills；运行时复制完整 bridge、third_party、licenses、声明文件和所需 scripts。新增 Python
 providers 是可选 BYO，不代表宿主已安装 pwntools/pwndbg 或已完成真实验证。
 
 Nix 构建包含所有非 REA absent/registered 相等、冷注册零 spawn、并行/child
 隔离、blank 切回、锁定选择、失败回滚、取消、物理退出和宿主 approval gate。
-独立真实验收还连接本目录构建的 REA，执行静态 JS 和真实 Ghidra/JDK 分析。
-这些程序用假模型避免账单；真实分析不是 mock，不声称 138 操作逐项实机执行。
+独立真实验收还连接本目录构建的 REA，执行完整静态 JS、离线 EVM/retained-Evidence 分页和真实 Ghidra/JDK 分析。
+这些程序用假模型避免账单；真实分析不是 mock，不声称 187 操作逐项实机执行。

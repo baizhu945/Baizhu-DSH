@@ -1,3 +1,5 @@
+diff --git a/packages/client/ui-approval/src/client/index.ts b/packages/client/ui-approval/src/client/index.ts
+index ca6d674e..8d170727 100644
 --- a/packages/client/ui-approval/src/client/index.ts
 +++ b/packages/client/ui-approval/src/client/index.ts
 @@ -1,4 +1,5 @@
@@ -6,7 +8,7 @@
  import type { Context as ClientContext } from '@deepseek-ai/cordis'
  import type {} from '@deepseek-ai/dsh-api-remotes/client'
  import type {} from '@deepseek-ai/dsh-api-session-controller/client'
-@@ -9,7 +10,7 @@
+@@ -9,7 +10,7 @@ import type { TypertClientEventListener } from '@deepseek-ai/dsh-typert-protocol
  import type {} from '@deepseek-ai/dsh-client-locale/client'
  import type { ShortcutCommandId } from '@deepseek-ai/dsh-client-shortcuts/client'
  import { ApprovalPanel } from './ApprovalPanel.tsx'
@@ -15,7 +17,7 @@
  import { en, zh } from './locales.ts'
  
  export type {
-@@ -21,6 +22,15 @@
+@@ -21,6 +22,15 @@ export type {
  } from './contract/slots.ts'
  export type { ApprovalKey } from './locales.ts'
  
@@ -31,7 +33,7 @@
  /** Required services: Agent scopes, Remote Events, Session UI, Slot registry, and copy. */
  export const inject = ['sessions', 'remote', 'uiSession', 'slots', 'locale']
  
-@@ -100,7 +110,12 @@
+@@ -100,7 +110,12 @@ export function apply(ctx: ClientContext): void {
      children: {
        'conversation.approval.detail': { kind: 'single', scope: 'session' },
      },
@@ -45,3 +47,37 @@
    ctx.remote.$on('approval/request', function (request, next) {
      return answerApproval(ctx, this, request, next, registerPendingInteraction)
    })
+diff --git a/packages/client/ui-approval/tests/ui-approval.client.spec.tsx b/packages/client/ui-approval/tests/ui-approval.client.spec.tsx
+index e9edc316..36cbd65a 100644
+--- a/packages/client/ui-approval/tests/ui-approval.client.spec.tsx
++++ b/packages/client/ui-approval/tests/ui-approval.client.spec.tsx
+@@ -1,4 +1,5 @@
+ // @vitest-environment jsdom
++import { isValidElement } from 'react'
+ import { Context } from '@deepseek-ai/cordis'
+ import { createScope, scopeOf } from '@deepseek-ai/dsh-api-session-controller/client'
+ import type { ToolCallId } from '@deepseek-ai/dsh-llm'
+@@ -229,7 +230,22 @@ describe('approval Remote Event consumer', () => {
+     const pending = bench.pending.getSnapshot()[0]!
+     const { options, component } = bench.registration()
+ 
+-    expect(component).toBe(ApprovalPanel)
++    if (typeof component !== 'function') throw new Error('approval presenter was not registered')
++    const props = panelProps(pending)
++    const fallback = component(props)
++    if (!isValidElement(fallback)) throw new Error('native approval fallback was not rendered')
++    expect(fallback.type).toBe(ApprovalPanel)
++    expect(fallback.props).toMatchObject(props)
++    const presentation = <div>Custom approval presentation</div>
++    const disposePresentation = bench.ctx.on('ui-approval/render', received => {
++      expect(received).toBe(props)
++      return presentation
++    })
++    expect(component(props)).toBe(presentation)
++    disposePresentation()
++    const restored = component(props)
++    if (!isValidElement(restored)) throw new Error('native fallback was not restored')
++    expect(restored.type).toBe(ApprovalPanel)
+     expect(pending.displayReason).toEqual({ en: 'Display reason', zh: '展示原因' })
+     expect(options.inject().resolveReason(pending.displayReason!)).toBe('Display reason')
+     expect(options.select({ pendingInteraction: undefined })).toBeNull()

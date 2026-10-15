@@ -5,25 +5,18 @@ let
 
   # Pin the upstream release and its submodules. GitHub source archives omit
   # submodule contents; materialize them below before fetching pnpm deps.
-  # v0.12.0 embeds OAuth and supports both dsh 0.2.0 release candidates.
-  # The GitHub API tree confirms both remaining submodule pins are unchanged.
-  dshTuiVersion = "0.12.0";
+  # v0.14.0 keeps OAuth embedded; its only submodule is the unchanged dsh-std.
+  # The former ecosystem-spec submodule is now the repository-owned tui-profile.
+  dshTuiVersion = "0.14.0";
   dshTuiSrc = pkgs.fetchFromGitHub {
     owner = "ccch1mneyyy";
     repo = "dsh-TUI";
-    rev = "3066b29113bde90606921b64bcf7c25fad31068d";
-    hash = "sha256-dKxdMGVu8DbV5i4OcD0a9Z1mluEUa5y8MLrjjq6JR5U=";
-  };
-
-  dshEcosystemSpecSrc = pkgs.fetchFromGitHub {
-    owner = "T-Auto";
-    repo = "dsh-ecosystem-spec";
-    rev = "d28c267fe7fd775428ec2dccd65b0b7efd4dacee";
-    hash = "sha256-hhp/UUMo2engw0SyrB0Gq6Xc6BUYgvEmYh0F4OBdZEw=";
+    rev = "c2eee95218d1decfce138f7d31ef7099cc391d00";
+    hash = "sha256-X2Ypv9pzI9gE9l2gKpJVVFXIvq11q3iOfzhKmP0QD0o=";
   };
 
   dshStdSrc = pkgs.fetchFromGitHub {
-    owner = "Yan-Zero";
+    owner = "T-Auto";
     repo = "dsh-std";
     rev = "614dfa1ac168db79fcf4577cf0ebb34e2e3b944b";
     hash = "sha256-aJEykWAXEKTUsNte51+ZEhFAgLT6QNNplNZTNPhgb00=";
@@ -33,8 +26,7 @@ let
     mkdir -p $out
     cp -r ${dshTuiSrc}/. $out/
     chmod -R u+w $out
-    mkdir -p $out/dsh-ecosystem-spec $out/vendor/dsh-std
-    cp -r ${dshEcosystemSpecSrc}/. $out/dsh-ecosystem-spec/
+    mkdir -p $out/vendor/dsh-std
     cp -r ${dshStdSrc}/. $out/vendor/dsh-std/
   '';
 
@@ -60,7 +52,7 @@ let
   dshTuiPnpmDeps = pkgs.fetchPnpmDeps (fetchPnpmDepsArgs // {
     pname = "dsh-tui";
     src = sourceWithSubmodules;
-    hash = "sha256-i4HpC5SShCUR3MX0fwWsrE2Pt/S3zUSshOP/NhcTEL8=";
+    hash = "sha256-nH0ykUa+0QXrU+eJB0zC89VjYLLoaDnGZ08YHBbTh+c=";
   });
 
   dshTui = pkgs.stdenv.mkDerivation {
@@ -76,6 +68,12 @@ let
       # A hardware wheel notch can arrive as several terminal reports; apply
       # exactly one six-line vertical scroll to each short report burst.
       ./patches/dsh-tui-wheel-six-lines.patch
+      # Preserve permission picker discovery and its dynamic preset indicator.
+      ./patches/dsh-tui-permission-compat.patch
+      # Exercise registry identity fences with stable, real-registry fixtures.
+      ./patches/dsh-tui-test-fixtures.patch
+      # dsh 0.2.1 retired its diagnostics-only invariants package.
+      ./patches/dsh-tui-alpha2-compat.patch
     ];
 
     nativeBuildInputs = [
@@ -94,6 +92,25 @@ let
       # The hoisted layout is intentional: the installed plugin must share
       # the dsh installation's Cordis and Harness peer instances.
       echo 'verifyDepsBeforeRun: false' >> pnpm-workspace.yaml
+      # Keep upstream's rc.2 development fixture, while declaring the exact
+      # newer host line checked against its source types and real runtime.
+      # A precise replacement refuses a changed contract shape on future updates.
+      node --input-type=module - <<'NODE'
+      import assert from 'node:assert/strict'
+      import { readFileSync, writeFileSync } from 'node:fs'
+      const path = 'src/dsh-adapter/contract.ts'
+      const source = readFileSync(path, 'utf8')
+      const marker = "  '0.2.0-rc.2',\n] as const"
+      assert.equal(source.split(marker).length, 2, 'validated host list shape')
+      writeFileSync(path, source.replace(marker, "  '0.2.0-rc.2',\n  '0.2.1-alpha.2',\n] as const"))
+      // This distribution intentionally removes the obsolete worker runtime.
+      // Validate its absence instead of requiring the upstream legacy row.
+      const coexistencePath = 'scripts/verify-web-coexistence.mjs'
+      const coexistence = readFileSync(coexistencePath, 'utf8')
+      const retired = "  { id: 'code-runtime', name: '@deepseek-ai/dsh-code-runtime-worker-thread' },\n"
+      assert.equal(coexistence.split(retired).length, 2, 'legacy coexistence assertion shape')
+      writeFileSync(coexistencePath, coexistence.replace(retired, "") + "\nassert.ok(!tuiPatches.some(patch => patch.insert?.some(row => row.id === 'dsh-tui-code-runtime')), 'retired worker runtime stays absent')\n")
+      NODE
       # Legacy directory discovery must also see an empty shipped preset root.
       node -e 'require("node:fs").rmSync("presets/liangshen", { recursive: true, force: true })'
       # The current dsh-base supplies ptc-runtime/workflow-ptc. Remove the
@@ -109,6 +126,22 @@ let
       export HOME=$TMPDIR
       export CI=true
       root=$PWD
+      # Host peers are not installed in the distribution; expose the exact
+      # compatible line in its manifest without rewriting the upstream fixture lock.
+      node --input-type=module - <<'NODE'
+      import { readFileSync, writeFileSync } from 'node:fs'
+      const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
+      for (const section of ['peerDependencies', 'peerDependenciesMeta', 'devDependencies']) {
+        delete manifest[section]['@deepseek-ai/dsh-invariants']
+      }
+      for (const name of Object.keys(manifest.peerDependencies)) {
+        if (name.startsWith('@deepseek-ai/dsh-')) {
+          manifest.peerDependencies[name] += ' || 0.2.1-alpha.2'
+          manifest.devDependencies[name] = manifest.peerDependencies[name]
+        }
+      }
+      writeFileSync('package.json', JSON.stringify(manifest, null, 2) + '\n')
+      NODE
       restorePnpmStore() {
         archive="$1"
         store="$2"
@@ -154,9 +187,26 @@ let
       node scripts/build-guide.mjs --check
       # The TUI's lock must contain its validated Harness packages.
       node --import tsx/esm scripts/verify-upstream-contract.ts
+      node --import tsx/esm scripts/verify-manifest-deps.ts
       # Includes external token/sign-in visibility, cross-process locking and
       # the local regression for session-scoped Web /auth questions.
       node scripts/verify-oauth.mjs
+      node scripts/verify-permission-modes.mjs
+      node --input-type=module - <<'NODE'
+      import assert from 'node:assert/strict'
+      import { apply, inject } from './lib/types/dsh-adapter/invariant.js'
+      assert.deepEqual(inject, [])
+      assert.equal(typeof await apply({ get: () => undefined }), 'function')
+      let disposed = false
+      const dispose = await apply({ get: () => ({ register(packageName, install) {
+        assert.equal(packageName, '@deepseek-harness-tui/dsh-tui')
+        assert.equal(typeof install, 'function')
+        return () => { disposed = true }
+      } }) })
+      dispose()
+      assert.equal(disposed, true)
+      console.log('invariant compatibility: absent modern service and legacy registration both pass')
+      NODE
       node --input-type=module - <<'NODE'
       import assert from 'node:assert/strict'
       import { existsSync, readdirSync } from 'node:fs'
@@ -198,13 +248,23 @@ let
           wheelNotchDelta(state, -1, 1080),
         ], [6, 0, 0, 6, -6, 0]);
       '
+      node scripts/verify-wheel-notch.mjs
       node --import tsx/esm scripts/verify-wheel-selection.ts
       node --import tsx/esm scripts/verify-pointer-events.ts
+      node --import tsx/esm scripts/verify-mouse-report-fragments.tsx
       node --import tsx/esm scripts/verify-math-renderer.tsx
       # Baseline screen regressions cover the touched Chat/Ink input seam.
       node --import tsx/esm scripts/repro-askpanel.tsx
       node --import tsx/esm scripts/verify-askpanel-layout.tsx
       node --import tsx/esm scripts/repro-toolcards.tsx
+      # The new in-repo admission profile must preserve plugin and settings seams.
+      for script in verify-plugin-spec verify-plugin-grants verify-plugin-storage \
+        verify-plugin-messages verify-plugin-ledger verify-plugin-commands \
+        verify-plugin-negotiation verify-plugin-lifecycle verify-settings-definitions; do
+        node --import tsx/esm "scripts/$script.ts"
+      done
+      node --import tsx/esm scripts/verify-plugin-panels.tsx
+      node scripts/verify-web-coexistence.mjs
       runHook postBuild
     '';
 
@@ -275,7 +335,7 @@ let
       NODE
 
       mkdir -p $out/package
-      cp -r bin lib assets guide cordis.patch.yml cordis.yml dsh-ecosystem-spec package.json $out/package/
+      cp -r bin lib assets guide cordis.patch.yml cordis.yml tui-profile package.json $out/package/
       # Keep the directory for legacy preset discovery, but do not ship or
       # register the upstream Liangshen preset (registration patched above).
       mkdir -p $out/package/presets
@@ -293,6 +353,8 @@ let
         'lib/types/oauth.js', 'lib/types/oauth.d.ts',
         'guide/dsh-tui-guide/SKILL.md', 'guide/dsh-tui-guide/user-guide.en.md',
         'assets/whale-girl/whale-girl.png',
+        'tui-profile/registry/permissions-0.1.json',
+        'tui-profile/protocols/profile-definitions.js',
       ]) assert.ok(existsSync(join(out, 'package', path)), path)
       NODE
     '';
@@ -320,7 +382,7 @@ let
 
   # No global provider patch is applied after this profile. The TUI bundle's
   # complete llm-deepseek row therefore remains authoritative; the omitted
-  # protocol follows dsh 0.2.0-rc.1's official Messages default.
+  # protocol follows dsh 0.2.1-alpha.2's official Messages default.
   # Keep the previous seed for a safe, exact-match upgrade. A user-edited
   # runtime patch is never replaced just to add a new preset declaration.
   dshTuiProfilePatchText = ''
@@ -409,7 +471,7 @@ in
       inherit pkgs;
       name = "dsh-tui";
       packages = [ dshTui dshStdPnpmDeps dshTuiPnpmDeps ];
-      extraInputs = [ dshTuiSrc dshEcosystemSpecSrc dshStdSrc ];
+      extraInputs = [ dshTuiSrc dshStdSrc ];
     };
   };
 

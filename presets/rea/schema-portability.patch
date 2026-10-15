@@ -1,0 +1,117 @@
+--- a/src/contracts/toolSchemaMetadata.ts
++++ b/src/contracts/toolSchemaMetadata.ts
+@@ -1,6 +1,7 @@
+ import { z } from "zod";
+ 
+ import type { ToolContract } from "./toolContractTypes.js";
++import { portableJsonSchemaPatterns } from "./portableJsonSchemaPatterns.js";
+ 
+ const PROPERTY_DESCRIPTIONS: Readonly<Record<string, string>> = {
+   addresses: "Ordered provider-normalized procedure addresses to analyze.",
+@@ -98,7 +99,9 @@
+       ...standard,
+       jsonSchema: {
+         ...standard.jsonSchema,
+-        [io]: memoizeByTarget(advertise(project)),
++        [io]: memoizeByTarget((options) =>
++          portableJsonSchemaPatterns(advertise(project)(options)),
++        ),
+       },
+     },
+   });
+--- a/src/domain/native/nativeCallObservation.ts
++++ b/src/domain/native/nativeCallObservation.ts
+@@ -11,7 +11,7 @@
+ /** Objective-C class names and selectors never contain spaces or brackets. */
+ const objcName = nativeString
+   .min(1)
+-  .regex(/^[^\s[\]]+$/u, "Use the bare name without spaces or brackets");
++  .regex(/^[^\s\[\]]+$/u, "Use the bare name without spaces or brackets");
+ 
+ const functionBreakpoint = {
+   kind: z.literal("function"),
+--- /dev/null
++++ b/src/contracts/portableJsonSchemaPatterns.ts
+@@ -0,0 +1,82 @@
++// Only schema positions are traversed: examples/defaults and caller-supplied
++// regex strings are data, not schemas. Canonical Zod validation is untouched.
++const isObject = (value: unknown): value is Record<string, unknown> =>
++  typeof value === "object" && value !== null && !Array.isArray(value);
++
++const schemaMaps = new Set([
++  "properties", "$defs", "definitions", "patternProperties", "dependentSchemas",
++]);
++const schemaArrays = new Set(["allOf", "anyOf", "oneOf", "prefixItems"]);
++const schemaValues = new Set([
++  "not", "if", "then", "else", "propertyNames", "additionalProperties",
++  "unevaluatedProperties", "items", "additionalItems", "contains",
++  "unevaluatedItems", "contentSchema",
++]);
++
++const rootPattern = String.raw`^(?!\/)(?!(?:.*\/)?\.{1,2}(?:\/|$))(?!.*\/\/)(?!.*\/$)[^\\\0]+$`;
++const environmentPattern = String.raw`^(?!REA_PROCESS_RUN_ID(?![\s\S]))[^=\0]+$`;
++
++// Exact known spellings only; never reinterpret arbitrary patterns or flags.
++const portablePattern = (pattern: string): string => {
++  if (pattern === String.raw`^[^\0]*$`) return String.raw`^[^\x00]*$`;
++  if (pattern === String.raw`^[^=\0]+$`) return String.raw`^[^=\x00]+$`;
++  return pattern;
++};
++
++/** Pure outbound projection; preserves every non-pattern constraint. */
++export const portableJsonSchemaPatterns = (
++  schema: Record<string, unknown>,
++): Record<string, unknown> => {
++  const result: Record<string, unknown> = {};
++  for (const [key, value] of Object.entries(schema)) {
++    if (schemaMaps.has(key) && isObject(value)) {
++      const entries = new Map<string, unknown>();
++      for (const [name, child] of Object.entries(value)) {
++        const projectedName = key === "patternProperties" ? portablePattern(name) : name;
++        const projectedChild = projectValue(child);
++        // Two equivalent patternProperties keys both constrain matching values.
++        // Normalizing their spellings must not overwrite either constraint.
++        entries.set(projectedName, entries.has(projectedName)
++          ? { allOf: [entries.get(projectedName), projectedChild] }
++          : projectedChild);
++      }
++      result[key] = Object.fromEntries(entries);
++    } else if (schemaArrays.has(key) && Array.isArray(value)) {
++      result[key] = value.map(projectValue);
++    } else if (schemaValues.has(key)) {
++      result[key] = Array.isArray(value) ? value.map(projectValue) : projectValue(value);
++    } else {
++      result[key] = key === "pattern" && typeof value === "string"
++        ? portablePattern(value) : value;
++    }
++  }
++
++  let constraints: Record<string, unknown>[] = [];
++  if (schema.pattern === rootPattern) {
++    result.pattern = String.raw`^[^\\\x00]+$`;
++    // Each negative lookahead is anchored at the original start position.
++    // Do NOT remove anchors or replace dot with [\s\S]: newline semantics
++    // (including JS $ before a final line terminator) are intentional.
++    constraints = [
++      String.raw`^\/`,
++      String.raw`^(?:.*\/)?\.{1,2}(?:\/|$)`,
++      String.raw`^.*\/\/`,
++      String.raw`^.*\/$`,
++    ].map((pattern) => ({ not: { pattern } }));
++  } else if (schema.pattern === environmentPattern) {
++    result.pattern = String.raw`^[^=\x00]+$`;
++    constraints = [{ not: { const: "REA_PROCESS_RUN_ID" } }];
++  }
++  if (constraints.length > 0) {
++    // Retain even an unusual existing allOf value rather than overwriting it.
++    if (result.allOf !== undefined && !Array.isArray(result.allOf))
++      return { allOf: [result, ...constraints] };
++    result.allOf = [
++      ...(Array.isArray(result.allOf) ? result.allOf : []), ...constraints,
++    ];
++  }
++  return result;
++};
++
++const projectValue = (value: unknown): unknown =>
++  isObject(value) ? portableJsonSchemaPatterns(value) : value;

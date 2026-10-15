@@ -15,14 +15,14 @@ let
     import { writeFileSync } from 'node:fs'
     import { pathToFileURL } from 'node:url'
     const { TOOL_EFFECTS } = await import(pathToFileURL(process.argv[2]).href)
-    if (Object.keys(TOOL_EFFECTS).length !== 138) throw new Error('REA effects catalog is incomplete')
+    if (Object.keys(TOOL_EFFECTS).length !== 187) throw new Error('REA effects catalog is incomplete')
     writeFileSync(process.argv[3], JSON.stringify(TOOL_EFFECTS))
     NODE
   '';
   systemPackageConfigJson = builtins.toJSON {
     inherit hostPackageJson;
     effectsPath = "${effects}";
-    expectedTools = 138;
+    expectedTools = 187;
     serverName = "rea";
     command = "${rea}/bin/rea";
     args = [ "mcp" ];
@@ -34,6 +34,10 @@ let
       GHIDRA_HEADLESS_MAXMEM = "8G";
       REA_BROWSER_EXECUTABLE = "${pkgs.chromium}/bin/chromium";
       REA_EVM_PRLIMIT_COMMAND = "${pkgs.util-linux}/bin/prlimit";
+      REA_JAVASCRIPT_PRLIMIT_COMMAND = "${pkgs.util-linux}/bin/prlimit";
+      REA_TSHARK_PRLIMIT_COMMAND = "${pkgs.util-linux}/bin/prlimit";
+      REA_SIGROK_PRLIMIT_COMMAND = "${pkgs.util-linux}/bin/prlimit";
+      REA_FIRMWARE_PRLIMIT_COMMAND = "${pkgs.util-linux}/bin/prlimit";
       REA_LOG_LEVEL = "silent";
     };
     # Outer MCP call budget must exceed Ghidra's complete startup analysis.

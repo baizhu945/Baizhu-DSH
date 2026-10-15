@@ -26,7 +26,7 @@ export function validateConfig(value) {
   if (!isRecord(value.env) || Object.entries(value.env).some(([key, val]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof val !== 'string' || val.includes('\0'))) throw new TypeError('REA env must be literal strings')
   if (typeof value.hostPackageJson !== 'string' || !value.hostPackageJson.startsWith('/') || !value.hostPackageJson.endsWith('/apps/cli/package.json')) throw new TypeError('REA needs the exact host SDK anchor')
   if (!Number.isSafeInteger(value.toolCallTimeoutMs) || value.toolCallTimeoutMs < 1 || value.toolCallTimeoutMs > 86400000) throw new TypeError('Invalid REA tool timeout')
-  const expectedTools = value.expectedTools ?? 138
+  const expectedTools = value.expectedTools ?? 187
   if (!Number.isSafeInteger(expectedTools) || expectedTools < 1 || expectedTools > 10000) throw new TypeError('Invalid REA expected tool count')
   if (value.effectsPath !== undefined && (typeof value.effectsPath !== 'string' || !value.effectsPath.startsWith('/'))) throw new TypeError('REA effectsPath must be absolute')
   return { ...value, args: [...value.args], env: { ...value.env }, expectedTools }
@@ -115,7 +115,7 @@ export async function apply(ctx, input) {
       }, { global: true })
       const fiber = local.plugin(mcp, {
         transport: 'stdio', serverName: 'rea', command: config.command, args: config.args,
-        env: config.env, cwd: agent.session.header.cwd ?? process.cwd(),
+        env: config.env, cwd: local.get('workingDirectory')?.get(agent.session) ?? agent.session.header.cwd ?? process.cwd(),
         toolCallTimeoutMs: config.toolCallTimeoutMs, failOnStartupError: true,
         reconnect: { enabled: false, initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 10 },
       })

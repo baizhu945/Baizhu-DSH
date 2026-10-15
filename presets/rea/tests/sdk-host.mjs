@@ -58,7 +58,7 @@ export class CaptureAdapter extends LlmAdapter {
 
 /** Actual Cordis Loader, runtime services, preset registry and agent-loop; no
  * stub service injection, fake DI container, real credentials or model routes. */
-export async function actualContext(root, { definitions = [], reaDefinition } = {}) {
+export async function actualContext(root, { definitions = [], reaDefinition, hostToolMode } = {}) {
   const ctx = new Context()
   ctx.baseUrl = pathToFileURL(hostPeerAnchor).href
   await ctx.plugin((await sdk('@deepseek-ai/cordis-plugin-loader')).default)
@@ -66,11 +66,12 @@ export async function actualContext(root, { definitions = [], reaDefinition } = 
   const hostIds = new Set([
     'timer', 'llm', 'session', 'session-projection', 'agent', 'system-prompt', 'tools', 'agent-loop',
     'subprocess', 'jobs', 'sandbox', 'sandbox-policy', 'approval', 'shell-env', 'fs-sandbox',
-    'fs-observation-policy', 'bash-sandbox', 'skill', 'commands', 'goal', 'subagent', 'ptc-runtime',
+    'fs-observation-policy', 'working-directory', 'tool-working-directory', 'bash-sandbox', 'skill', 'commands', 'goal', 'subagent', 'ptc-runtime',
     'user-questions', 'web', 'mcp-resources', 'token-meter', 'permission',
   ])
   const base = loadYaml(join(runtimeRoot, 'packages/bundle/base/cordis.patch.yml')).flatMap(row => row.insert ?? [])
   const hostRows = base.filter(row => hostIds.has(row.id)).map(row => {
+    if (row.id === 'tools' && hostToolMode !== undefined) return { ...row, config: { ...row.config, mode: hostToolMode } }
     if (row.id === 'sandbox-policy') return { ...row, config: { mode: 'workspace-write', workspaceRoot: join(root, 'workspace') } }
     if (row.id === 'fs-sandbox') return { ...row, config: { cwd: join(root, 'workspace') } }
     if (row.id === 'ptc-runtime') return { ...row, config: { tempDir: join(root, 'ptc') } }
@@ -176,7 +177,7 @@ export async function execute(ctx, agent, name, arguments_ = {}, signal = new Ab
   return ctx.tools.execute({ agent, name, arguments: arguments_, callId: ToolCallId(`fixture-${Date.now()}`), signal })
 }
 export function stableRequest(request) {
-  return JSON.parse(JSON.stringify(request, function (key, value) {
+  const stable = JSON.parse(JSON.stringify(request, function (key, value) {
     if (key === 'signal' && value instanceof AbortSignal) return undefined
     const messageEnvelope = typeof this?.role === 'string' && Array.isArray(this?.content)
     if (messageEnvelope && ['id', 'time', 'createdAt'].includes(key)) return undefined
@@ -185,4 +186,18 @@ export function stableRequest(request) {
     if (['callId', 'attemptId'].includes(key) && typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value)) return '<opaque-correlation-id>'
     return value
   }))
+  // The first-party time-context now contributes a sampled wall-clock value.
+  // Normalize only that attributed sample in its two canonical copies; keep
+  // browser zone, elapsed facts, turn/step, all other messages and schemas exact.
+  const sampled = /^(Time sampled while preparing turn \d+, step \d+: )\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\[[^\r\n\]]+\](?=\n)/
+  for (const message of stable.messages ?? []) {
+    if (message.source?.kind !== 'time-context') continue
+    for (const block of message.content ?? []) {
+      if (block.type === 'text') block.text = block.text.replace(sampled, '$1<sampled-request-time>')
+    }
+    for (const section of message.source.sections ?? []) {
+      if (section.name === 'time-context') section.text = section.text.replace(sampled, '$1<sampled-request-time>')
+    }
+  }
+  return stable
 }

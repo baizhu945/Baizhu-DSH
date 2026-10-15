@@ -3,12 +3,12 @@
 let
   inherit (import ./environment.nix { }) pkgs runtimePath keepBuildInputs;
 
-  # deepseek-harness dsh-v0.2.0-rc.2 (2026-09-29)
+  # deepseek-harness dsh-v0.2.1-alpha.2 (latest upstream release tag)
   dshSrc = pkgs.fetchFromGitHub {
     owner = "deepseek-ai";
     repo = "deepseek-harness";
-    rev = "639ed015397290b3745d163aafe02ffee4aa3f84";
-    hash = "sha256-ZtO+bdoYbIkIgLTge5Eh7KYwTVh8FpFAAvx58dSY1PI=";
+    rev = "d743267388641bc76f17c45ce8b4c231aed1d32c";
+    hash = "sha256-MxxwtEPBG8SK6Rw5CqGalnJ5FWAygzVxklCQab5mpbU=";
   };
 
   # 声明式 pnpm 依赖(fetchPnpmDeps 为 fixed-output 派生,沙箱内可联网下载;
@@ -31,12 +31,12 @@ let
       pnpm config set network-concurrency 12
     '';
 
-    hash = "sha256-+7jFaROKpN8XHFpulloK2lb0GsYXbEdMs/V7ZO9leKE=";
+    hash = "sha256-xj6Pw00JIpLHjRS7NROKTNY+GdExEKvHRyjJOwmyNXU=";
   };
 
   dsh = pkgs.stdenv.mkDerivation {
     pname = "dsh";
-    version = "0.2.0-rc.2";
+    version = "0.2.1-alpha.2";
     src = dshSrc;
 
     pnpmDeps = dshPnpmDeps;
@@ -45,7 +45,8 @@ let
 
     patches = [
       ./patches/tool-bottom-collapse.patch
-      ./patches/bash-command-hscroll.patch
+      # CommandText now supplies upstream horizontal scrolling and keyboard
+      # access; the former bash-command-hscroll patch is fully superseded.
       ./patches/web-fetch-clash-fake-ip.patch
       # Native approval remains the sole composer/detail-slot owner. The user
       # addon may replace its presentation without changing request/answer semantics.
@@ -67,7 +68,7 @@ let
 
     nativeBuildInputs = [
       pkgs.nodejs_22 # dsh engines 要求 ^22.19 || >=24
-      pkgs.pnpm_11   # 与仓库 packageManager 一致的 pnpm 11
+      pkgs.pnpm_11   # 与仓库 packageManager 相同的 pnpm 11 主版本
       pkgs.pnpmConfigHook # 离线恢复 pnpm store 并执行 pnpm install
       pkgs.python3   # node-gyp 编译 node-pty 原生模块所需
       pkgs.node-gyp
@@ -106,11 +107,35 @@ let
       for (const provider of ['openai', 'openai-codex']) {
         const catalog = JSON.parse(readFileSync('node_modules/@earendil-works/pi-ai/dist/providers/data/' + provider + '.json', 'utf8'))
         const rows = Object.values(catalog).flatMap(models => Object.entries(models))
-          .filter(([id]) => id === 'gpt-6' || id.startsWith('gpt-6-'))
+          .map(([key, model]) => [model.id ?? key.replace(/^chat:/, ""), model])
+          .filter(([id]) => /^gpt-6(?:$|[-.])/.test(id))
         assert.ok(rows.length > 0, provider + ': GPT-6 catalog disappeared')
         for (const [id, model] of rows) assert.equal(model.contextWindow, 1050000, provider + '/' + id)
       }
       NODE
+    '';
+
+    # Exercise the patched rendering/approval/resolution seams against the
+    # exact locked dependencies before either CLI or Desktop is installed.
+    doCheck = true;
+    checkPhase = ''
+      runHook preCheck
+      export DSH_TELEMETRY_DISABLED=1
+      node --expose-internals node_modules/vitest/vitest.mjs run --maxWorkers 4 \
+        --execArgv=--expose-internals \
+        packages/client/ui-chat/tests/reasoning-row.client.spec.tsx \
+        packages/client/ui-chat/tests/reasoning-content.client.spec.tsx \
+        packages/client/ui-chat/tests/tool-call-tree.client.spec.ts \
+        packages/client/ui-tool/tests/tool-row.client.spec.tsx \
+        packages/client/ui-tool/tests/terminal-card.client.spec.tsx \
+        packages/client/ui-primitives/tests/command-text.client.spec.tsx \
+        packages/client/ui-primitives/tests/terminal-block.client.spec.tsx \
+        packages/client/ui-skill/tests/skill-row.client.spec.tsx \
+        packages/client/ui-approval/tests/ui-approval.client.spec.tsx \
+        packages/extensions/ui-cordis/tests/card-model.client.spec.ts \
+        packages/web/web-fetch-http/tests/fetch-http.spec.ts \
+        packages/boot/app-boot/tests/profile-resolution.spec.ts
+      runHook postCheck
     '';
 
     # 产物 = 完整源码树 + node_modules(运行时经扁平链接加载 @deepseek-ai/* 插件)

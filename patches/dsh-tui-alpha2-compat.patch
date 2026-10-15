@@ -1,0 +1,73 @@
+diff --git a/src/dsh-adapter/contract.ts b/src/dsh-adapter/contract.ts
+index 32033fa9..ce2a2a64 100644
+--- a/src/dsh-adapter/contract.ts
++++ b/src/dsh-adapter/contract.ts
+@@ -69,7 +69,6 @@ export const UPSTREAM_FRAMEWORK_MAJORS: Record<string, number> = {
+ export const UPSTREAM_BLESSED_PACKAGES = [
+   '@deepseek-ai/cordis',
+   '@deepseek-ai/schemastery',
+-  '@deepseek-ai/dsh-invariants',
+   '@deepseek-ai/dsh-agent',
+   '@deepseek-ai/dsh-agent-instructions',
+   '@deepseek-ai/dsh-agent-preset-registry',
+diff --git a/src/dsh-adapter/invariant.ts b/src/dsh-adapter/invariant.ts
+index e133bf76..6a6f9d1b 100644
+--- a/src/dsh-adapter/invariant.ts
++++ b/src/dsh-adapter/invariant.ts
+@@ -8,15 +8,24 @@
+  */
+ 
+ /* jscpd:ignore-start */
+-import type { Context } from '@deepseek-ai/cordis'
+-import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
++import type { Context, Inject } from '@deepseek-ai/cordis'
++
++/** Legacy companion shape; dsh 0.2.1 retired the invariants package. */
++export interface InvariantInstaller {
++  (ctx: Context, fail: (message: string) => never): void | Promise<void>
++  readonly inject?: Inject
++}
++
++interface LegacyInvariantRegistry {
++  register(packageName: string, installer: InvariantInstaller): () => void
++}
+ 
+ const PACKAGE_NAME = '@deepseek-harness-tui/dsh-tui'
+ 
+ /** Cordis companion plugin name. */
+ export const name = 'dsh-tui-invariant'
+-/** Service required before the companion can reserve package ownership. */
+-export const inject = ['invariants']
++/** No required service: modern hosts retired the invariant registry. */
++export const inject: readonly string[] = []
+ 
+ /**
+  * No runtime invariant: this interactive TUI front door owns no independent
+@@ -30,6 +39,12 @@ const install: InvariantInstaller = () => {}
+  * @param ctx - Cordis context carrying the invariant service.
+  * @returns the installed registration's disposer after setup succeeds.
+  */
+-export const apply = (ctx: Context): Promise<() => void> =>
+-  Promise.resolve(ctx.invariants.register(PACKAGE_NAME, install))
++export const apply = (ctx: Context): Promise<() => void> => {
++  const service: unknown = ctx.get('invariants')
++  if (service !== null && typeof service === 'object'
++    && 'register' in service && typeof service.register === 'function') {
++    return Promise.resolve((service as LegacyInvariantRegistry).register(PACKAGE_NAME, install))
++  }
++  return Promise.resolve(() => {})
++}
+ /* jscpd:ignore-end */
+diff --git a/src/dsh-adapter/types.ts b/src/dsh-adapter/types.ts
+index dcfcb45d..1cb5f67f 100644
+--- a/src/dsh-adapter/types.ts
++++ b/src/dsh-adapter/types.ts
+@@ -13,7 +13,7 @@ export type { CommandRuntime } from '@deepseek-ai/dsh-commands'
+ export type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
+ export type { AgentSetup } from '@deepseek-ai/dsh-agent'
+ export type { Context } from '@deepseek-ai/cordis'
+-export type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
++export type { InvariantInstaller } from './invariant.js'
+ 
+ /**
+  * Trajectory projection types. Not upstream types, but the same rule applies:

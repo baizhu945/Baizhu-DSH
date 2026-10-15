@@ -103,13 +103,13 @@ dsh-desktop
 ## 独立 REA preset
 
 `rea.nix` / `presets/rea/` 声明独立 **REA** preset，不依赖 Pi 配置，
-也不在 Codex preset 中安装 REA。REA 6.1.0 的源码、npm 依赖哈希、Node 24
+也不在 Codex preset 中安装 REA。REA 6.4.0 的源码、npm 依赖哈希、Node 24
 和运行脚本由本目录自己的 `rea-package.nix` 固定，不使用 `rea setup`。
 
 在 Web/TUI/Desktop **新会话**的 preset 选择器选择 REA；TUI 可使用 `/preset`。
 关闭时新建会话选择任意非 REA preset。DSH 首轮后锁定 preset，故不是 Pi 的
 同会话 `/rea off` 命令，但新会话的隔离逻辑相同：只有选中的 REA 根会话有
-138 个 MCP 工具和专属指导。默认 preset 不变；普通 headless 没有 preset
+187 个 MCP 工具和专属指导。默认 preset 不变；普通 headless 没有 preset
 registry，保持其上游行为，不声称可选择 REA。
 
 注册、roster 和冷诊断均不启动 MCP；选中后首次真正 assembly 才在 Agent
@@ -120,7 +120,7 @@ registry，保持其上游行为，不声称可选择 REA。
 
 外部进程/文件写入/网络/UI 等操作走宿主权限：Read Only 拒绝，Full Access
 按该明确权限模式允许，Confirm/Workspace Write 需原生审批，缺应答时拒绝。
-分析引擎不由此变成安全沙箱。6.1 原生支持 Ghidra 启动预算，原本地补丁已
+分析引擎不由此变成安全沙箱。6.4 原生支持 Ghidra 启动预算和 portable schema，原本地补丁已
 删除；保留30分钟/31分钟/8G私有配置。MCP文件参数须为绝对主机路径，用
 open_binary切换目标。EVMole绑定Nix prlimit；未自动安装可选Python引擎。
 代码和验证见 `presets/rea/README.md`。

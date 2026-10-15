@@ -1,0 +1,37 @@
+diff --git a/scripts/verify-agent-capabilities.ts b/scripts/verify-agent-capabilities.ts
+index 1b878ecd..591f4ae6 100644
+--- a/scripts/verify-agent-capabilities.ts
++++ b/scripts/verify-agent-capabilities.ts
+@@ -293,7 +293,7 @@ for (const [presetId, services, expected] of [
+   // 读三者拼接（scripts/lib/channel-composition.mjs），断言不变。
+   const source = compositionSource()
+   ok(
+-    source.includes('annotateCommandCapabilities(commands, capabilitiesOf())'),
++    source.includes('annotateCommandCapabilities(withPermissionCommand(commands), capabilitiesOf())'),
+     'the command-list refresh path annotates through the shared capability facts',
+   )
+ }
+diff --git a/scripts/verify-permission-modes.mjs b/scripts/verify-permission-modes.mjs
+index 11f3d3f0..8d64875e 100644
+--- a/scripts/verify-permission-modes.mjs
++++ b/scripts/verify-permission-modes.mjs
+@@ -133,13 +133,17 @@ function makeEnv({ modes, names, bundles, history = [], permission = {}, withCom
+     }
+   }
+   const registry = new PermissionRegistry()
++  // Real command registries retain one definition object across lookups.
++  // The invocation identity guard must see that same object in this fixture.
++  const planCommand = { name: 'plan', description: 'Toggle plan mode', handler() {} }
++  const permissionCommand = { name: 'permission', description: 'Set permission preset', handler() {} }
+   const services = {
+     planMode: { get: () => ({ pending: pendingPlan }) },
+     commands: {
+       list: () => [],
+       find: (_agent, name) => {
+-        if (name === 'plan') return { name: 'plan', description: 'Toggle plan mode', handler() {} }
+-        if (withCommand && name === 'permission') return { name: 'permission', description: 'Set permission preset', handler() {} }
++        if (name === 'plan') return planCommand
++        if (withCommand && name === 'permission') return permissionCommand
+         return undefined
+       },
+       execute: async (agent, line, _signal) => {

@@ -32,7 +32,10 @@ backend even though genuine official 0.159.3 successfully generated responses.
 
 The old `codex-model-parity.mjs`, `codex-surface.mjs`, etc. are inactive reference
 implementations. `agent.compat.cordis.yml` exists solely for their regression
-suite; it is never mounted by the native composition.
+suite; it is never installed or mounted by the native composition. The historical
+DSH 0.2.0 facade requires the retired mixed `both` presentation and
+`startContinuable` APIs; it is not a deployable DSH 0.2.1 composition. Its pure
+legacy regression tests are separate from acceptance of the installed native core.
 
 ## State and login
 
@@ -43,11 +46,27 @@ Runtime files are confined to `~/.dsh/.agent-presets/codex/`:
 - `native-home/`: the native `CODEX_HOME`, owned by Codex.
 - `threads/`: atomic DSH-session/native-thread/delivery/observer journals (mode 0600).
 
-The ordinary global `AGENTS.md` / `AGENTS.override.md` candidates are mirrored
-read-only from the user's normal Codex home. Project instructions are discovered
-by upstream Codex. Global Codex config, memories, plugins and auth files are not
+The DSH 0.2.1 user-global group is mirrored read-only: `.dsh/AGENTS.md` first,
+then `$DSH_AGENTS_HOME/AGENTS.md` (default `~/.agents`), with trimmed-content
+duplicates collapsed. Home Manager symlinks into immutable Nix store files are
+supported; mutable symlink targets are rejected. Project-only `CLAUDE.md` and
+`.local` candidates are not promoted into that global group. If neither DSH
+root supplies instructions, the normal Codex home's `AGENTS.override.md` /
+`AGENTS.md` is the fallback; an explicit `globalInstructionsHome` retains native
+override semantics. Project instructions are discovered by upstream Codex.
+Global Codex config, memories, plugins and auth files are not
 copied or modified. Native-home settings are independent and can be supplied
 through the preset's declarative `nativeConfig` option.
+
+Native thread and turn working directories follow the host's current Session
+working-directory service. The immutable original Session header is only the
+fallback for older hosts; changing the live directory does not reset native history.
+Workspace Write continues to use the host's original workspace write boundary;
+changing the current directory does not grant writes to another directory. Because
+the official Workspace Write policy implicitly grants its current directory,
+a native turn outside the original workspace/platform temp roots is rejected in
+that mode. Return to the project or explicitly select Codex Read Only / Full
+Access for such navigation. Read Only and Full Access follow live cwd normally.
 
 Default authentication uses the existing DSH OpenAI account login
 (`/auth login openai-codex` or `/provider`). Access tokens are supplied to the

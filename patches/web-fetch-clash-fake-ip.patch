@@ -1,9 +1,5 @@
-patching file packages/web/web-fetch-http/src/network.ts
-Hunk #1 succeeded at 38 (offset 1 line).
-Hunk #2 succeeded at 104 (offset 1 line).
-Hunk #3 succeeded at 128 (offset 1 line).
 diff --git a/packages/web/web-fetch-http/src/network.ts b/packages/web/web-fetch-http/src/network.ts
-index f14bf276b..61b76137a 100644
+index f14bf276..61b76137 100644
 --- a/packages/web/web-fetch-http/src/network.ts
 +++ b/packages/web/web-fetch-http/src/network.ts
 @@ -37,6 +37,30 @@ export type AddressResolver = (hostname: string, options: { all: true; order: 'v
@@ -57,3 +53,45 @@ index f14bf276b..61b76137a 100644
        throw new WebError(`URL hostname "${hostname}" resolves to a non-public IP address`, 'WEB_BLOCKED_URL')
      }
      const translatedIpv4 = translatedIpv4Address(entry.address, nat64Prefixes)
+diff --git a/packages/web/web-fetch-http/tests/fetch-http.spec.ts b/packages/web/web-fetch-http/tests/fetch-http.spec.ts
+index 1a134f20..0a83c13c 100644
+--- a/packages/web/web-fetch-http/tests/fetch-http.spec.ts
++++ b/packages/web/web-fetch-http/tests/fetch-http.spec.ts
+@@ -44,6 +44,7 @@ beforeEach(async () => {
+ 
+ afterEach(async () => {
+   vi.unstubAllGlobals()
++  vi.unstubAllEnvs()
+   vi.restoreAllMocks()
+   await new Promise<void>(resolve => server.close(() => { resolve() }))
+ })
+@@ -95,6 +96,29 @@ describe('policy helpers', () => {
+ })
+ 
+ describe('public-network policy', () => {
++  it.each([
++    ['198.18.0.1', 4], ['198.19.255.254', 4], ['::ffff:198.18.0.1', 6],
++  ])('allows fake-IP DNS %s only with the opt-in', async (address, family) => {
++    const resolver = async () => [{ address, family }]
++    vi.stubEnv('DSH_WEB_FETCH_ALLOW_FAKE_IP', '1')
++    await expect(resolvePublicAddresses('example.test', new AbortController().signal, resolver))
++      .resolves.toEqual([{ address, family }])
++    await expect(resolvePublicAddresses(address, new AbortController().signal, resolver))
++      .rejects.toThrow(expect.objectContaining({ code: 'WEB_BLOCKED_URL' }))
++    vi.stubEnv('DSH_WEB_FETCH_ALLOW_FAKE_IP', '0')
++    await expect(resolvePublicAddresses('example.test', new AbortController().signal, resolver))
++      .rejects.toThrow(expect.objectContaining({ code: 'WEB_BLOCKED_URL' }))
++  })
++
++  it('continues to reject private DNS answers while fake-IP compatibility is enabled', async () => {
++    vi.stubEnv('DSH_WEB_FETCH_ALLOW_FAKE_IP', '1')
++    for (const address of ['127.0.0.1', '10.0.0.1', '198.51.100.1', '::ffff:127.0.0.1']) {
++      await expect(resolvePublicAddresses('example.test', new AbortController().signal,
++        async () => [{ address, family: address.includes(':') ? 6 : 4 }]))
++        .rejects.toThrow(expect.objectContaining({ code: 'WEB_BLOCKED_URL' }))
++    }
++  })
++
+   it('accepts only globally reachable unicast addresses', () => {
+     for (const address of ['8.8.8.8', '2001:4860:4860::8888', '::ffff:8.8.8.8']) {
+       expect(isPublicIpAddress(address), address).toBe(true)

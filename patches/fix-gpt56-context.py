@@ -4,7 +4,7 @@
 pi-ai 同时维护 OpenAI API 和 OpenAI Codex（ChatGPT OAuth）两套目录。
 两套目录都把 GPT-6 价格分层的 272000 阈值误当成了 contextWindow；
 DSH 的 OpenAI 账号默认走 openai-codex，因此只修改 openai.json 不会生效。
-这里统一把 dsh 内置 GPT-6 系列的上下文窗口恢复为 1050000。
+这里统一把 dsh 内置 GPT-6（含 6.1）系列的上下文窗口恢复为 1050000。
 
 Codex preset 使用的官方 snake_case 模型目录由其自己的 patch 处理。
 脚本文件名沿用旧名，以免破坏现有构建入口；它不再更改 GPT-5.6。
@@ -12,6 +12,7 @@ Codex preset 使用的官方 snake_case 模型目录由其自己的 patch 处理
 
 import json
 import os
+import re
 
 
 CATALOGS = (
@@ -25,7 +26,7 @@ BROKEN_CONTEXT_WINDOW = 272_000
 
 
 def is_gpt6(model_id: str) -> bool:
-    return model_id == "gpt-6" or model_id.startswith("gpt-6-")
+    return re.match(r"^gpt-6(?:$|[-.])", model_id) is not None
 
 
 def model_entries(doc: object):
@@ -35,8 +36,13 @@ def model_entries(doc: object):
             if not isinstance(models, dict):
                 continue
             for model_id, model in models.items():
-                if isinstance(model_id, str):
-                    yield model_id, model
+                if not isinstance(model_id, str) or not isinstance(model, dict):
+                    continue
+                # pi-ai 1.0.2 indexes by modality (chat:gpt-6-astra), while
+                # the model's id remains the actual provider request id.
+                request_id = model.get("id", model_id.removeprefix("chat:"))
+                if isinstance(request_id, str):
+                    yield request_id, model
 
 
 def fix_catalog(catalog: str) -> int:

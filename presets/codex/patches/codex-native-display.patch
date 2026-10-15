@@ -1,5 +1,5 @@
 diff --git a/packages/client/ui-tool/src/client/tool/ToolCallTree.module.css b/packages/client/ui-tool/src/client/tool/ToolCallTree.module.css
-index 7d3ba67..e1796f1 100644
+index 7d3ba675..e1796f16 100644
 --- a/packages/client/ui-tool/src/client/tool/ToolCallTree.module.css
 +++ b/packages/client/ui-tool/src/client/tool/ToolCallTree.module.css
 @@ -10,3 +10,9 @@
@@ -13,10 +13,10 @@ index 7d3ba67..e1796f1 100644
 +  gap: 4px;
 +}
 diff --git a/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx b/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx
-index 050de5e..d6ce4fb 100644
+index d6419aa2..946c6229 100644
 --- a/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx
 +++ b/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx
-@@ -72,6 +72,38 @@ const ToolCallBranch = memo(function ToolCallBranch({
+@@ -65,6 +65,37 @@ const ToolCallBranch = memo(function ToolCallBranch({
    home?: string | undefined
  }) {
    const call = useMemo(() => toolCallPhase(block), [block])
@@ -25,7 +25,6 @@ index 050de5e..d6ce4fb 100644
 +      key={child.callId}
 +      renderSlot={renderSlot}
 +      block={child}
-+      assistant={assistant}
 +      cwd={cwd}
 +      home={home}
 +      openFile={openFile}
@@ -55,7 +54,7 @@ index 050de5e..d6ce4fb 100644
    return (
      <ToolCall
        renderSlot={renderSlot}
-@@ -87,25 +119,7 @@ const ToolCallBranch = memo(function ToolCallBranch({
+@@ -79,24 +110,7 @@ const ToolCallBranch = memo(function ToolCallBranch({
        loadImage={loadImage}
        t={t}
      >
@@ -66,7 +65,6 @@ index 050de5e..d6ce4fb 100644
 -              key={child.callId}
 -              renderSlot={renderSlot}
 -              block={child}
--              assistant={assistant}
 -              cwd={cwd}
 -              home={home}
 -              openFile={openFile}
@@ -83,7 +81,7 @@ index 050de5e..d6ce4fb 100644
    )
  })
 diff --git a/packages/client/ui-trajectory/src/client/layout.ts b/packages/client/ui-trajectory/src/client/layout.ts
-index ca0041d..4a9df13 100644
+index 11d67ba2..fb56ff9f 100644
 --- a/packages/client/ui-trajectory/src/client/layout.ts
 +++ b/packages/client/ui-trajectory/src/client/layout.ts
 @@ -61,6 +61,7 @@ interface LaidCell {
@@ -168,7 +166,7 @@ index ca0041d..4a9df13 100644
      if (call.step > 0) pushStep(call.turn, call.step, laidList)
      else for (const laid of laidList) pushMessage(call.turn, laid)
    }
-@@ -796,6 +804,7 @@ function expandAssistant(
+@@ -798,6 +806,7 @@ function expandAssistant(
        toolName: block.name,
        callId: block.callId,
        ...(call === undefined ? {} : { subCalls: call.subCalls }),
@@ -176,7 +174,7 @@ index ca0041d..4a9df13 100644
        cell: {
          index: ++index, kind: 'tool',
          ...summarizeCall(block.name, block.argsRaw),
-@@ -1025,6 +1034,13 @@ function withSubCalls(laidList: LaidCell[], t: TrajectoryTranslate): LaidCell[]
+@@ -1027,6 +1036,13 @@ function withSubCalls(laidList: LaidCell[], t: TrajectoryTranslate): LaidCell[]
    const out: LaidCell[] = []
    let index = laidList[0] !== undefined ? laidList[0].cell.index - 1 : 0
    for (const laid of laidList) {
@@ -190,7 +188,7 @@ index ca0041d..4a9df13 100644
      out.push({ ...laid, cell: { ...laid.cell, index: ++index } })
      for (const sub of expandSubCalls(laid.subCalls, index, t)) {
        out.push(sub)
-@@ -1039,6 +1055,7 @@ function expandSubCalls(
+@@ -1041,6 +1057,7 @@ function expandSubCalls(
    subs: readonly ToolCallBlock[] | undefined,
    startIndex: number,
    t: TrajectoryTranslate,
@@ -198,7 +196,7 @@ index ca0041d..4a9df13 100644
  ): LaidCell[] {
    if (subs === undefined || subs.length === 0) return []
    const out: LaidCell[] = []
-@@ -1053,7 +1070,7 @@ function expandSubCalls(
+@@ -1055,7 +1072,7 @@ function expandSubCalls(
        callId: sub.callId,
        cell: {
          index: ++index,

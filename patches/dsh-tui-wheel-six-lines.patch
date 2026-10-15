@@ -25,17 +25,19 @@
 +  state.direction = direction;
 +  return direction * WHEEL_NOTCH_LINES;
 +}
+diff --git a/src/ink/components/App.tsx b/src/ink/components/App.tsx
+index ec00c498..2b8a9530 100644
 --- a/src/ink/components/App.tsx
 +++ b/src/ink/components/App.tsx
-@@ -5,6 +5,7 @@
+@@ -5,6 +5,7 @@ import { stopCapturingEarlyInput } from "../../utils/earlyInput.js";
  import { isEnvTruthy } from "../../utils/envUtils.js";
  import { isMouseClicksDisabled } from "../../utils/fullscreen.js";
  import { isInputSuppressed } from "../input-suppression.js";
 +import { wheelNotchDelta, type WheelNotchState } from "../wheel-notch.js";
  import { logMouseDebug } from "../../utils/debug.js";
  import { logError } from "../../utils/log.js";
- import { EventEmitter } from "../events/emitter.js";
-@@ -243,6 +244,8 @@
+ import { appendCrashLog, serializeCrashDetail } from "../../utils/crashDetail.js";
+@@ -264,6 +265,8 @@ export default class App extends PureComponent<Props, State> {
  	// Multi-click tracking for double/triple-click text selection. A click
  	// within MULTI_CLICK_TIMEOUT_MS and MULTI_CLICK_DISTANCE of the previous
  	// click increments clickCount; otherwise it resets to 1.
@@ -44,12 +46,11 @@
  	lastClickTime = 0;
  	lastClickCol = -1;
  	lastClickRow = -1;
-@@ -927,6 +930,17 @@
+@@ -980,6 +983,16 @@ function processKeysInBatch(
  			setTerminalFocused(true);
  		}
  
-+		// Coalesce the repeated same-direction reports from one physical notch
-+		// before position routing or the global Chat fallback can consume them.
++		// Coalesce one physical notch before positional or fallback routing.
 +		const verticalWheel = item.name === "wheelup" || item.name === "wheeldown";
 +		let wheelDeltaY = 0;
 +		if (verticalWheel && !isInputSuppressed()) {
@@ -59,10 +60,10 @@
 +			if (wheelDeltaY === 0) continue;
 +		}
 +
- 		// Handle Ctrl+Z (suspend) using parsed key to support both raw (\x1a) and
- 		// CSI u format (\x1b[122;5u) from Kitty keyboard protocol terminals
- 		if (item.name === "z" && item.ctrl && SUPPORTS_SUSPEND) {
-@@ -953,8 +967,7 @@
+ 		// Wheel keys carry the pointer position (SGR/X10 col/row). Route
+ 		// position-first: if a scroll container sits under the pointer, its
+ 		// onWheel consumes the event and the legacy global keybinding path
+@@ -1000,8 +1013,7 @@ function processKeysInBatch(
  		) {
  			const step =
  				(item.name === "wheelup" || item.name === "wheelleft") ? -3 : 3;
@@ -72,17 +73,19 @@
  			const deltaX =
  				item.name === "wheelleft" || item.name === "wheelright" ? step : 0;
  			const consumed = app.props.onWheelAt(
+diff --git a/src/screens/Chat.tsx b/src/screens/Chat.tsx
+index aa966133..95fc13a3 100644
 --- a/src/screens/Chat.tsx
 +++ b/src/screens/Chat.tsx
-@@ -50,6 +50,7 @@
- import { ApprovalPanel } from '../components/approvals/ApprovalPanel.js'
+@@ -60,6 +60,7 @@ import { ApprovalPanel } from '../components/approvals/ApprovalPanel.js'
  import { ExtensionDialog } from '../components/ExtensionDialog.js'
+ import { consumeBoundaryRecoveryRemount } from '../ink/update-overflow-guard.js'
  import type { DOMElement } from '../ink/dom.js'
 +import { WHEEL_NOTCH_LINES } from '../ink/wheel-notch.js'
  import { useSearchHighlight } from '../ink/hooks/use-search-highlight.js'
  import { useTerminalTitle } from '../ink/hooks/use-terminal-title.js'
  import { useTerminalFocus } from '../ink/hooks/use-terminal-focus.js'
-@@ -3312,7 +3313,7 @@
+@@ -4281,7 +4282,7 @@ export function Chat({
          overlay.kind !== 'none' &&
          (overlay.kind !== 'workspace-picker' || workspaceTargets.length > 0)
        if (overlayModal) return
@@ -91,3 +94,68 @@
        event.stopImmediatePropagation()
        return
      }
+@@ -4440,9 +4441,9 @@ export function Chat({
+       // ——绝不漏进落地页草稿。
+       const page = Math.max(1, helpCoverViewportHeight - 2)
+       if (key.upArrow || key.wheelUp) {
+-        helpCoverScrollRef.current?.scrollBy(key.wheelUp ? -3 : -1)
++        helpCoverScrollRef.current?.scrollBy(key.wheelUp ? -WHEEL_NOTCH_LINES : -1)
+       } else if (key.downArrow || key.wheelDown) {
+-        helpCoverScrollRef.current?.scrollBy(key.wheelDown ? 3 : 1)
++        helpCoverScrollRef.current?.scrollBy(key.wheelDown ? WHEEL_NOTCH_LINES : 1)
+       } else if (key.pageUp || key.pageDown) {
+         helpCoverScrollRef.current?.scrollBy(key.pageUp ? -page : page)
+       } else if (key.home) {
+--- /dev/null
++++ b/scripts/verify-wheel-notch.mjs
+@@ -0,0 +1,50 @@
++/** Exercise six-line/coalesced wheel routing through the real Ink App parser. */
++import assert from 'node:assert/strict'
++import App from '../lib/types/ink/components/App.js'
++import { createSelectionState } from '../lib/types/ink/selection.js'
++
++const originalNow = Object.getOwnPropertyDescriptor(performance, 'now')
++let now = 1000
++Object.defineProperty(performance, 'now', { configurable: true, value: () => now })
++const routed = []
++let consume = true
++let fallback = 0
++const noop = () => {}
++const app = new App({
++  children: null, stdin: process.stdin, stdout: process.stdout, stderr: process.stderr,
++  exitOnCtrlC: false, onExit: noop, terminalColumns: 80, terminalRows: 24,
++  selection: createSelectionState(), onSelectionChange: noop,
++  onClickAt: () => false, onContextMenuAt: () => false, onHoverAt: noop,
++  onWheelAt: (col, row, deltaY, deltaX) => { routed.push([col, row, deltaY, deltaX]); return consume },
++  getHyperlinkAt: () => undefined, onOpenHyperlink: noop, onMultiClick: noop,
++  onSelectionStart: noop, onSelectionDrag: noop, dispatchKeyboardEvent: noop,
++})
++app.internal_eventEmitter.on('input', event => {
++  if (event.key.wheelUp || event.key.wheelDown) fallback += 1
++})
++try {
++  app.processInput('\x1b[<65;5;6M'.repeat(3))
++  assert.deepEqual(routed, [[4, 5, 6, 0]])
++  assert.equal(fallback, 0, 'position routing consumes exactly one six-line notch')
++  now = 1074
++  app.processInput('\x1b[<65;5;6M')
++  assert.equal(routed.length, 1, 'same-direction report before the 75 ms boundary is coalesced')
++  now = 1075
++  app.processInput('\x1b[<65;5;6M')
++  now = 1076
++  app.processInput('\x1b[<64;5;6M'.repeat(2))
++  assert.deepEqual(routed.map(row => row[2]), [6, 6, -6])
++  consume = false
++  now = 1200
++  app.processInput('\x1b[<65;5;6M'.repeat(4))
++  assert.equal(fallback, 1, 'global fallback receives exactly one vertical notch')
++  app.processInput('\x1b[<67;5;6M'.repeat(2))
++  assert.deepEqual(routed.slice(-2).map(row => row.slice(2)), [[0, 3], [0, 3]],
++    'horizontal wheel keeps upstream three-column steps and independent reports')
++  console.log('wheel-notch: actual App routes six-line vertical notches; burst suppression and fallback pass')
++} finally {
++  if (originalNow) Object.defineProperty(performance, 'now', originalNow)
++  else Reflect.deleteProperty(performance, 'now')
++  app.querier.dispose()
++  if (app.incompleteEscapeTimer) clearTimeout(app.incompleteEscapeTimer)
++}

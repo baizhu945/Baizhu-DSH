@@ -45,17 +45,6 @@ function findPackage(name, anchor) {
     if (existsSync(join(directory, 'package.json'))) return directory
   }
 }
-function packagesAt(root) {
-  if (!existsSync(root)) return []
-  return readdirSync(root).sort().filter(name => !name.startsWith('.')).flatMap(name => {
-    if (name.startsWith('@')) return readdirSync(join(root, name)).sort().map(child => [name + '/' + child, join(root, name, child)])
-    return [[name, join(root, name)]]
-  }).filter(([, path]) => existsSync(join(path, 'package.json')))
-}
-function pluginMetadata(manifest) {
-  return manifest.dsh?.bundle !== undefined || manifest.dsh?.client !== undefined
-    || Object.keys(manifest.peerDependencies ?? {}).some(name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
-}
 function excluded(name, id) {
   const root = packageName(name)
   if (transportIds.has(id) || transport.has(name) || transport.has(root)
@@ -206,15 +195,11 @@ export async function synchronizeDesktopPlugins({ runtimeDir, profileDir, home =
     for (const dependency of Object.keys(sourceManifest.dependencies ?? {}).sort()) {
       proposePackage(dependency, findPackage(dependency, join(dir, 'package.json')), name)
     }
-    for (const [dependency, path] of packagesAt(join(dir, 'node_modules'))) {
-      const pkg = readJson(join(path, 'package.json'))
-      if (pluginMetadata(pkg)) proposePackage(dependency, path, name)
-    }
+    // Local node_modules can retain unselected packages from older releases.
+    // Only declared dependencies and packages referenced by admitted rows are
+    // projected; scanning every installed package would revive stale plugins.
     return { name, dir, loaded }
   })
-  for (const [name, path] of packagesAt(join(profilesRoot, 'node_modules'))) {
-    if (pluginMetadata(readJson(join(path, 'package.json')))) proposePackage(name, path, 'shared')
-  }
   const claimed = new Map([
     ...[...baselineIds].map(id => [id, 'desktop-core']),
     ...[...localIds].map(id => [id, 'desktop']),
@@ -226,6 +211,14 @@ export async function synchronizeDesktopPlugins({ runtimeDir, profileDir, home =
     const { name: sourceName, dir, loaded } = source
     const candidates = []
     for (const layer of loaded.layers) {
+      // The full TUI composition now owns terminal startup, scoped preset
+      // helpers, and legacy disabled rows. It is not a portable Desktop bundle.
+      // Web/headless explicitly declare the portable /oauth row, and profile
+      // patches below remain eligible independently of their TUI frontdoor.
+      if (layer.packageName === tui) {
+        skip(sourceName, undefined, 'terminal-only TUI bundle; portable subpaths require an explicit row', layer.packageName)
+        continue
+      }
       if (baselineLayers.some(own => own.packageName === layer.packageName)) {
         skip(sourceName, undefined, 'Desktop already supplies core/surface bundle', layer.packageName)
         continue

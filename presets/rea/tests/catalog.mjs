@@ -1,4 +1,4 @@
-// Ordered TOOL_CONTRACTS at upstream 4fb2f3e6ed0233505eada3cddeeff0ea0bfc6fe5.
+// Ordered TOOL_CONTRACTS at upstream a2d8b94dd50dab8d966239dd63ab84718aa8b4b4.
 // Includes HOPPER_MEMORY_TOOL_DEFINITIONS at its canonical spread position.
 export const expectedToolNames = `
 annotate_native_function
@@ -63,8 +63,10 @@ inspect_signature
 inspect_plist
 list_architectures
 demangle_swift
+inspect_pe_resources
 inspect_binary_layout
 inspect_recorded_crash
+inspect_analysis_view
 inspect_artifact
 extract_artifact
 decode_interface_builder
@@ -72,6 +74,11 @@ inspect_keyed_archive
 inspect_asset_catalog
 trace_dylib_resolution
 inspect_evm_interface
+inspect_go_binary
+inspect_wasm_artifact
+inspect_sqlite_database
+inspect_packet_capture
+decode_signal_recording
 inspect_managed_artifact
 inspect_managed_members
 inspect_managed_native_boundaries
@@ -80,6 +87,38 @@ search_android_classes
 inspect_android_class
 inspect_android_method
 trace_android_references
+inspect_apktool_client
+decode_android_resources
+identify_flutter_build
+inspect_dart_aot
+inspect_jeb_client
+open_jeb_project
+list_jeb_units
+decompile_jeb_item
+inspect_adb_client
+list_adb_devices
+inspect_adb_device
+list_adb_packages
+pull_adb_package
+read_adb_logcat
+inspect_adb_package
+pull_adb_file
+push_adb_file
+capture_adb_screen
+list_adb_processes
+list_adb_directory
+list_adb_features
+list_adb_services
+inspect_adb_display
+inspect_adb_window
+read_adb_setting
+collect_adb_bugreport
+resolve_adb_packages
+install_adb_package
+uninstall_adb_package
+start_adb_app
+start_adb_activity
+stop_adb_app
 inspect_firmware_regions
 extract_firmware
 compare_managed_members
@@ -111,6 +150,7 @@ build_reconstruction_obligation_ledger
 evaluate_reconstruction_coverage
 project_android_application_graph
 project_apple_application_graph
+project_harmony_application_graph
 trace_web_source_location
 trace_web_module_imports
 export_web_scripts
@@ -139,4 +179,13 @@ verify_unknown_resolution
 get_evidence_bundle
 get_navigation_context
 inspect_address_context
+list_frida_devices
+list_frida_processes
+start_frida_session
+load_frida_script
+resume_frida_session
+unload_frida_script
+frida_session_status
+close_frida_session
+instrument_with_frida
 `.trim().split('\n')

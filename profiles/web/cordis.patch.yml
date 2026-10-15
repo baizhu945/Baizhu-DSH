@@ -22,7 +22,7 @@
     - id: approval-tweaks
       name: 'dsh-baizhu-approval'
 
-    # dsh-TUI 0.12 的内置 OAuth：沿用 dshAuth 服务和原凭据路径。
+    # dsh-TUI 的内置 OAuth：沿用 dshAuth 服务和原凭据路径。
     # 只挂载 OAuth 入口，不加载 TUI bundle；包由 Nix 激活部署为真实文件。
     - id: dsh-auth
       name: '@deepseek-harness-tui/dsh-tui/oauth'

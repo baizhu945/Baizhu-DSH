@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { runInNewContext } from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { installedDshRoot } from './codex-test-environment.mjs';
 import {
   nativeToolName, nativeToolArguments, nativeCallPresentation,
   nativeResultContent, nativeResultPresentation, nativePresentationMeta,
@@ -656,12 +657,12 @@ test('all presenters are deterministic and leave frozen native values unchanged'
 // Offline integration: evaluate just pure TS functions extracted from small
 // source fragments, never import the DSH application or edit a source tree.
 test('pinned raw Web UI patch: strict marker gates, standard equivalence, live/replay cards', async t => {
-  const source = process.env.DSH_NATIVE_UI_SOURCE ?? '/nix/store/i3xj6bb8j9qr18a7b39wb870vljg8p2w-source';
-  const installed = process.env.DSH_NATIVE_UI_INSTALLED ?? '/nix/store/bd2xniw1ymxc545042qy39p67wzgax0a-dsh-0.2.0-rc.2';
+  const source = process.env.DSH_NATIVE_UI_SOURCE;
+  const installed = process.env.DSH_NATIVE_UI_INSTALLED ?? process.env.DSH_CODEX_TEST_DSH_ROOT ?? installedDshRoot();
   const tsPath = process.env.DSH_NATIVE_UI_TYPESCRIPT ?? join(installed, 'node_modules/typescript/lib/typescript.js');
-  if (!existsSync(source) || !existsSync(tsPath)) {
+  if (!source || !existsSync(source) || !existsSync(tsPath)) {
     if (process.env.DSH_CODEX_REQUIRE_NATIVE_TESTS === '1') {
-      assert.ok(existsSync(source), `Required unpatched DSH UI source is missing: ${source}; supply DSH_NATIVE_UI_SOURCE`);
+      assert.ok(source && existsSync(source), `Required unpatched DSH UI source is missing: ${source}; supply DSH_NATIVE_UI_SOURCE`);
       assert.ok(existsSync(tsPath), `Required DSH TypeScript fixture is missing: ${tsPath}; supply DSH_NATIVE_UI_TYPESCRIPT/DSH_NATIVE_UI_INSTALLED`);
     }
     t.skip('Optional pinned DSH source/TypeScript not present; pure presenter tests still run');
@@ -700,7 +701,7 @@ test('pinned raw Web UI patch: strict marker gates, standard equivalence, live/r
       }
       trees[label] = tree;
     }
-    t.diagnostic(`patch --fuzz=0 passed for all ${chain.length} declarative DSH source patches against pinned 639ed015`);
+    t.diagnostic(`patch --fuzz=0 passed for all ${chain.length} declarative DSH source patches against the exact supplied unpatched host source`);
 
     function evaluate(tree, file, names, constants = [], support = '') {
       const path = join(tree, file);
@@ -724,11 +725,19 @@ test('pinned raw Web UI patch: strict marker gates, standard equivalence, live/r
     const rawFunctions = rawAst.statements.filter(node => ts.isFunctionDeclaration(node))
       .map(node => node.getText(rawAst).replace(/^export\s+/, '')).join('\n');
     const rawSupport = 'const parsedCalls = new WeakMap();\n' + rawFunctions;
+    // New host terminal cards use operation-time paths. Evaluate the exact
+    // source helpers alongside their consumer instead of stubbing path logic.
+    const pathFunctions = ['packages/util/workspace-path/src/index.ts', tool + 'recorded-path.ts'].map(file => {
+      const text = readFileSync(join(source, file), 'utf8');
+      const ast = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+      return ast.statements.filter(node => ts.isFunctionDeclaration(node))
+        .map(node => node.getText(ast).replace(/^export\s+/, '')).join('\n');
+    }).join('\n');
     const models = Object.fromEntries(Object.entries(trees).map(([label, tree]) => [label, {
       row: evaluate(tree, tool + 'tool-call-model.ts', ['deriveSummary', 'formatToolBody', 'variants: Object.keys(SUMMARY_KEYS)'], ['SUMMARY_KEYS']),
       trajectory: evaluate(tree, layout, ['summarizeCall']),
       diff: evaluate(tree, tool + 'diff-card-model.ts', ['diffCardModel'], [], rawSupport),
-      terminal: evaluate(tree, tool + 'terminal-card-model.ts', ['terminalCardModel', 'shellCall', 'parseExitStatus'], [], rawSupport),
+      terminal: evaluate(tree, tool + 'terminal-card-model.ts', ['terminalCardModel', 'shellCall', 'parseExitStatus'], [], rawSupport + '\n' + pathFunctions),
     }]));
     const before = models.baseline;
     const after = models.native;

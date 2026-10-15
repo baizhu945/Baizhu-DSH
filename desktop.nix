@@ -43,16 +43,19 @@ let
       import { createRequire } from 'node:module'
       import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
       import { join } from 'node:path'
+      import { pathToFileURL } from 'node:url'
 
       const out = process.env.out
       const modules = join(out, 'node_modules')
       const require = createRequire(join(out, 'apps', 'desktop', 'package.json'))
       const { valid } = require('semver')
+      const { DESKTOP_HOST_PROTOCOL_VERSION } = await import(
+        pathToFileURL(join(out, 'apps', 'desktop', 'lib', 'types', 'host-protocol.js')).href)
 
       const release = {
         schemaVersion: 1,
         version: process.env.DSH_DESKTOP_RELEASE_VERSION,
-        hostProtocolVersion: 4,
+        hostProtocolVersion: DESKTOP_HOST_PROTOCOL_VERSION,
         nodeVersion: process.env.DSH_DESKTOP_NODE_VERSION,
         pnpmVersion: JSON.parse(readFileSync(join(modules, 'pnpm', 'package.json'), 'utf8')).version,
       }
@@ -149,7 +152,7 @@ let
   pythonSitePackages = "${pythonEnv}/lib/python${pythonAbi}/site-packages";
 
   # pnpm actually built into the runtime tree by the pinned lockfile.
-  runtimePnpmVersion = "11.7.0";
+  runtimePnpmVersion = "11.28.5";
 
   # Normalized names, exactly as tool-workspace-dependencies normalizes them.
   requiredPythonDistributions = [

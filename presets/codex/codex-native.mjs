@@ -6,8 +6,9 @@
  * admitted, direct user input crosses the boundary; Codex owns its own history.
  */
 import fs from 'node:fs/promises'
-import { constants as fsConstants } from 'node:fs'
+import { constants as fsConstants, realpathSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
+import { homedir, tmpdir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { addAbortListener } from 'node:events'
@@ -42,6 +43,7 @@ function sessionEvents(session) {
 function safeError(error) {
   // Do not copy arbitrary RPC error.data, request bodies, or stderr to the UI.
   return error?.code === 'CODEX_LEGACY_SESSION' || error?.code === 'CODEX_INPUT_UNSUPPORTED'
+    || error?.code === 'CODEX_WORKING_DIRECTORY_OUTSIDE_WORKSPACE'
     || error?.code?.startsWith?.('CODEX_AUTH_') ? error.message
     : `Official Codex runtime failed${error?.code ? ` (${String(error.code)})` : ''}. Check the preset's native runtime and account login.`
 }
@@ -93,9 +95,8 @@ async function privateDirectory(directory) {
   await fs.chmod(directory, 0o700)
 }
 
-// DSH user-global instruction candidates, in the exact precedence and
-// concatenating semantics of @deepseek-ai/dsh-agent-instructions.
-const DSH_INSTRUCTION_CANDIDATES = ['AGENTS.md', 'CLAUDE.md', 'AGENTS.local.md', 'CLAUDE.local.md']
+// DSH 0.2.1's user-global group reads AGENTS.md from the harness home,
+// then the shared agents home. CLAUDE/.local candidates belong to projects.
 // A mirror larger than this is refused rather than silently truncated.
 const MAX_MIRRORED_INSTRUCTION_BYTES = 1_048_576
 
@@ -120,9 +121,17 @@ export function composeUserInstructions(entries) {
 
 async function readInstructionFile(filename) {
   try {
-    const stat = await fs.lstat(filename)
-    // Never follow a symlink out of the user's home: only regular files mirror.
-    if (stat.isSymbolicLink() || !stat.isFile()) return { missing: true }
+    let stat = await fs.lstat(filename)
+    // Home Manager owns AGENTS.md through an immutable Nix store symlink.
+    // Other symlinks still cannot escape into mutable host/account files.
+    if (stat.isSymbolicLink()) {
+      const resolved = await fs.realpath(filename)
+      if (!/^\/nix\/store\/[0-9a-z]{32}-[^/]+(?:\/.*)?$/.test(resolved)) return { missing: true }
+      stat = await fs.stat(resolved)
+      if (stat.uid !== 0 || (stat.mode & 0o222) !== 0) return { missing: true }
+      filename = resolved
+    }
+    if (!stat.isFile()) return { missing: true }
     if (stat.size > MAX_MIRRORED_INSTRUCTION_BYTES) return { tooLarge: true }
     return { text: await fs.readFile(filename, 'utf8') }
   } catch (error) {
@@ -133,7 +142,7 @@ async function readInstructionFile(filename) {
 
 // Real-filesystem mirror of user-global instructions into the private native
 // home. Exported so the production path itself is testable offline.
-export async function mirrorUserInstructions({ nativeHome, dshHome, codexHome, explicit, logger }) {
+export async function mirrorUserInstructions({ nativeHome, dshHome, agentsHome, codexHome, explicit, logger }) {
   const agents = path.join(nativeHome, 'AGENTS.md')
   const override = path.join(nativeHome, 'AGENTS.override.md')
   const write = async (file, text) => {
@@ -159,11 +168,11 @@ export async function mirrorUserInstructions({ nativeHome, dshHome, codexHome, e
     return
   }
   await write(override, undefined)
-  if (dshHome) {
+  if (dshHome || agentsHome) {
     const entries = []
     let oversized = false
-    for (const candidate of DSH_INSTRUCTION_CANDIDATES) {
-      const read = await readInstructionFile(path.join(dshHome, candidate))
+    for (const root of [dshHome, agentsHome].filter(Boolean)) {
+      const read = await readInstructionFile(path.join(root, 'AGENTS.md'))
       if (read.tooLarge) oversized = true
       if (read.text !== undefined) entries.push({ text: read.text })
     }
@@ -190,6 +199,62 @@ export async function mirrorUserInstructions({ nativeHome, dshHome, codexHome, e
   const fallbackText = fallback.tooLarge ? undefined
     : fallback.text ?? (await readInstructionFile(path.join(codexHome, 'AGENTS.md'))).text
   await write(agents, fallbackText)
+}
+
+/** The Session header retains its original project; DSH 0.2.1 owns live cwd separately. */
+export function nativeWorkingDirectory(ctx, agent) {
+  const service = typeof ctx.get === 'function' ? ctx.get('workingDirectory') : ctx.workingDirectory
+  return service?.get(agent.session) ?? agent.session.header.cwd ?? process.cwd()
+}
+
+/** Navigation does not change the host's immutable workspace write boundary. */
+export function nativeWorkspaceRoot(ctx, agent) {
+  const policy = typeof ctx.get === 'function' ? ctx.get('sandboxPolicy') : ctx.sandboxPolicy
+  return policy?.resolve?.({ session: agent.session })?.workspaceRoot
+    ?? agent.session.header.cwd ?? process.cwd()
+}
+
+/** Official WorkspaceWrite implicitly grants cwd; never turn navigation into a new grant. */
+export function assertNativeWorkingDirectory(ctx, agent, policy) {
+  const cwd = nativeWorkingDirectory(ctx, agent)
+  if (policy.sandbox !== 'workspace-write') return cwd
+  const canonical = value => { try { return realpathSync.native(value) } catch { return value } }
+  const current = canonical(cwd)
+  const roots = [nativeWorkspaceRoot(ctx, agent), '/tmp', tmpdir()].map(canonical)
+  const under = (root, target) => {
+    const relative = path.relative(root, target)
+    return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  }
+  // Match the pinned core's default_read_only_subpaths_for_writable_root:
+  // metadata under a previously granted root cannot become a new cwd grant.
+  const protectedPaths = roots.flatMap(root => {
+    const paths = ['.git', '.agents', '.codex', '.aws'].map(name => canonical(path.join(root, name)))
+    const git = path.join(root, '.git')
+    try {
+      const info = statSync(git)
+      if (info.isFile() && info.size <= 65536) {
+        const target = /^gitdir:\s*([^\r\n]+)$/.exec(readFileSync(git, 'utf8').trim())?.[1]
+        if (target) paths.push(canonical(path.resolve(root, target)))
+      }
+    } catch { /* A missing metadata path contributes no additional gitdir. */ }
+    return paths
+  })
+  const protectedDirectory = protectedPaths.some(root => under(root, current))
+  const admitted = !protectedDirectory && roots.some(root => {
+    const relative = path.relative(root, current)
+    return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  })
+  if (!admitted) throw Object.assign(new Error('The current directory is outside the original Workspace Write roots or inside protected project metadata. Return to the project, or select Codex Read Only or Full Access to use this directory.'),
+    { code: 'CODEX_WORKING_DIRECTORY_OUTSIDE_WORKSPACE' })
+  return cwd
+}
+
+function sharedAgentsHome() {
+  const override = process.env.DSH_AGENTS_HOME
+  const selected = override?.trim() ? override : path.join(homedir(), '.agents')
+  const expanded = selected === '~' ? homedir()
+    : selected.startsWith('~/') || selected.startsWith('~\\') ? path.join(homedir(), selected.slice(2)) : selected
+  return path.resolve(expanded)
 }
 
 async function atomicFile(file, data) {
@@ -258,6 +323,34 @@ export function createNativeBridge(ctx, config = {}, dependencies = {}) {
   const auth = dependencies.auth ?? createNativeAuth({ dshHome, piAiRoot: process.env.DSH_PI_AI_ROOT })
   const helpers = dependencies.helpers
   const view = dependencies.presentation ?? presentation
+  const stopNativePresentation = ctx.tools.presentAs?.('native')
+  // New host-global tools (including working_directory) belong to ordinary
+  // DSH agents. Native Codex owns execution; only this scope's UI observations
+  // remain visible. Scoped registrations survive this inherited-tool mask.
+  // A standing preset's own rows become inherited by its Agents, so allow:[]
+  // would mask their marker/observations too. Name only the host-global rows.
+  let stopHostTools, hostToolKey, updatingHostTools = false
+  const refreshHostTools = () => {
+    if (updatingHostTools) return
+    updatingHostTools = true
+    try {
+      while (true) {
+        // schemas(undefined) is the registration view, not wireSchemas(); it
+        // includes all host definitions under native and PTC presentations.
+        const names = ctx.tools.schemas?.().map(tool => tool.name).filter(tool => tool !== 'run_code').sort() ?? []
+        const key = JSON.stringify(names)
+        if (key === hostToolKey) break
+        hostToolKey = key
+        const old = stopHostTools
+        // Install the replacement before lifting the prior mask. Registry
+        // change listeners must never observe a temporary capability widening.
+        stopHostTools = names.length ? ctx.tools.restrict?.({ deny: names }) : undefined
+        old?.()
+      }
+    } finally { updatingHostTools = false }
+  }
+  refreshHostTools()
+  const stopHostToolChanges = ctx.on('tools/change', refreshHostTools)
   // Exact definition identity proves current preset ownership even when this
   // standing plugin has seen the same session before a switch to standard.
   const marker = helpers?.defineTool?.({ name: 'codex_native_observer',
@@ -482,7 +575,7 @@ async function prepareHome() {
   // Mirror ONLY user-global instructions. Native auth, config, memories,
   // plugins, sessions and settings from any host home are never copied, and
   // project AGENTS discovery stays entirely upstream (cwd upwards).
-  await mirrorUserInstructions({ nativeHome, dshHome, codexHome: process.env.CODEX_HOME ?? path.join(process.env.HOME ?? '', '.codex'),
+  await mirrorUserInstructions({ nativeHome, dshHome, agentsHome: sharedAgentsHome(), codexHome: process.env.CODEX_HOME ?? path.join(process.env.HOME ?? '', '.codex'),
     explicit: config.globalInstructionsHome, logger: ctx.logger })
 }
 
@@ -518,7 +611,7 @@ async function prepareHome() {
     if (config.authMode !== 'native') args.push('-c', 'cli_auth_credentials_store="ephemeral"')
     if (state.lifetime.signal.aborted) state.lifetime = new AbortController()
     const client = makeClient({ command: config.executable ?? path.join(root, 'bin/codex'), args, env,
-      cwd: state.agent.session.header.cwd ?? process.cwd(),
+      cwd: nativeWorkingDirectory(ctx, state.agent),
       onNotification: (method, params) => notify(state, method, params),
       onRequest: (method, params, id, signal) => request(state, method, params, id, signal),
       onClose: error => {
@@ -538,7 +631,7 @@ async function prepareHome() {
         state.accountId = credential.chatgptAccountId
       }
       const policy = nativePolicyFor(ctx, state.agent, state.profile)
-      const params = { model: options.model, cwd: state.agent.session.header.cwd ?? process.cwd(),
+      const params = { model: options.model, cwd: nativeWorkingDirectory(ctx, state.agent),
         ...policy, ...(config.modelProvider ? { modelProvider: config.modelProvider } : {}),
         ...(config.nativeConfig ? { config: config.nativeConfig } : {}),
         ...(!state.threadId ? { experimentalRawEvents: true } : {}) }
@@ -779,6 +872,8 @@ async function prepareHome() {
       // Validate/resolve admitted UI input BEFORE login/thread creation. Bad
       // input must not leave a memory-only thread bound in the journal.
       const admittedInput = await resolveNativeInput(ctx, state.admitted, interactionSignal)
+      await load(state)
+      assertNativeWorkingDirectory(ctx, state.agent, nativePolicyFor(ctx, state.agent, state.profile))
       await ensureThread(state, nativeOptions, interactionSignal)
       state.currentUsage = createNativeUsageCounter({ baseline: state.usageBaseline })
       const selected = state.admitted.filter(message => !state.delivered.has(String(message.id)) && !state.uncertain.has(String(message.id)) && !state.controlIds.has(String(message.id)))
@@ -790,8 +885,9 @@ async function prepareHome() {
         const policy = nativePolicyFor(ctx, state.agent, state.profile)
         state.turnPolicy = structuredClone(policy)
         const response = await state.client.request('turn/start', { threadId: state.threadId, input,
-          cwd: state.agent.session.header.cwd ?? process.cwd(), approvalPolicy: policy.approvalPolicy,
-          sandboxPolicy: nativeSandboxPolicy(policy, state.agent.session.header.cwd ?? process.cwd()),
+          cwd: nativeWorkingDirectory(ctx, state.agent), approvalPolicy: policy.approvalPolicy,
+          sandboxPolicy: nativeSandboxPolicy(policy, nativeWorkspaceRoot(ctx, state.agent)),
+          ...(policy.sandbox === 'workspace-write' ? { runtimeWorkspaceRoots: [nativeWorkspaceRoot(ctx, state.agent)] } : {}),
           ...nativeTurnSettings(state, nativeOptions) }, { signal: interactionSignal })
         state.nativeTurnId = response.turn?.id ?? state.nativeTurnId
         if (!state.nativeTurnId) throw new Error('Native Codex returned no turn identity')
@@ -1126,7 +1222,7 @@ async function prepareHome() {
 
   return { states, stream, stateFor, async dispose() {
     disposed = true
-    for (const stop of [stopPreStep, stopRequest, stopPrompt, stopStream, stopEvents, stopDisposed]) stop?.()
+    for (const stop of [stopHostToolChanges, stopHostTools, stopNativePresentation, stopPreStep, stopRequest, stopPrompt, stopStream, stopEvents, stopDisposed]) stop?.()
     await Promise.all([...states.values()].map(closeState))
   } }
 }

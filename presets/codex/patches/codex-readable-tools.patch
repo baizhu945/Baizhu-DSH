@@ -1,11 +1,12 @@
 diff --git a/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts b/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
-index 5343472..e8081cd 100644
 --- a/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
 +++ b/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
-@@ -39,6 +39,90 @@ function narrowDiffs(diffs: unknown): DiffHunk[] | null {
+@@ -38,6 +38,90 @@
+     out.push({ path, oldText, newText })
+   }
    return out
- }
- 
++}
++
 +function codexPatchInput(block: ToolCallBlock): string | null {
 +  const parsed = parsedToolCall(block)
 +  if (parsed === null || parsed.name !== 'apply_patch') return null
@@ -88,12 +89,10 @@ index 5343472..e8081cd 100644
 +  }
 +  const preview = codexPatchPreview(input)
 +  return preview.length > 0 ? preview : null
-+}
-+
- type IntendedDiff = { tool: 'write' | 'edit' | 'str_replace_editor'; diff: DiffHunk }
+ }
  
- function intendedDiff(block: ToolCallBlock): IntendedDiff | null {
-@@ -98,6 +182,8 @@ function appliedDiffs(meta: unknown): DiffHunk[] | 'empty' | null {
+ type IntendedDiff = { tool: 'write' | 'edit' | 'str_replace_editor'; diff: DiffHunk }
+@@ -98,6 +182,8 @@
   * @returns the diff-card props, or null for the generic path.
   */
  export function diffCardModel(block: ToolCallBlock): DiffCardModel | null {
@@ -103,10 +102,9 @@ index 5343472..e8081cd 100644
    const intended = intendedDiff(block)
    if (intended === null) return null
 diff --git a/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts b/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
-index de0e2a8..db88bc6 100644
 --- a/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
 +++ b/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
-@@ -59,6 +59,10 @@ const TOOL_VARIANTS: Record<string, ToolRowVariant> = {
+@@ -60,6 +60,10 @@
    write: 'write',
    edit: 'edit',
    run_code: 'code',
@@ -117,7 +115,7 @@ index de0e2a8..db88bc6 100644
    cordis_package_inspect: 'read',
    cordis_runtime_inspect: 'read',
    // The three run-control verbs take one package id and produce a receipt, so
-@@ -203,6 +207,158 @@ function firstLine(text: string): string {
+@@ -204,6 +208,158 @@
    return nl === -1 ? text : text.slice(0, nl)
  }
  
@@ -276,7 +274,7 @@ index de0e2a8..db88bc6 100644
  function pickString(args: Record<string, unknown>, keys: readonly string[]): string | undefined {
    for (const key of keys) {
      const v = args[key]
-@@ -227,6 +383,15 @@ function deriveSummary(variant: ToolRowVariant, argsRaw: string): string {
+@@ -228,6 +384,15 @@
    const parsed = parseArgs(argsRaw)
    if (typeof parsed !== 'object' || parsed === null) return firstLine(argsRaw)
    const args = parsed as Record<string, unknown>
@@ -290,9 +288,9 @@ index de0e2a8..db88bc6 100644
 +    }
 +  }
    if (variant === 'search' && Array.isArray(args.queries)) {
-     const queries = args.queries.filter((query): query is string => typeof query === 'string' && query !== '')
+     const queries = args.queries.filter((query: unknown): query is string => typeof query === 'string' && query !== '')
      if (queries.length > 0) return queries.map(firstLine).join(', ')
-@@ -268,6 +433,12 @@ export function formatToolBody(variant: ToolRowVariant, argsRaw: string): string
+@@ -287,6 +452,12 @@
    if (variant === 'code' && typeof parsed === 'object' && parsed !== null) {
      const code = (parsed as Record<string, unknown>).code
      if (typeof code === 'string' && code !== '') return code
@@ -306,10 +304,9 @@ index de0e2a8..db88bc6 100644
    return JSON.stringify(parsed, null, 2)
  }
 diff --git a/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx b/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx
-index bc0faac..2c03484 100644
 --- a/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx
 +++ b/packages/client/ui-tool/src/client/tool/toolviews/GenericToolCard.tsx
-@@ -46,6 +46,9 @@ export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect,
+@@ -46,6 +46,9 @@
      ? 'error'
      : model.state
    const singleFile = model.filePath !== undefined
@@ -319,7 +316,7 @@ index bc0faac..2c03484 100644
    return (
      <ToolRow
        useDisclosure={useDisclosure}
-@@ -53,7 +56,7 @@ export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect,
+@@ -53,7 +56,7 @@
        variant={model.variant}
        toolName={toolName}
        icon={VARIANT_ICONS[model.variant]}
@@ -329,10 +326,9 @@ index bc0faac..2c03484 100644
        // Single-file tools never expose an args body — the path link is the only
        // args interaction. A card is not an args body: a read/write/edit row is
 diff --git a/packages/client/ui-trajectory/src/client/layout.ts b/packages/client/ui-trajectory/src/client/layout.ts
-index 0fe5bd6..ca0041d 100644
 --- a/packages/client/ui-trajectory/src/client/layout.ts
 +++ b/packages/client/ui-trajectory/src/client/layout.ts
-@@ -1092,6 +1092,48 @@ function summarizeCall(
+@@ -1094,6 +1094,48 @@
    name: string,
    argsRaw: string,
  ): Pick<TrajectoryCellProps, 'text' | 'previewMarkdown' | 'toolName'> {
@@ -386,7 +382,9 @@ index 0fe5bd6..ca0041d 100644
 diff --git a/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts b/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
 --- a/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
 +++ b/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts
-@@ -112,4 +112,16 @@
+@@ -111,6 +111,18 @@
+ }
+ 
  function codexApplyPatchDiffs(block: ToolCallBlock): DiffHunk[] | null {
 +  const parsed = parsedToolCall(block)
 +  if (parsed?.name === 'apply_patch' && parsed.args._codex_native === true) {
@@ -406,7 +404,7 @@ diff --git a/packages/client/ui-tool/src/client/tool/models/diff-card-model.ts b
 diff --git a/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts b/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
 --- a/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
 +++ b/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts
-@@ -383,6 +383,11 @@
+@@ -384,6 +384,11 @@
    const parsed = parseArgs(argsRaw)
    if (typeof parsed !== 'object' || parsed === null) return firstLine(argsRaw)
    const args = parsed as Record<string, unknown>
@@ -418,7 +416,7 @@ diff --git a/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts b
    if ((variant === 'code' || variant === 'edit') && typeof args.input === 'string' && args.input !== '') {
      if (args.input.trimStart().startsWith('*** Begin Patch')) return 'Apply patch'
      if (variant === 'code') {
-@@ -428,6 +433,13 @@
+@@ -447,6 +452,13 @@
    if (argsRaw === '') return null
    const parsed = parseArgs(argsRaw)
    if (parsed === undefined) return argsRaw
@@ -435,7 +433,7 @@ diff --git a/packages/client/ui-tool/src/client/tool/models/tool-call-model.ts b
 diff --git a/packages/client/ui-tool/src/client/tool/models/terminal-card-model.ts b/packages/client/ui-tool/src/client/tool/models/terminal-card-model.ts
 --- a/packages/client/ui-tool/src/client/tool/models/terminal-card-model.ts
 +++ b/packages/client/ui-tool/src/client/tool/models/terminal-card-model.ts
-@@ -307,6 +307,24 @@
+@@ -326,6 +326,24 @@
      }
    }
    if (block.isError || (call.kind === 'shell' && call.persistent) || isSpilledShellCall(block)) return null
@@ -463,7 +461,7 @@ diff --git a/packages/client/ui-tool/src/client/tool/models/terminal-card-model.
 diff --git a/packages/client/ui-trajectory/src/client/layout.ts b/packages/client/ui-trajectory/src/client/layout.ts
 --- a/packages/client/ui-trajectory/src/client/layout.ts
 +++ b/packages/client/ui-trajectory/src/client/layout.ts
-@@ -1115,6 +1115,14 @@
+@@ -1117,6 +1117,14 @@
      const args = JSON.parse(argsRaw) as unknown
      if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
        const record = args as Record<string, unknown>

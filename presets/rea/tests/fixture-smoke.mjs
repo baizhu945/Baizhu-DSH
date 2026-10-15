@@ -15,7 +15,7 @@ try {
       env: { REA_TEST_LEDGER: ledger, REA_TEST_MODE: 'healthy' }, cwd: join(root, 'workspace'),
       toolCallTimeoutMs: 600000, failOnStartupError: true, reconnect: { enabled: false } })
   } })
-  assert.equal(ctx.tools.schemas(handle.agent).filter(row => row.name.startsWith('mcp__rea__')).length, 138)
+  assert.equal(ctx.tools.schemas(handle.agent).filter(row => row.name.startsWith('mcp__rea__')).length, 187)
   const result = await execute(ctx, handle.agent, 'mcp__rea__binary_session')
   assert.equal(result.isError, false, JSON.stringify(result))
   assert(JSON.stringify(result).includes('fixture'))
@@ -31,5 +31,5 @@ try {
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   assert(!alive, 'fixture peer survived owning agent disposal')
-  console.log('PASS fixture only: actual installed MCP client stdio138, readonly ToolRuntime call, physical agent-scope teardown; new lazy bootstrap NOT exercised')
+  console.log('PASS fixture only: actual installed MCP client stdio187, readonly ToolRuntime call, physical agent-scope teardown; new lazy bootstrap NOT exercised')
 } finally { await ctx.fiber.dispose() }

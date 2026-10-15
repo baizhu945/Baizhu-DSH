@@ -1,0 +1,73 @@
+diff --git a/src/dsh-adapter/channel/extensions.ts b/src/dsh-adapter/channel/extensions.ts
+index abb58bbc..6e982f14 100644
+--- a/src/dsh-adapter/channel/extensions.ts
++++ b/src/dsh-adapter/channel/extensions.ts
+@@ -31,7 +31,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
+ import type { DshNative } from '../../agent/capabilities.js'
+ import type { AgentSession } from '../../agent/session.js'
+ import { channelCapabilities } from '../../channel/capabilities.js'
+-import { isCommandCompletionToken, LOCAL_COMMANDS } from '../../commands.js'
++import { BACKEND_PERMISSION_COMMAND, isCommandCompletionToken, LOCAL_COMMANDS, type LocalCommand } from '../../commands.js'
+ import { touchSession } from '../../sessionHistory.js'
+ import { DEFAULT_SESSION_MODES, resolveSessionModes } from '../../sessionModes.js'
+ import { createDshSession } from '../backend/session.js'
+@@ -194,6 +194,11 @@ export function attachDshExtensions(
+   const { modes: resolvedConfiguredSessionModes, dropped: droppedModeIds } = resolveSessionModes(options.modes)
+   const filteredConfiguredSessionModes = resolvedConfiguredSessionModes
+     .filter(spec => spec.permission === undefined || isCommandCompletionToken(spec.permission))
++  for (const spec of resolvedConfiguredSessionModes) {
++    if (spec.permission !== undefined && !isCommandCompletionToken(spec.permission)) {
++      ctx.logger.warn(`dsh-tui: session mode "${spec.id}" has an unsafe permission identity; dropped from Shift+Tab`)
++    }
++  }
+   const configuredSessionModes = filteredConfiguredSessionModes.length > 0
+     ? filteredConfiguredSessionModes
+     : DEFAULT_SESSION_MODES
+@@ -227,10 +232,22 @@ export function attachDshExtensions(
+   // service lookups, so both consumers may call it freely: the public
+   // `capabilities()` accessor and the command-list annotation below.
+   const capabilitiesOf = () => resolveAgentCapabilities(agentCapabilityEvidence(ctx, binding.agent))
++  // Chat also supports /permission through the service's own write path when
++  // the command row is absent. Keep that picker discoverable in this roster.
++  const withPermissionCommand = (commands: readonly LocalCommand[]): readonly LocalCommand[] => {
++    if (commands.some(command => command.name === 'permission')) return commands
++    try {
++      const snapshot = permissionPresetSnapshotFromService(ctx.get('permissionPresets'), binding.agent.session)
++      if (snapshot.availability === 'runtime') return [...commands, BACKEND_PERMISSION_COMMAND]
++    } catch {
++      // Optional or unloading service: do not advertise an unavailable picker.
++    }
++    return commands
++  }
+   // Annotated from the start: Help and `/` completion read `commandList`
+   // before the first skill-catalog refresh publishes a new one, and a command
+   // whose capability is missing must never look usable in that window.
+-  state.commandList = annotateCommandCapabilities(LOCAL_COMMANDS, capabilitiesOf())
++  state.commandList = annotateCommandCapabilities(withPermissionCommand(LOCAL_COMMANDS), capabilitiesOf())
+   Object.defineProperty(state, 'autoRecapOnOpen', {
+     configurable: true,
+     enumerable: true,
+@@ -385,7 +402,7 @@ export function attachDshExtensions(
+       // Annotate before publishing: Help and `/` completion both read
+       // `commandList`, so a command whose capability is missing says so
+       // instead of looking usable and failing on use.
+-      state.commandList = annotateCommandCapabilities(commands, capabilitiesOf())
++      state.commandList = annotateCommandCapabilities(withPermissionCommand(commands), capabilitiesOf())
+       state.emit()
+     },
+     commandDescriptions: name => commandTrees?.descriptions(name),
+diff --git a/src/dsh-adapter/channel/mode-permission-actions.ts b/src/dsh-adapter/channel/mode-permission-actions.ts
+index 5a3bdc24..53930ec9 100644
+--- a/src/dsh-adapter/channel/mode-permission-actions.ts
++++ b/src/dsh-adapter/channel/mode-permission-actions.ts
+@@ -215,7 +215,9 @@ export function createPermissionModeActions(
+     const sessionEvent = event as SessionEvent
+     base.onSessionEvent(subject, sessionEvent)
+     const type = (sessionEvent as { type: string }).type
+-    if (type === 'permission/preset') refreshMode()
++    // The official preset writer commits identity before its sandbox/approval
++    // atoms. Those later events must not leave the indicator on a static mode.
++    if (type === 'permission/preset' || type === 'sandbox/mode' || type === 'approval/policy') refreshMode()
+     if (type !== 'plan/mode' || (sessionEvent.data as unknown as { active?: boolean }).active !== false) return
+     const remembered = permission.prePlanPermissionIdentity(subject)
+     const explicit = explicitPlanExits.delete(subject)
