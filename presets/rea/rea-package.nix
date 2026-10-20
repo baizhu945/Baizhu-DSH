@@ -5,20 +5,20 @@
 let
   inherit (pkgs) lib;
   nodejs = pkgs.nodejs_24;
-  revision = "a2d8b94dd50dab8d966239dd63ab84718aa8b4b4";
+  revision = "0c440bfc07f3cb343e2e836d27cccaed539cfe9c";
 in
 pkgs.buildNpmPackage {
   pname = "rea-agents";
-  version = "6.4.0";
+  version = "6.7.0";
 
   src = pkgs.fetchzip {
     url = "https://github.com/morluto/rea/archive/${revision}.tar.gz";
-    hash = "sha256-z9Hgl8LiXkgVmO8zyGOkXlLXPZM+jxFmeNDmHUfTJnw=";
+    hash = "sha256-afd2BLZVThTeU+R8I+oeTh3q/6mO6sMkfJyuo5/inwM=";
   };
   inherit nodejs;
   # 6.4 fixes the canonical patterns upstream; do not apply the archived
   # 6.1 wire-projection patch. The live MCP JS/Rust/AJV gate remains below.
-  npmDepsHash = "sha256-NNK1RLvEDF7Cj4BebTbEx5MNCEHZc2KQTmaoKmpAMYw=";
+  npmDepsHash = "sha256-yWWKLAeHthuZcA6x84ME8SFjTVqAEtL+yX7G8QGj2II=";
 
   npmRebuildFlags = [ "--ignore-scripts" ];
   env.HUSKY = "0";
@@ -73,9 +73,9 @@ EOF
     import { readFileSync } from 'node:fs';
     const report = JSON.parse(readFileSync(process.argv[2], 'utf8'));
     assert.equal(report.healthy, true, JSON.stringify(report));
-    assert.equal(report.server.version, '6.4.0');
+    assert.equal(report.server.version, '6.7.0');
     assert.equal(report.inventory.tools.expected, report.inventory.tools.observed);
-    assert.equal(report.inventory.tools.observed, 187);
+    assert.equal(report.inventory.tools.observed, 210);
     assert.equal(report.inventory.prompts.observed, 6);
     console.log(JSON.stringify(report));
 JS

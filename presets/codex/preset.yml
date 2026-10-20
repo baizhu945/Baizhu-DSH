@@ -1,3 +1,0 @@
-name: Codex Mode
-description: 原生官方 Codex 核心（固定 GitHub HEAD）：模型指令、freeform 工具、Code Mode、沙箱、Skills、子代理与压缩由官方实现；DSH 只桥接用户输入、审批与可读卡片。权限仅作用于本 Codex 会话，自定义上下文长度保留。
-order: 2

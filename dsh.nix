@@ -3,12 +3,12 @@
 let
   inherit (import ./environment.nix { }) pkgs runtimePath keepBuildInputs;
 
-  # deepseek-harness dsh-v0.2.1-alpha.2 (latest upstream release tag)
+  # deepseek-harness dsh-v0.2.1-rc.2 (latest upstream release tag)
   dshSrc = pkgs.fetchFromGitHub {
     owner = "deepseek-ai";
     repo = "deepseek-harness";
-    rev = "d743267388641bc76f17c45ce8b4c231aed1d32c";
-    hash = "sha256-MxxwtEPBG8SK6Rw5CqGalnJ5FWAygzVxklCQab5mpbU=";
+    rev = "687f282e8625c6b8d11ff58211a90524be2e4317";
+    hash = "sha256-WcPs3q4NFTRnH2y1Rc/o7/rvJAOe8s7isoTQYf8APFU=";
   };
 
   # 声明式 pnpm 依赖(fetchPnpmDeps 为 fixed-output 派生,沙箱内可联网下载;
@@ -31,12 +31,12 @@ let
       pnpm config set network-concurrency 12
     '';
 
-    hash = "sha256-xj6Pw00JIpLHjRS7NROKTNY+GdExEKvHRyjJOwmyNXU=";
+    hash = "sha256-C9Aw9AS4r7zubaEuT6mLXQ+AhhMVlTxPZRKTpzRUkcU=";
   };
 
   dsh = pkgs.stdenv.mkDerivation {
     pname = "dsh";
-    version = "0.2.1-alpha.2";
+    version = "0.2.1-rc.2";
     src = dshSrc;
 
     pnpmDeps = dshPnpmDeps;
@@ -54,16 +54,6 @@ let
       # Nix Node exposes internals through --expose-internals; its addon getter
       # probe is incompatible with the packaged Node 22 and 24 binaries.
       ./patches/profile-resolution-expose-internals.patch
-
-      # Optional trusted terminal/FS seams used only by the Codex preset.
-      # Existing callers omit the new fields/methods and retain upstream behavior.
-      ./presets/codex/patches/codex-runtime-parity.patch
-
-      # Codex-scoped UI patches keep live, replay, and trajectory rendering together.
-      ./presets/codex/patches/codex-readable-tools.patch
-
-      # Promote only marked Codex Code Mode children to native tool rows.
-      ./presets/codex/patches/codex-native-display.patch
     ];
 
     nativeBuildInputs = [
@@ -175,16 +165,20 @@ let
 
   # Keep PATH isolation outside the full source build, so adding the private
   # launcher does not itself recompile the CLI or Desktop runtime.
+  # dsh-tui follows the first `dsh` on PATH by parsing launcher scripts for a
+  # *.js entry point, then walks up to @deepseek-ai/dsh. A wrapper that only
+  # execs $out/bin/dsh hides bin.js and forces a slower `dsh --profile` fallback.
   dshLauncher = pkgs.writeShellScriptBin "dsh" ''
     export PATH="${runtimePath}:$PATH"
-    exec ${dsh}/bin/dsh "$@"
+    export DSH_WEB_FETCH_ALLOW_FAKE_IP="''${DSH_WEB_FETCH_ALLOW_FAKE_IP:-1}"
+    export DSH_PI_AI_ROOT="${dsh}/packages/llm/llm-pi-ai/node_modules/@earendil-works/pi-ai"
+    exec ${pkgs.nodejs_22}/bin/node --expose-internals ${dsh}/apps/cli/lib/bin.js "$@"
   '';
 
   # Files copied by dshPlugins rather than linked through home.file. The
   # previous manifest lets activation remove only files it owned when a
   # managed plugin is later removed from this list.
   dshManagedPluginPaths = pkgs.writeText "dsh-managed-plugin-paths" ''
-    profiles/web/plugins/codex-registrar.mjs
     profiles/web/plugins/provider-codex.mjs
     profiles/web/node_modules/dsh-baizhu-approval/package.json
     profiles/web/node_modules/dsh-baizhu-approval/index.mjs
@@ -196,7 +190,6 @@ in
   _module.args.dsh = dsh;
 
   imports = [
-    ./presets/codex/dsh-codex.nix
     ./rea.nix
     ./tui.nix
    
@@ -305,6 +298,18 @@ in
     seedRuntimePatch "$HOME/.dsh/profiles/web/cordis.patch.yml" "${./profiles/web/cordis.patch.yml}"
     # Settings imported by a first headless startup are runtime-owned too.
     seedRuntimePatch "$HOME/.dsh/profiles/headless/cordis.patch.yml" "${./profiles/headless/cordis.patch.yml}"
+
+    strip_codex_registrar() {
+      target="$1"
+      [ -f "$target" ] || return 0
+      grep -Fq -- 'codex-registrar' "$target" || return 0
+      run ${pkgs.nodejs_22}/bin/node ${./scripts/strip-codex-registrar.mjs} "$target"
+    }
+    strip_codex_registrar "$HOME/.dsh/profiles/web/cordis.patch.yml"
+    webCodexRegistrar="$HOME/.dsh/profiles/web/plugins/codex-registrar.mjs"
+    if [ -e "$webCodexRegistrar" ] || [ -L "$webCodexRegistrar" ]; then
+      run /run/current-system/sw/bin/remove-without-permission -f "$webCodexRegistrar"
+    fi
   '';
 
   # The old account bridge used to leave Codex model selections under the
@@ -430,8 +435,6 @@ in
       "$HOME/.dsh/profiles/web/node_modules/dsh-baizhu-approval" \
       "$HOME/.dsh/profiles/node_modules/@deepseek-ai"
 
-    run install -m 644 ${./presets/codex/codex-registrar.mjs} \
-      "$HOME/.dsh/profiles/web/plugins/codex-registrar.mjs"
     run install -m 644 ${./profiles/web/plugins/provider-codex.mjs} \
       "$HOME/.dsh/profiles/web/plugins/provider-codex.mjs"
     run install -m 644 ${./profiles/web/node_modules/dsh-baizhu-approval/package.json} \

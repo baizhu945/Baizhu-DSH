@@ -1,6 +1,5 @@
---- a/src/dsh-adapter/bundled-presets.ts
-+++ b/src/dsh-adapter/bundled-presets.ts
-@@ -2,10 +2,8 @@
+diff --git a/src/dsh-adapter/bundled-presets.ts b/src/dsh-adapter/bundled-presets.ts
+@@ -2,13 +2,11 @@
  import type { PresetDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
  import { readFileSync } from 'node:fs'
  import { createRequire } from 'node:module'
@@ -8,11 +7,15 @@
  import { pathToFileURL } from 'node:url'
  import { parse } from 'yaml'
 -import { packagedPresetRoot } from './packaged-presets.js'
+ import { PRESET_PATCH_MODULE } from '../preset-patch.js'
+ 
+-/** Upstream presets copied into the roster by id; liangshen ships in this package. */
++/** Upstream presets copied into the roster by id. */
+ const UPSTREAM_PRESET_IDS: readonly string[] = ['standard', 'ptc', 'minimal', 'cordis']
  
  interface DeclarativePresets {
-   register(definition: PresetDefinition): Promise<() => Promise<void>>
-@@ -70,21 +68,5 @@
-     const dispose = await declarativePresets(owner)!.register(readPresetPatch(path))
+@@ -118,26 +116,7 @@
+     const dispose = await declarativePresets(owner)!.register(patchDefinition(ctx, readPresetPatch(path), patches.get(id)))
      ctx.effect(() => dispose)
    }
 -  if (!declared.has('liangshen')) {
@@ -26,10 +29,16 @@
 -      plugins: [{
 -        id: 'liangshen-plugins',
 -        name: '@deepseek-ai/cordis-plugin-include',
--        config: { path: pathToFileURL(join(root, 'agent.cordis.yml')).href },
+-        config: {
+-          path: pathToFileURL(join(root, 'agent.cordis.yml')).href,
+-          patches: [...patches.get('liangshen') ?? []].map(([id, config]) => ({ id, config })),
+-        },
 -      }],
 -    })
 -    ctx.effect(() => dispose)
 -  }
-   return true
- }
+-  // A typo in `preset` would otherwise be a silent no-op (row ids warn inside
++  // A typo in `preset' would otherwise be a silent no-op (row ids warn inside
+   // patchDefinition). Profile-declared presets are the profile's own seats.
+   for (const preset of patches.keys()) {
+     if (preset === 'liangshen' || UPSTREAM_PRESET_IDS.includes(preset) || declared.has(preset)) continue

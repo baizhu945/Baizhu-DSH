@@ -15,14 +15,14 @@ let
     import { writeFileSync } from 'node:fs'
     import { pathToFileURL } from 'node:url'
     const { TOOL_EFFECTS } = await import(pathToFileURL(process.argv[2]).href)
-    if (Object.keys(TOOL_EFFECTS).length !== 187) throw new Error('REA effects catalog is incomplete')
+    if (Object.keys(TOOL_EFFECTS).length !== 210) throw new Error('REA effects catalog is incomplete')
     writeFileSync(process.argv[3], JSON.stringify(TOOL_EFFECTS))
     NODE
   '';
   systemPackageConfigJson = builtins.toJSON {
     inherit hostPackageJson;
     effectsPath = "${effects}";
-    expectedTools = 187;
+    expectedTools = 210;
     serverName = "rea";
     command = "${rea}/bin/rea";
     args = [ "mcp" ];

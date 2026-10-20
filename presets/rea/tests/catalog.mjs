@@ -1,5 +1,4 @@
-// Ordered TOOL_CONTRACTS at upstream a2d8b94dd50dab8d966239dd63ab84718aa8b4b4.
-// Includes HOPPER_MEMORY_TOOL_DEFINITIONS at its canonical spread position.
+// Ordered TOOL_CONTRACTS at upstream 0c440bfc07f3cb343e2e836d27cccaed539cfe9c.
 export const expectedToolNames = `
 annotate_native_function
 inspect_native_load_image
@@ -27,6 +26,7 @@ procedure_callees
 procedure_callers
 procedure_info
 read_function_instructions
+search_bytes
 read_bytes
 address_to_file_offset
 procedure_references
@@ -73,11 +73,17 @@ decode_interface_builder
 inspect_keyed_archive
 inspect_asset_catalog
 trace_dylib_resolution
+inspect_desktop_application
 inspect_evm_interface
 inspect_go_binary
+inspect_il2cpp_metadata
+inspect_rust_binary
 inspect_wasm_artifact
+compare_wasm_interfaces
 inspect_sqlite_database
+inspect_packet_fields
 inspect_packet_capture
+inspect_signal_decoders
 decode_signal_recording
 inspect_managed_artifact
 inspect_managed_members
@@ -89,6 +95,8 @@ inspect_android_method
 trace_android_references
 inspect_apktool_client
 decode_android_resources
+inspect_pcap_client
+inspect_pcap_capture
 identify_flutter_build
 inspect_dart_aot
 inspect_jeb_client
@@ -139,6 +147,7 @@ inspect_electron_page
 analyze_javascript_application
 reconcile_javascript_runtime
 capture_electron_scenario
+inspect_electron_fuses
 list_javascript_runtime_targets
 observe_javascript_runtime
 trace_application_feature
@@ -166,6 +175,7 @@ import_evidence_bundle
 capture_process_scenario
 compare_process_captures
 compare_artifacts
+match_native_functions
 compare_functions
 compare_bundles
 find_changed_behavior
@@ -179,6 +189,18 @@ verify_unknown_resolution
 get_evidence_bundle
 get_navigation_context
 inspect_address_context
+list_cutter_sessions
+cutter_command
+inspect_with_objdump
+execute_rizin_command
+start_gdb_session
+gdb_console
+gdb_session_status
+close_gdb_session
+start_rizin_debug_session
+rizin_debug_command
+rizin_debug_session_status
+close_rizin_debug_session
 list_frida_devices
 list_frida_processes
 start_frida_session
@@ -188,4 +210,4 @@ unload_frida_script
 frida_session_status
 close_frida_session
 instrument_with_frida
-`.trim().split('\n')
+`.trim().split(/\s+/).filter(Boolean);

@@ -145,7 +145,7 @@ export function discoverNonReaDefinitions() {
       if (Array.isArray(rows)) visit(rows)
     }
   }
-  for (const id of ['standard', 'ptc', 'minimal', 'cordis', 'codex']) assert(found.has(id), `mandatory preset missing: ${id}`)
+  for (const id of ['standard', 'ptc', 'minimal', 'cordis']) assert(found.has(id), `mandatory preset missing: ${id}`)
   return [...found.values()]
 }
 export async function createAgent(ctx, id, preset, options = {}) {

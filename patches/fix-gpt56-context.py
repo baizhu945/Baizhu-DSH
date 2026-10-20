@@ -22,7 +22,8 @@ CATALOGS = (
     "node_modules/@earendil-works/pi-ai/src/providers/data/openai-codex.json",
 )
 TARGET_CONTEXT_WINDOW = 1_050_000
-BROKEN_CONTEXT_WINDOW = 272_000
+# pi-ai has mistaken GPT-6 contextWindow values across releases (272K tier, 922K tier).
+BROKEN_CONTEXT_WINDOWS = {272_000, 922_000}
 
 
 def is_gpt6(model_id: str) -> bool:
@@ -57,7 +58,7 @@ def fix_catalog(catalog: str) -> int:
         if not isinstance(model, dict) or not is_gpt6(model_id):
             continue
 
-        if model.get("contextWindow") == BROKEN_CONTEXT_WINDOW:
+        if model.get("contextWindow") != TARGET_CONTEXT_WINDOW:
             model["contextWindow"] = TARGET_CONTEXT_WINDOW
             changed += 1
 

@@ -108,7 +108,7 @@ let
         'apps/desktop/resources/icon.png',
         'apps/desktop-host/lib/index.js',
         'apps/desktop-host/lib/cli.js',
-        'packages/skill/skill-office/assets/scripts/check_office.py',
+        'packages/skill/skill-office/assets/office/SKILL.md',
         'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
       ]) {
         assert.ok(existsSync(join(out, artifact)), 'desktop runtime: missing build artifact ' + artifact)

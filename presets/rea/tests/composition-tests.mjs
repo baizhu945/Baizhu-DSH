@@ -64,19 +64,6 @@ try {
   assert(!/for profile in [^\n]*headless/.test(composition), 'ordinary headless has no preset registry and must not be changed for REA')
   assert(composition.includes('packages/bundle/web-app/presets/standard.patch.yml'))
   assert(!composition.includes('default = "rea"'))
-  const hashes = []
-  for (const definition of definitions.filter(row => row.id === 'codex')) {
-    for (const row of definition.plugins) {
-      if (!row.name.startsWith('file:')) continue
-      const nativeRoot = dirname(new URL(row.name).pathname)
-      for (const file of readdirSync(nativeRoot).filter(file => /\.(mjs|js|json)$/.test(file))) {
-        const path = join(nativeRoot, file)
-        hashes.push({ path, sha256: createHash('sha256').update(readFileSync(path)).digest('hex') })
-      }
-    }
-  }
-  writeFileSync(join(root, 'codex-bytehashes.json'), JSON.stringify(hashes, null, 2) + '\n')
-  console.log('PASS Web/TUI same metadata/composition, ordinary headless unchanged static constraints; Codex bytehashes:', join(root, 'codex-bytehashes.json'))
 } finally {
   for (const handle of handles) await handle.dispose()
   await ctx.fiber.dispose()
@@ -89,23 +76,14 @@ for (const hostToolMode of ['native', 'ptc']) {
   const { ctx: host } = await actualContext(root, { definitions, hostToolMode })
   let native, standard, unregister
   try {
-    native = await createAgent(host, `mask-native-${hostToolMode}`, 'codex')
     standard = await createAgent(host, `mask-standard-${hostToolMode}`, 'standard')
     const globals = host.tools.schemas().map(tool => tool.name)
     assert(globals.includes('working_directory'), 'schemas() must retain the global registration view under both host presentations')
-    const marker = host.tools.get('codex_native_observer', native.agent)
-    assert(marker)
-    assert.equal(host.tools.get('working_directory', native.agent), undefined)
-    assert.equal(host.tools.get('run_code', native.agent), undefined, 'Native execution must not inherit a host PTC transport')
     unregister = host.tools.register(defineTool({ name: 'future_host_tool', description: 'Late zero-cost host fixture.', parameters: {},
       output: { schema: { type: 'object', additionalProperties: false, properties: {} }, render: () => [] },
       execute() { throw new Error('The late host fixture must never be executed') } }))
     assert(host.tools.get('future_host_tool', standard.agent), 'Ordinary DSH scope retains later host tools')
-    assert.equal(host.tools.get('future_host_tool', native.agent), undefined, 'Late global registration cannot widen the native scope')
-    assert.equal(host.tools.get('codex_native_observer', native.agent), marker, 'Global masks retain native observation identity')
-    assert.deepEqual(host.tools.schemas(native.agent).map(tool => tool.name), ['codex_native_observer'])
     unregister(); unregister = undefined
-    assert.equal(host.tools.get('codex_native_observer', native.agent), marker, 'Global tool removal retains native observation identity')
     console.log(`PASS native boundary under ${hostToolMode} host presentation and late global registration/removal`)
   } finally {
     unregister?.()

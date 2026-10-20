@@ -1,18 +1,17 @@
-{ config, lib, ... }:
+{ config, lib, dsh, ... }:
 
 let
   inherit (import ./environment.nix { }) pkgs runtimePath keepBuildInputs;
 
   # Pin the upstream release and its submodules. GitHub source archives omit
   # submodule contents; materialize them below before fetching pnpm deps.
-  # v0.14.0 keeps OAuth embedded; its only submodule is the unchanged dsh-std.
-  # The former ecosystem-spec submodule is now the repository-owned tui-profile.
-  dshTuiVersion = "0.14.0";
+  # v0.16.1 validates dsh 0.2.1-rc.2; vendor/dsh-std stays pinned in-tree.
+  dshTuiVersion = "0.16.1";
   dshTuiSrc = pkgs.fetchFromGitHub {
     owner = "ccch1mneyyy";
     repo = "dsh-TUI";
-    rev = "c2eee95218d1decfce138f7d31ef7099cc391d00";
-    hash = "sha256-X2Ypv9pzI9gE9l2gKpJVVFXIvq11q3iOfzhKmP0QD0o=";
+    rev = "73ff99fbed56563bf154d719effd09f9f9725349";
+    hash = "sha256-n+l4GXR/iQUE5xvFCM1n1eiPE1SAE8/If5BuVcdm5bU=";
   };
 
   dshStdSrc = pkgs.fetchFromGitHub {
@@ -52,7 +51,7 @@ let
   dshTuiPnpmDeps = pkgs.fetchPnpmDeps (fetchPnpmDepsArgs // {
     pname = "dsh-tui";
     src = sourceWithSubmodules;
-    hash = "sha256-nH0ykUa+0QXrU+eJB0zC89VjYLLoaDnGZ08YHBbTh+c=";
+    hash = "sha256-JnhZx954mSq7Dr/gERGrwCaEy6/GjzzMAlZnICgoZTg=";
   });
 
   dshTui = pkgs.stdenv.mkDerivation {
@@ -72,8 +71,9 @@ let
       ./patches/dsh-tui-permission-compat.patch
       # Exercise registry identity fences with stable, real-registry fixtures.
       ./patches/dsh-tui-test-fixtures.patch
-      # dsh 0.2.1 retired its diagnostics-only invariants package.
-      ./patches/dsh-tui-alpha2-compat.patch
+      # Nix dsh needs --expose-internals; the global launcher must pass it through
+      # when re-execing the profile-local bin/dsh-tui.js copy.
+      ./patches/dsh-tui-delegate-expose-internals.patch
     ];
 
     nativeBuildInputs = [
@@ -92,26 +92,19 @@ let
       # The hoisted layout is intentional: the installed plugin must share
       # the dsh installation's Cordis and Harness peer instances.
       echo 'verifyDepsBeforeRun: false' >> pnpm-workspace.yaml
-      # Keep upstream's rc.2 development fixture, while declaring the exact
-      # newer host line checked against its source types and real runtime.
-      # A precise replacement refuses a changed contract shape on future updates.
+      # This distribution intentionally removes the obsolete worker runtime.
+      # Validate its absence instead of requiring the upstream legacy row.
       node --input-type=module - <<'NODE'
       import assert from 'node:assert/strict'
       import { readFileSync, writeFileSync } from 'node:fs'
-      const path = 'src/dsh-adapter/contract.ts'
-      const source = readFileSync(path, 'utf8')
-      const marker = "  '0.2.0-rc.2',\n] as const"
-      assert.equal(source.split(marker).length, 2, 'validated host list shape')
-      writeFileSync(path, source.replace(marker, "  '0.2.0-rc.2',\n  '0.2.1-alpha.2',\n] as const"))
-      // This distribution intentionally removes the obsolete worker runtime.
-      // Validate its absence instead of requiring the upstream legacy row.
       const coexistencePath = 'scripts/verify-web-coexistence.mjs'
       const coexistence = readFileSync(coexistencePath, 'utf8')
       const retired = "  { id: 'code-runtime', name: '@deepseek-ai/dsh-code-runtime-worker-thread' },\n"
       assert.equal(coexistence.split(retired).length, 2, 'legacy coexistence assertion shape')
       writeFileSync(coexistencePath, coexistence.replace(retired, "") + "\nassert.ok(!tuiPatches.some(patch => patch.insert?.some(row => row.id === 'dsh-tui-code-runtime')), 'retired worker runtime stays absent')\n")
       NODE
-      # Legacy directory discovery must also see an empty shipped preset root.
+      # Do not ship or register the bundled Liangshen preset; sources may stay
+      # for upstream verify gates that import presets/liangshen/*.mjs directly.
       node -e 'require("node:fs").rmSync("presets/liangshen", { recursive: true, force: true })'
       # The current dsh-base supplies ptc-runtime/workflow-ptc. Remove the
       # obsolete worker-thread row INCLUDING its multi-line !!js expression;
@@ -126,22 +119,6 @@ let
       export HOME=$TMPDIR
       export CI=true
       root=$PWD
-      # Host peers are not installed in the distribution; expose the exact
-      # compatible line in its manifest without rewriting the upstream fixture lock.
-      node --input-type=module - <<'NODE'
-      import { readFileSync, writeFileSync } from 'node:fs'
-      const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
-      for (const section of ['peerDependencies', 'peerDependenciesMeta', 'devDependencies']) {
-        delete manifest[section]['@deepseek-ai/dsh-invariants']
-      }
-      for (const name of Object.keys(manifest.peerDependencies)) {
-        if (name.startsWith('@deepseek-ai/dsh-')) {
-          manifest.peerDependencies[name] += ' || 0.2.1-alpha.2'
-          manifest.devDependencies[name] = manifest.peerDependencies[name]
-        }
-      }
-      writeFileSync('package.json', JSON.stringify(manifest, null, 2) + '\n')
-      NODE
       restorePnpmStore() {
         archive="$1"
         store="$2"
@@ -170,20 +147,7 @@ let
       runHook preBuild
       root=$PWD
 
-      for package in core manifest connection presentation command storage messages; do
-        packageDir="$root/vendor/dsh-std/packages/$package"
-        (
-          cd "$packageDir"
-          "$root/vendor/dsh-std/node_modules/.bin/tsdown"
-        )
-      done
-
-      # Optional LaTeX images use a bundled MathJax worker.
-      # Its workspace dependency must be built before compiling the TUI.
-      node vendor/mathjax-tex-svg/build.mjs
-      node scripts/clean-lib.mjs
-      "$root/node_modules/.bin/tsc" -p tsconfig.json
-      node scripts/gen-settings-json.mjs
+      pnpm run compile
       node scripts/build-guide.mjs --check
       # The TUI's lock must contain its validated Harness packages.
       node --import tsx/esm scripts/verify-upstream-contract.ts
@@ -230,9 +194,8 @@ let
       assert.equal(await registerBundledPresets(ctx), true)
       assert.deepEqual(registered, ['ptc', 'minimal', 'cordis'])
       assert.equal(existsSync('presets/liangshen'), false)
-      assert.deepEqual(readdirSync('presets'), [])
       assert.deepEqual(ensurePackagedPresets({ sourceRoot: 'presets' }), [])
-      console.log('no-liangshen: official presets only; no shipped or materialized custom preset')
+      console.log('no-liangshen: official presets only; Liangshen is not registered or packaged')
       NODE
       node --input-type=module -e '
         import assert from "node:assert/strict";
@@ -347,7 +310,7 @@ let
       import { existsSync, readdirSync } from 'node:fs'
       import { join } from 'node:path'
       const out = process.argv[2]
-      assert.deepEqual(readdirSync(join(out, 'package/presets')), [])
+      assert.equal(existsSync(join(out, 'package/presets/liangshen')), false)
       assert.equal(existsSync(join(out, 'node_modules/@deepseek-harness-tui/dsh-auth')), false)
       for (const path of [
         'lib/types/oauth.js', 'lib/types/oauth.d.ts',
@@ -382,7 +345,7 @@ let
 
   # No global provider patch is applied after this profile. The TUI bundle's
   # complete llm-deepseek row therefore remains authoritative; the omitted
-  # protocol follows dsh 0.2.1-alpha.2's official Messages default.
+  # protocol follows dsh 0.2.1-rc.2's official Messages default.
   # Keep the previous seed for a safe, exact-match upgrade. A user-edited
   # runtime patch is never replaced just to add a new preset declaration.
   dshTuiProfilePatchText = ''
@@ -424,14 +387,13 @@ let
 
   '';
   dshTuiProfilePreviousPatch = pkgs.writeText "dsh-tui-profile-before-codex.patch.yml" dshTuiProfilePatchText;
-  # TUI's adapter registers the four official presets. The Codex registrar
-  # mounts user rows directly in the same registry, without an Include scope.
-  dshTuiProfilePatch = pkgs.writeText "dsh-tui-profile-cordis.patch.yml" (dshTuiProfilePatchText + ''
+  dshTuiProfilePreviousPatchWithCodex = pkgs.writeText "dsh-tui-profile-with-codex-registrar.patch.yml" (dshTuiProfilePatchText + ''
     - insert:
         - id: codex-registrar
           name: './plugins/codex-registrar.mjs'
           inject: [agentPresets]
   '');
+  dshTuiProfilePatch = pkgs.writeText "dsh-tui-profile-cordis.patch.yml" dshTuiProfilePatchText;
   dshTuiProfileWorkspace = pkgs.writeText "dsh-tui-profile-pnpm-workspace.yaml" ''
     packages:
       - .
@@ -446,12 +408,12 @@ let
 
   dshTuiLauncher = pkgs.writeShellScriptBin "dsh-tui" ''
     export PATH="${runtimePath}:$PATH"
-    exec ${pkgs.nodejs_22}/bin/node ${dshTui}/package/bin/dsh-tui.js "$@"
+    exec ${pkgs.nodejs_22}/bin/node --expose-internals ${dshTui}/package/bin/dsh-tui.js "$@"
   '';
 
   dstLauncher = pkgs.writeShellScriptBin "dst" ''
     export PATH="${runtimePath}:$PATH"
-    exec ${pkgs.nodejs_22}/bin/node ${dshTui}/package/bin/dsh-tui.js "$@"
+    exec ${pkgs.nodejs_22}/bin/node --expose-internals ${dshTui}/package/bin/dsh-tui.js "$@"
   '';
 in
 {
@@ -518,10 +480,9 @@ in
       run /run/current-system/sw/bin/remove-without-permission -f "$tuiPlugins/confirm-writes.mjs"
     fi
     run install -m 644 ${./profiles/web/plugins/confirm-writes.mjs} "$tuiPlugins/confirm-writes.mjs"
-    if [ -L "$tuiPlugins/codex-registrar.mjs" ]; then
+    if [ -e "$tuiPlugins/codex-registrar.mjs" ] || [ -L "$tuiPlugins/codex-registrar.mjs" ]; then
       run /run/current-system/sw/bin/remove-without-permission -f "$tuiPlugins/codex-registrar.mjs"
     fi
-    run install -m 644 ${./presets/codex/codex-registrar.mjs} "$tuiPlugins/codex-registrar.mjs"
 
     # The lean fork no longer ships Liangshen. Remove only a prior dsh-tui
     # managed copy; an unmanaged user preset with the same id is untouched.
@@ -568,11 +529,15 @@ in
     if [ ! -e "$tuiPatch" ]; then
       run install -m 644 ${dshTuiProfilePatch} "$tuiProfile/cordis.patch.yml"
     elif cmp -s "$tuiPatch" ${dshTuiProfileEmptyPatch} \
-      || cmp -s "$tuiPatch" ${dshTuiProfilePreviousPatch}; then
+      || cmp -s "$tuiPatch" ${dshTuiProfilePreviousPatch} \
+      || cmp -s "$tuiPatch" ${dshTuiProfilePreviousPatchWithCodex}; then
       # Upgrade either exact module-owned seed, while preserving real user
-      # edits. A customized patch needs a manual Codex declaration merge.
+      # edits. A customized patch is left untouched.
       run install -m 644 ${dshTuiProfilePatch} "$tuiPatch.tmp"
       run mv "$tuiPatch.tmp" "$tuiPatch"
+    fi
+    if [ -f "$tuiPatch" ] && grep -Fq -- 'codex-registrar' "$tuiPatch"; then
+      run ${pkgs.nodejs_22}/bin/node ${./scripts/strip-codex-registrar.mjs} "$tuiPatch"
     fi
     # Remove the compatibility row written by the previous generation after
     # the TUI bundle stopped needing code-runtime-worker-thread. Keep this

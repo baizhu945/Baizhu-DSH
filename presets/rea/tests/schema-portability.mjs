@@ -19,8 +19,8 @@ const { default: Ajv } = await load('ajv/dist/2020.js');
 const ajv = new Ajv({ strict: false, allErrors: true, validateFormats: false });
 const { TOOL_CONTRACTS } = await compiled('contracts/toolContracts.js');
 const { TOOL_EFFECTS } = await compiled('contracts/toolEffects.js');
-assert.equal(JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version, '6.4.0');
-assert.equal(expectedToolNames.length, 187);
+assert.equal(JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version, '6.7.0');
+assert.equal(expectedToolNames.length, 210);
 assert.deepEqual(TOOL_CONTRACTS.map(t => t.name), expectedToolNames);
 assert.deepEqual(Object.keys(TOOL_EFFECTS).sort(), [...expectedToolNames].sort());
 const { Client } = await load('@modelcontextprotocol/client');
@@ -143,4 +143,4 @@ for (const name of ['observe_native_calls', 'capture_process_scenario', 'trace_d
   }
 }
 clearTimeout(deadline);
-console.log(`Schema portability PASS: 187 tools, ${occurrences} patterns, ${patterns.size} unique JS + Rust patterns; live canonical/AJV Unicode/newline fixtures passed.`);
+console.log(`Schema portability PASS: ${expectedToolNames.length} tools, ${occurrences} patterns, ${patterns.size} unique JS + Rust patterns; live canonical/AJV Unicode/newline fixtures passed.`);

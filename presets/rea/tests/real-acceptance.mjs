@@ -38,7 +38,7 @@ try {
   await turn(handle.agent)
   assert.equal(capture.requests.length, 1)
   const catalog = ctx.tools.schemas(handle.agent).filter(row => row.name.startsWith('mcp__rea__'))
-  assert.equal(catalog.length, 187, 'REA 6.4 exact catalog changed')
+  assert.equal(catalog.length, 210, 'REA 6.7 exact catalog changed')
   assert.deepEqual(catalog.map(row => row.name.slice('mcp__rea__'.length)).sort(), [...expectedToolNames].sort())
   writeFileSync(join(root, 'catalog.json'), JSON.stringify(catalog, null, 2) + '\n')
   writeFileSync(join(root, 'complete-first-request.json'), JSON.stringify(stableRequest(capture.requests[0]), null, 2) + '\n')
@@ -102,7 +102,7 @@ try {
   const cleanView = await snapshot(ctx, clean.agent)
   assert(!JSON.stringify(cleanView).includes('mcp__rea__'))
   await clean.dispose()
-  console.log('PASS real catalog187 + static JavaScript + offline EVMole/retained-Evidence paging + Ghidra/JDK from Config through DSH tool pipeline; no paid model or real user auth')
+  console.log('PASS real catalog210 + static JavaScript + offline EVMole/retained-Evidence paging + Ghidra/JDK from Config through DSH tool pipeline; no paid model or real user auth')
   console.log('Artifacts:', root)
 } finally {
   if (handle) await handle.dispose()

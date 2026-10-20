@@ -1,0 +1,27 @@
+diff --git a/bin/dsh-tui.js b/bin/dsh-tui.js
+--- a/bin/dsh-tui.js
++++ b/bin/dsh-tui.js
+@@ -827,7 +827,10 @@ const withCompileCache = env => {
+ // 本包自己的入口：`node <入口> <应用参数>`。结果模型与 startDshSession 相同。
+ const startEntrySession = (entry, appArgs, env = process.env) =>
+   new Promise(resolve => {
+-    const child = spawn(process.execPath, [entry, ...appArgs], { stdio: 'inherit', env: withCompileCache(env) })
++    const nodeExecArgs = process.execArgv.includes('--expose-internals')
++      ? process.execArgv
++      : ['--expose-internals', ...process.execArgv]
++    const child = spawn(process.execPath, [...nodeExecArgs, entry, ...appArgs], { stdio: 'inherit', env: withCompileCache(env) })
+     child.on('error', err => resolve({ kind: 'error', error: err }))
+     child.on('exit', (code, signal) => {
+       if (signal) resolve({ kind: 'signal', signal })
+@@ -1490,7 +1493,10 @@ if (!runningInsideProfile && ownVersion !== undefined && process.env.DSH_TUI_NO_
+     process.exit(1)
+   }
+   process.env.DSH_TUI_LAUNCHER_VERSION = ownVersion
+-  const child = spawn(process.execPath, [profileBin, ...process.argv.slice(2)], {
++  const nodeExecArgs = process.execArgv.includes('--expose-internals')
++    ? process.execArgv
++    : ['--expose-internals', ...process.execArgv]
++  const child = spawn(process.execPath, [...nodeExecArgs, profileBin, ...process.argv.slice(2)], {
+     stdio: 'inherit',
+     env: process.env,
+   })

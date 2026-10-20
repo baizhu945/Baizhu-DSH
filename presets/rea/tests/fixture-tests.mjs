@@ -109,7 +109,7 @@ for (const definition of definitions) await test(`non-REA ${definition.id}: comp
   console.log(JSON.stringify({ preset: definition.id, tools: views[0].schemas.map(row => row.name), promptHash: hash(views[0].prompt), tsSdkHash: hash(views[0].tsSdk), pySdkHash: hash(views[0].pySdk), requestHash: requests.length ? hash(JSON.stringify(requests[0])) : null }))
 })
 
-await test('selected REA first pre-step only; MCP187; readonly call through actual ToolRuntime', async () => {
+await test('selected REA first pre-step only; MCP210; readonly call through actual ToolRuntime', async () => {
   const count = started().length
   const { ctx, capture } = await actualContext(root, { definitions, reaDefinition: reaDefinition(overrides('healthy')) })
   try {
@@ -126,9 +126,9 @@ await test('selected REA first pre-step only; MCP187; readonly call through actu
     assert(bootstrapStarts > count)
     assert.equal(started().slice(count).filter(row => alive(row.pid)).length, 1, 'selected root owns one live MCP process (SDK discovery probes may have exited)')
     assert(started().slice(count).every(row => row.cwd === currentDirectory), 'REA MCP startup must use the effective Session cwd, including discovery probes')
-    assert.equal(reaTools(ctx, handle.agent).length, 187)
+    assert.equal(reaTools(ctx, handle.agent).length, 210)
     assert.equal(capture.requests.length, 1)
-    assert.equal(capture.requests[0].tools.filter(row => row.name.startsWith('mcp__rea__')).length, 187)
+    assert.equal(capture.requests[0].tools.filter(row => row.name.startsWith('mcp__rea__')).length, 210)
     const view = await snapshot(ctx, handle.agent)
     assert(view.prompt.includes('REA fixture instructions'))
     assert(view.tsSdk.includes('mcp__rea__binary_session'))
@@ -149,13 +149,13 @@ await test('parallel selected roots own independent MCP; non-REA root stays clea
     const [one, two, clean] = await Promise.all([createAgent(ctx, 'root-one', 'rea'), createAgent(ctx, 'root-two', 'rea'), createAgent(ctx, 'root-standard', 'standard')])
     await Promise.all([turn(one.agent), turn(two.agent), turn(clean.agent)])
     assert.equal(started().slice(count).filter(row => alive(row.pid)).length, 2)
-    assert.equal(reaTools(ctx, one.agent).length, 187); assert.equal(reaTools(ctx, two.agent).length, 187)
+    assert.equal(reaTools(ctx, one.agent).length, 210); assert.equal(reaTools(ctx, two.agent).length, 210)
     noRea(await snapshot(ctx, clean.agent))
     const pids = started().slice(count).map(row => row.pid)
     const r1 = await execute(ctx, one.agent, 'mcp__rea__binary_session'), r2 = await execute(ctx, two.agent, 'mcp__rea__binary_session')
     assert.notDeepEqual(r1.content, r2.content, 'roots shared the same physical process')
     await one.dispose()
-    assert.equal(reaTools(ctx, two.agent).length, 187)
+    assert.equal(reaTools(ctx, two.agent).length, 210)
     assert(!(await execute(ctx, two.agent, 'mcp__rea__binary_session')).isError)
     await two.dispose(); await clean.dispose()
     await until(() => pids.every(pid => !alive(pid)), 'parallel root release')
@@ -177,7 +177,7 @@ await test('blank REA -> standard selection clears bootstrap/context; selection 
     // blank, then change preset. No turn/start is fabricated.
     const active = await createAgent(ctx, 'blank-with-bootstrap', 'rea')
     await snapshot(ctx, active.agent)
-    assert.equal(reaTools(ctx, active.agent).length, 187)
+    assert.equal(reaTools(ctx, active.agent).length, 210)
     const pid = started().at(-1).pid
     await ctx.agentPresets.select(active.agent, 'standard')
     noRea(await snapshot(ctx, active.agent))
