@@ -1,172 +1,7 @@
-diff --git a/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css b/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
-@@ -166,6 +166,27 @@
-   color: var(--dsw-alias-label-primary);
- }
- 
-+.collapseButton {
-+  display: inline-flex;
-+  align-self: flex-start;
-+  align-items: center;
-+  gap: 4px;
-+  margin: 4px 0 2px 4px;
-+  padding: 2px 8px;
-+  border: 1px solid var(--dsw-alias-border-l2);
-+  border-radius: 999px;
-+  background: var(--dsw-alias-bg-base);
-+  color: var(--dsw-alias-label-secondary);
-+  font-size: 11px;
-+  line-height: 16px;
-+  cursor: pointer;
-+}
-+
-+.collapseButton:hover {
-+  background: var(--dsw-alias-interactive-bg-hover-solid);
-+  color: var(--dsw-alias-label-primary);
-+}
-+
- /* Expanded-body scroll wrapper for the run_code CodeBlock; the IN/OUT card
-    and the terminal card scroll INSIDE their own surface instead, so the
-    scrollbar sits within the rounded card. */
-
-diff --git a/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx b/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
-@@ -1,7 +1,7 @@
- import { memo, useCallback, useMemo, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
- import clsx from 'clsx'
- import {
--  CodeBlock, DiffBlock, DisclosureRow, IconInspectOutlineRegular, ReadBlock, SearchBlock,
-+  CodeBlock, DiffBlock, DisclosureRow, IconChevronUpOutlineRegular, IconInspectOutlineRegular, ReadBlock, SearchBlock,
-   TerminalBlock, TextShimmer, WebBlock,
-   diffTotals,
- } from '@deepseek-ai/dsh-client-ui-primitives'
-@@ -150,7 +150,7 @@
-   inspect,
-   useDisclosure,
- }: ToolRowProps) {
--  const { expanded, toggle: toggleExpand } = useDisclosure()
-+  const { expanded, toggle: toggleExpand, setExpanded } = useDisclosure()
-   const terminalLabels = useMemo(() => terminalBlockLabels(t), [t])
-   const diffLabels = useMemo(() => diffBlockLabels(t), [t])
-   const readLabels = useMemo(() => readBlockLabels(t), [t])
-@@ -364,10 +364,14 @@
-           {t('row.inspect')}
-         </button>
-       )}
-+      <button type="button" className={css.collapseButton} onClick={() => { setExpanded(false) }}>
-+        <IconChevronUpOutlineRegular size={14} />
-+        {t('row.collapse')}
-+      </button>
-     </div>
-   ) : undefined, [
-     open, detailsBody, askQuestionBody, terminalBody, terminalLabels, diffBody, diffLabels, readBody, readLabels,
--    imageBody, renderSlot, loadImage, searchBody, searchLabels, webBody, webLabels, inspect, t, onOpenFile,
-+    imageBody, renderSlot, loadImage, searchBody, searchLabels, webBody, webLabels, inspect, setExpanded, t, onOpenFile,
-     variant, bodyText, cardBody, outputText, state,
-   ])
-   return (
-
-diff --git a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
-@@ -56,7 +56,7 @@
-     ? 'error'
-     : model.state
-   const status = stateStatus(state, t)
--  const { expanded, toggle: toggleExpand } = useDisclosure()
-+  const { expanded, toggle: toggleExpand, setExpanded } = useDisclosure()
-   const background = isBackgroundShellCall(block)
-   // Failed or interrupted background launches retain raw input/output, as do
-   // other execution failures, persistent results, and spill previews.
-@@ -161,6 +161,10 @@
-               {t('row.inspect')}
-             </button>
-           )}
-+          <button type="button" className={css.collapseButton} onClick={() => { setExpanded(false) }}>
-+            <IconChevronUpOutlineRegular size={14} />
-+            {t('row.collapse')}
-+          </button>
-         </div>
-       )}
-     </div>
-
-diff --git a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
-@@ -235,6 +235,27 @@
-   color: var(--dsw-alias-label-primary);
- }
- 
-+.collapseButton {
-+  display: inline-flex;
-+  align-self: flex-start;
-+  align-items: center;
-+  gap: 4px;
-+  margin: 4px 0 2px 4px;
-+  padding: 2px 8px;
-+  border: 1px solid var(--dsw-alias-border-l2);
-+  border-radius: 999px;
-+  background: var(--dsw-alias-bg-base);
-+  color: var(--dsw-alias-label-secondary);
-+  font-size: 11px;
-+  line-height: 16px;
-+  cursor: pointer;
-+}
-+
-+.collapseButton:hover {
-+  background: var(--dsw-alias-interactive-bg-hover-solid);
-+  color: var(--dsw-alias-label-primary);
-+}
-+
- 
- .visuallyHidden {
-   position: absolute;
-
-diff --git a/packages/client/ui-tool/tests/terminal-card.client.spec.tsx b/packages/client/ui-tool/tests/terminal-card.client.spec.tsx
-@@ -516,8 +516,8 @@
-     fireEvent.click(view.container.querySelector('[data-expandable]')!)
-     expect(view.getByText('a.ts  b.ts', RAW)).toBeTruthy()
-     expect(view.getByText('复制')).toBeTruthy()
--    // Collapse back in place: the summary row returns, the card unmounts.
--    fireEvent.click(view.container.querySelector('[data-expandable]')!)
-+    // The local bottom action collapses the same upstream disclosure.
-+    fireEvent.click(view.getByRole('button', { name: '折叠' }))
-     expect(view.queryByText(/a\.ts/)).toBeNull()
-     expect(view.getByText('List files')).toBeTruthy()
-   })
-
-diff --git a/packages/client/ui-tool/tests/tool-row.client.spec.tsx b/packages/client/ui-tool/tests/tool-row.client.spec.tsx
-@@ -346,7 +346,7 @@
-     expect(view.getByText('List files')).toBeTruthy()
-     expect(view.getByText(/"a": 1/)).toBeTruthy()
-     expect(view.container.querySelector('[class*="ioCard"]')).not.toBeNull()
--    fireEvent.click(view.getByRole('button'))
-+    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
-     expect(view.queryByTestId('tool-icon')).not.toBeNull()
-     expect(view.getByText('List files')).toBeTruthy()
-   })
-@@ -371,6 +371,16 @@
-     expect(view.queryByRole('button', { name: /展开其余/ })).toBeNull()
-   })
- 
-+  it('collapses from the bottom button without reopening the disclosure', () => {
-+    const view = render(<ToolRow {...rowProps} />)
-+    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
-+    expect(view.getByText(/"a": 1/)).toBeTruthy()
-+    fireEvent.click(view.getByRole('button', { name: t('row.collapse') }))
-+    expect(view.queryByText(/"a": 1/)).toBeNull()
-+    expect(view.container.querySelector('[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false')
-+    expect(view.queryByRole('button', { name: t('row.collapse') })).toBeNull()
-+  })
-+
-   it('formats the argument body only while expanding it', () => {
-     const stringify = vi.spyOn(JSON, 'stringify')
-     const bodyFormatCalls = () => stringify.mock.calls.filter(
-@@ -388,7 +398,7 @@
-     expect(bodyFormatCalls()).toBe(1)
-     expect(view.getByText(/"a": 1/)).toBeTruthy()
- 
--    fireEvent.click(view.getByRole('button'))
-+    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
-     expect(bodyFormatCalls()).toBe(1)
-     expect(view.queryByText(/"a": 1/)).toBeNull()
-   })
-
 diff --git a/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css b/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
+index 0fe5aabfd5..506e5eb73b 100644
+--- a/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
++++ b/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css
 @@ -75,3 +75,23 @@
    padding: 4px 0 4px calc(22px + var(--dsh-content-font-delta, 0px));
    min-width: 0;
@@ -191,8 +26,10 @@ diff --git a/packages/client/ui-chat/src/client/chat/ReasoningRow.module.css b/p
 +  background: var(--dsw-alias-interactive-bg-hover-solid);
 +  color: var(--dsw-alias-label-primary);
 +}
-
 diff --git a/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx b/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
+index a91ef3a198..4c200d860d 100644
+--- a/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
++++ b/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx
 @@ -1,6 +1,6 @@
  /** Assistant reasoning disclosure, independent of Tool-call presentation. */
  import { memo, useMemo } from 'react'
@@ -200,33 +37,35 @@ diff --git a/packages/client/ui-chat/src/client/chat/ReasoningRow.tsx b/packages
 +import { DisclosureRow, IconChevronUpOutlineRegular, IconThinkOutlineRegular, TextShimmer } from '@deepseek-ai/dsh-client-ui-primitives'
  import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
  import type { ChatViewSlotProps, UseDisclosure, UsePresentation } from '../contract/slots.ts'
- import a11yCss from './accessibility.module.css'
-@@ -52,7 +52,7 @@
+ import { reasoningText } from '../reasoning-text.ts'
+@@ -56,7 +56,7 @@ export const ReasoningRow = memo(function ReasoningRow({
    usePresentation: UsePresentation
    t: ChatViewSlotProps['t']
  } & Pick<PropsRenderSlots<'conversation.chat.reasoning.body'>, 'renderSlot'>) {
 -  const { expanded, toggle } = useDisclosure()
 +  const { expanded, toggle, setExpanded } = useDisclosure()
-   const summaryText = running ? latestCompletedParagraphFirstLine(text) : firstLine(text)
-   const summary = useMemo(() => summaryText.replaceAll('**', ''), [summaryText])
-   const preview = usePresentation(policy => !expanded && summary !== ''
-@@ -70,8 +70,12 @@
+   const { text, hidden } = useMemo(() => {
+     const text = reasoningText(rawText)
+     return { text, hidden: text !== rawText && text.trim() === '' }
+@@ -78,8 +78,12 @@ export const ReasoningRow = memo(function ReasoningRow({
    const content = useMemo(() => expanded ? (
-     <div className={css.thinkBody}>
-       {renderSlot('conversation.chat.reasoning.body', { text, running })}
+     <div className={css.thinkBody} data-text-interaction-source={textInteractionSource && !running ? '' : undefined}>
+       {renderSlot('conversation.chat.reasoning.body', { rawText, text, running })}
 +      <button type="button" className={css.collapseButton} onClick={() => { setExpanded(false) }}>
 +        <IconChevronUpOutlineRegular size={14} />
 +        {t('row.collapse')}
 +      </button>
      </div>
--  ) : undefined, [expanded, renderSlot, running, text])
-+  ) : undefined, [expanded, renderSlot, running, setExpanded, t, text])
+-  ) : undefined, [expanded, renderSlot, running, rawText, text, textInteractionSource])
++  ) : undefined, [expanded, renderSlot, running, rawText, text, textInteractionSource, setExpanded, t])
  
-   return (
-     <div
-
+   if (hidden) return null
+ 
 diff --git a/packages/client/ui-chat/src/client/locale.ts b/packages/client/ui-chat/src/client/locale.ts
-@@ -193,6 +193,7 @@
+index 4d22cff80e..636634cf93 100644
+--- a/packages/client/ui-chat/src/client/locale.ts
++++ b/packages/client/ui-chat/src/client/locale.ts
+@@ -209,6 +209,7 @@ export const zh = {
    'command.title': '指令',
    'row.running': '运行中',
    'row.failed': '失败',
@@ -234,7 +73,7 @@ diff --git a/packages/client/ui-chat/src/client/locale.ts b/packages/client/ui-c
    'json.truncated': '… 已截断，共 {total} 字符',
    'clock.md': '{m}月{d}日',
    'clock.ymd': '{y}年{m}月{d}日',
-@@ -391,6 +392,7 @@
+@@ -423,6 +424,7 @@ export const en = {
    'command.title': 'Command',
    'row.running': 'Running',
    'row.failed': 'Failed',
@@ -242,9 +81,59 @@ diff --git a/packages/client/ui-chat/src/client/locale.ts b/packages/client/ui-c
    'json.truncated': '… truncated, {total} characters total',
    'clock.md': '{m}/{d}',
    'clock.ymd': '{y}-{m}-{d}',
-
+@@ -634,6 +636,7 @@ export const ja = {
+   'command.title': 'コマンド',
+   'row.running': '実行中',
+   'row.failed': '失敗',
++  'row.collapse': '折りたたむ',
+   'json.truncated': '… 省略表示、全{total}文字',
+   'clock.md': '{m}/{d}',
+   'clock.ymd': '{y}-{m}-{d}',
+@@ -845,6 +848,7 @@ export const es = {
+   'command.title': 'Comando',
+   'row.running': 'corriendo',
+   'row.failed': 'Fallido',
++  'row.collapse': 'Contraer',
+   'json.truncated': '… truncado, caracteres {total} en total',
+   'clock.md': '{m}/{d}',
+   'clock.ymd': '{y}-{m}-{d}',
+@@ -1056,6 +1060,7 @@ export const fr = {
+   'command.title': 'Commande',
+   'row.running': 'Courir',
+   'row.failed': 'Échec',
++  'row.collapse': 'Réduire',
+   'json.truncated': '… tronqué, nombre total de caractères {total}',
+   'clock.md': '{m}/{d}',
+   'clock.ymd': '{y}-{m}-{d}',
+@@ -1267,6 +1272,7 @@ export const de = {
+   'command.title': 'Befehl',
+   'row.running': 'Laufen',
+   'row.failed': 'Fehlgeschlagen',
++  'row.collapse': 'Einklappen',
+   'json.truncated': '… gekürzt, {total} Zeichen insgesamt',
+   'clock.md': '{m}/{d}',
+   'clock.ymd': '{y}-{m}-{d}',
+@@ -1478,6 +1484,7 @@ export const ru = {
+   'command.title': 'Команда',
+   'row.running': 'Бег',
+   'row.failed': 'Не удалось',
++  'row.collapse': 'Свернуть',
+   'json.truncated': '… усечено, всего символов {total}',
+   'clock.md': '{m}/{d}',
+   'clock.ymd': '{y}-{m}-{d}',
+@@ -1689,6 +1696,7 @@ export const pt = {
+   'command.title': 'Comando',
+   'row.running': 'Correndo',
+   'row.failed': 'Falha',
++  'row.collapse': 'Recolher',
+   'json.truncated': '… truncado, {total} caracteres no total',
+   'clock.md': '{m}/{d}',
+   'clock.ymd': '{y}-{m}-{d}',
 diff --git a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx b/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx
-@@ -59,7 +59,7 @@
+index 6494ce61c5..0dcff2b8ba 100644
+--- a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx
++++ b/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx
+@@ -59,7 +59,7 @@ describe('AssistantMarkdown reasoning blocks', () => {
      const first = { kind: 'reasoning' as const, text: 'First thought\n\nEarlier body' }
      const blank = { kind: 'reasoning' as const, text: ' \t\r\n' }
      const view = render(<AssistantMarkdown {...props} blocks={[first, blank, blank]} streaming />)
@@ -253,7 +142,7 @@ diff --git a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx b/packa
      const earlierRow = earlierToggle.closest('[data-variant="think"]')
      expect(earlierRow?.getAttribute('data-state')).toBe('ok')
      expect(view.queryByText('运行中')).toBeNull()
-@@ -69,7 +69,7 @@
+@@ -69,7 +69,7 @@ describe('AssistantMarkdown reasoning blocks', () => {
      const tail = { kind: 'reasoning' as const, text: 'An unfinished tail' }
      const blocks = [first, blank, tail]
      view.rerender(<AssistantMarkdown {...props} blocks={blocks} streaming />)
@@ -262,7 +151,7 @@ diff --git a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx b/packa
      expect(toggles).toHaveLength(2)
      expect(toggles[0]).toBe(earlierToggle)
      expect(view.getByText('Earlier body')).toBe(earlierBody)
-@@ -84,7 +84,7 @@
+@@ -84,7 +84,7 @@ describe('AssistantMarkdown reasoning blocks', () => {
      expect(earlierToggle.getAttribute('aria-expanded')).toBe('true')
  
      view.rerender(<AssistantMarkdown {...props} blocks={blocks} streaming={false} />)
@@ -271,7 +160,7 @@ diff --git a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx b/packa
      expect(settledToggles).toHaveLength(2)
      expect(settledToggles[0]).toBe(earlierToggle)
      expect(settledToggles[1]).toBe(tailToggle)
-@@ -115,13 +115,13 @@
+@@ -115,13 +115,13 @@ describe('AssistantMarkdown reasoning blocks', () => {
      ]
      const view = render(<AssistantMarkdown {...props} usePresentation={usePresentation}
        blocks={blocks} groupPart="reasoning" streaming={false} />)
@@ -288,13 +177,13 @@ diff --git a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx b/packa
        expect(toggle.getAttribute('aria-expanded')).toBe('true')
        expect(view.getByText('Mode body')).toBe(body)
        expect(view.queryByText('Answer')).toBeNull()
-@@ -143,10 +143,14 @@
+@@ -143,10 +143,14 @@ describe('ReasoningRow', () => {
      const view = render(<ReasoningRow useDisclosure={useDisclosure} text="Original thought" running={false}
        usePresentation={useDetailedPresentation} renderSlot={extension} t={t} />)
      expect(calls).not.toHaveBeenCalled()
 -    fireEvent.click(view.getByRole('button'))
 +    fireEvent.click(view.getByRole('button', { name: /^思考/ }))
-     expect(calls).toHaveBeenCalledWith('conversation.chat.reasoning.body', { text: 'Original thought', running: false })
+     expect(calls).toHaveBeenCalledWith('conversation.chat.reasoning.body', { rawText: 'Original thought', text: 'Original thought', running: false })
      expect(view.getAllByText('Original thought')).toHaveLength(1)
 -    expect(view.getAllByRole('button')).toHaveLength(1)
 +    expect(view.getAllByRole('button')).toHaveLength(2)
@@ -305,7 +194,7 @@ diff --git a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx b/packa
    })
  
    it.each([
-@@ -181,7 +185,7 @@
+@@ -181,7 +185,7 @@ describe('ReasoningRow', () => {
        text={'First line\n\nDetailed body'} running={false} usePresentation={usePresentation} t={t} />)
      const root = view.container.querySelector('[data-variant="think"]')!
      const summary = view.getByText('First line')
@@ -314,7 +203,7 @@ diff --git a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx b/packa
      for (const next of ['compact', 'standard', 'detailed', 'verbose', 'compact'] as const) {
        act(() => { mode.set(next) })
        expect(view.getByText('First line')).toBe(summary)
-@@ -199,7 +203,7 @@
+@@ -199,7 +203,7 @@ describe('ReasoningRow', () => {
      act(() => { reset.set(1) })
      expect(toggle.getAttribute('aria-expanded')).toBe('false')
      expect(view.queryByText('Detailed body')).toBeNull()
@@ -323,7 +212,7 @@ diff --git a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx b/packa
    })
  
    it('keeps a running preview enabled in Compact and hides it on settlement without removing it', () => {
-@@ -225,23 +229,23 @@
+@@ -225,23 +229,23 @@ describe('ReasoningRow', () => {
          usePresentation={useDetailedPresentation}
          t={t} blocks={[reasoning]} streaming loadImage={unusedImageLoader} />,
      )
@@ -351,7 +240,7 @@ diff --git a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx b/packa
    })
  
    it('advances on completed paragraph first lines, then restores the settled first line', () => {
-@@ -255,7 +259,7 @@
+@@ -255,7 +259,7 @@ describe('ReasoningRow', () => {
        />,
      )
      expect(view.getByText('运行中')).toBeTruthy()
@@ -360,7 +249,7 @@ diff --git a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx b/packa
      expect(view.getByText('Newest reasoning tokens').closest('[data-streaming]')?.getAttribute('data-streaming'))
        .toBe('true')
  
-@@ -295,7 +299,7 @@
+@@ -295,7 +299,7 @@ describe('ReasoningRow', () => {
        />,
      )
      const settledSummary = view.getByText('Inspect the session')
@@ -369,7 +258,7 @@ diff --git a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx b/packa
      expect(view.queryByText('运行中')).toBeNull()
      expect(settledSummary.closest('[data-streaming]')).toBeNull()
    })
-@@ -310,7 +314,7 @@
+@@ -310,7 +314,7 @@ describe('ReasoningRow', () => {
          loadImage={unusedImageLoader}
        />,
      )
@@ -378,10 +267,80 @@ diff --git a/packages/client/ui-chat/tests/reasoning-row.client.spec.tsx b/packa
  
      fireEvent.click(view.getByText('Inspect the session'))
      expect(row.getAttribute('aria-expanded')).toBe('true')
-
+diff --git a/packages/client/ui-conversation/src/client/locales.ts b/packages/client/ui-conversation/src/client/locales.ts
+index eb3c04782a..ade366143e 100644
+--- a/packages/client/ui-conversation/src/client/locales.ts
++++ b/packages/client/ui-conversation/src/client/locales.ts
+@@ -327,6 +327,7 @@ export const zh = {
+   'row.input': '输入',
+   'row.output': '输出',
+   'row.inspect': '查看',
++  'row.collapse': '折叠',
+   'row.imageSize': '{width}x{height}px，{bytes} 字节',
+   'row.imageSizeDownscaled': '{width}x{height}px（由 {originalWidth}x{originalHeight}px 缩小），{bytes} 字节',
+   'tool.title.search': '搜索',
+@@ -726,6 +727,7 @@ export const en = {
+   'row.input': 'IN',
+   'row.output': 'OUT',
+   'row.inspect': 'Inspect',
++  'row.collapse': 'Collapse',
+   'row.imageSize': '{width}x{height}px, {bytes} bytes',
+   'row.imageSizeDownscaled': '{width}x{height}px (downscaled from {originalWidth}x{originalHeight}px), {bytes} bytes',
+   'tool.title.search': 'Search',
+@@ -1124,6 +1126,7 @@ export const ja = {
+   'row.input': 'IN',
+   'row.output': 'OUT',
+   'row.inspect': '検査',
++  'row.collapse': '折りたたむ',
+   'row.imageSize': '{width}x{height}px、{bytes} バイト',
+   'row.imageSizeDownscaled': '{width}x{height}px（{originalWidth}x{originalHeight}px から縮小）、{bytes} バイト',
+   'tool.title.search': '検索',
+@@ -1515,6 +1518,7 @@ export const es = {
+   'row.input': 'IN',
+   'row.output': 'OUT',
+   'row.inspect': 'inspeccionar',
++  'row.collapse': 'Contraer',
+   'row.imageSize': '{width}x{height}px, {bytes} bytes',
+   'row.imageSizeDownscaled': '{width}x{height}px (reducido de {originalWidth}x{originalHeight}px), {bytes} bytes',
+   'tool.title.search': 'Buscar',
+@@ -1913,6 +1917,7 @@ export const fr = {
+   'row.input': 'IN',
+   'row.output': 'OUT',
+   'row.inspect': 'Inspecter',
++  'row.collapse': 'Réduire',
+   'row.imageSize': '{width}x{height}px, {bytes} octets',
+   'row.imageSizeDownscaled': '{width}x{height}px (réduction de {originalWidth}x{originalHeight}px), {bytes} octets',
+   'tool.title.search': 'Rechercher',
+@@ -2311,6 +2316,7 @@ export const de = {
+   'row.input': 'IN',
+   'row.output': 'OUT',
+   'row.inspect': 'Inspizieren',
++  'row.collapse': 'Einklappen',
+   'row.imageSize': '{width}x{height}px, {bytes} Bytes',
+   'row.imageSizeDownscaled': '{width}x{height}px (herunterskaliert von {originalWidth}x{originalHeight}px), {bytes} Bytes',
+   'tool.title.search': 'Suchen',
+@@ -2709,6 +2715,7 @@ export const ru = {
+   'row.input': 'IN',
+   'row.output': 'OUT',
+   'row.inspect': 'Осмотреть',
++  'row.collapse': 'Свернуть',
+   'row.imageSize': '{width}x{height}px, {bytes} байт',
+   'row.imageSizeDownscaled': '{width}x{height}px (уменьшено с {originalWidth}x{originalHeight}px), {bytes} байт',
+   'tool.title.search': 'Поиск',
+@@ -3107,6 +3114,7 @@ export const pt = {
+   'row.input': 'IN',
+   'row.output': 'OUT',
+   'row.inspect': 'Inspecionar',
++  'row.collapse': 'Recolher',
+   'row.imageSize': '{width}x{height}px, {bytes} bytes',
+   'row.imageSizeDownscaled': '{width}x{height}px (reduzido de {originalWidth}x{originalHeight}px), {bytes} bytes',
+   'tool.title.search': 'Pesquisar',
 diff --git a/packages/client/ui-skill/src/client/SkillRow.module.css b/packages/client/ui-skill/src/client/SkillRow.module.css
-@@ -183,6 +183,27 @@
-   color: var(--dsw-alias-label-primary);
+index ec4865223f..4b6eaf441d 100644
+--- a/packages/client/ui-skill/src/client/SkillRow.module.css
++++ b/packages/client/ui-skill/src/client/SkillRow.module.css
+@@ -192,6 +192,27 @@
+   }
  }
  
 +.collapseButton {
@@ -408,25 +367,10 @@ diff --git a/packages/client/ui-skill/src/client/SkillRow.module.css b/packages/
  .visuallyHidden {
    position: absolute;
    width: 1px;
-
-diff --git a/packages/client/ui-skill/src/client/locales.ts b/packages/client/ui-skill/src/client/locales.ts
-@@ -12,6 +12,7 @@
-   'row.stopped': 'skill 加载已中止',
-   'row.instructions': '说明',
-   'row.inspect': '查看',
-+  'row.collapse': '折叠',
-   'menu.userOnly': '仅用户',
- } satisfies Record<string, string>
- 
-@@ -27,5 +28,6 @@
-   'row.stopped': 'Skill load stopped',
-   'row.instructions': 'Instructions',
-   'row.inspect': 'Inspect',
-+  'row.collapse': 'Collapse',
-   'menu.userOnly': 'user-only',
- } satisfies Record<SkillKey, string>
-
 diff --git a/packages/client/ui-skill/src/client/SkillRow.tsx b/packages/client/ui-skill/src/client/SkillRow.tsx
+index cee91367cf..a783f6b5fc 100644
+--- a/packages/client/ui-skill/src/client/SkillRow.tsx
++++ b/packages/client/ui-skill/src/client/SkillRow.tsx
 @@ -1,6 +1,6 @@
  import { useState, type KeyboardEvent, type ReactNode } from 'react'
  import {
@@ -435,7 +379,7 @@ diff --git a/packages/client/ui-skill/src/client/SkillRow.tsx b/packages/client/
  } from '@deepseek-ai/dsh-client-ui-primitives'
  import type { StartedToolCallViewProps, ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
  import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
-@@ -166,6 +166,10 @@
+@@ -166,6 +166,10 @@ function StartedSkillRow({ block, inspect, t }: Exclude<SkillRowProps, { phase:
                {t('row.inspect')}
              </button>
            ) : null}
@@ -446,46 +390,259 @@ diff --git a/packages/client/ui-skill/src/client/SkillRow.tsx b/packages/client/
          </div>
        ) : null}
      </div>
-
-diff --git a/packages/client/ui-conversation/src/client/locales.ts b/packages/client/ui-conversation/src/client/locales.ts
-@@ -312,6 +312,7 @@
-   'row.input': '输入',
-   'row.output': '输出',
+diff --git a/packages/client/ui-skill/src/client/locales.ts b/packages/client/ui-skill/src/client/locales.ts
+index 4100aec6f0..b118f9f468 100644
+--- a/packages/client/ui-skill/src/client/locales.ts
++++ b/packages/client/ui-skill/src/client/locales.ts
+@@ -12,6 +12,7 @@ export const zh = {
+   'row.stopped': 'skill 加载已中止',
+   'row.instructions': '说明',
    'row.inspect': '查看',
 +  'row.collapse': '折叠',
-   'row.imageSize': '{width}x{height}px，{bytes} 字节',
-   'row.imageSizeDownscaled': '{width}x{height}px（由 {originalWidth}x{originalHeight}px 缩小），{bytes} 字节',
-   'tool.title.search': '搜索',
-@@ -692,6 +693,7 @@
-   'row.input': 'IN',
-   'row.output': 'OUT',
+   'menu.userOnly': '仅用户',
+ } satisfies Record<string, string>
+ 
+@@ -27,6 +28,7 @@ export const en = {
+   'row.stopped': 'Skill load stopped',
+   'row.instructions': 'Instructions',
    'row.inspect': 'Inspect',
 +  'row.collapse': 'Collapse',
-   'row.imageSize': '{width}x{height}px, {bytes} bytes',
-   'row.imageSizeDownscaled': '{width}x{height}px (downscaled from {originalWidth}x{originalHeight}px), {bytes} bytes',
-   'tool.title.search': 'Search',
-
-diff --git a/packages/extensions/ui-cordis/src/client/locales.ts b/packages/extensions/ui-cordis/src/client/locales.ts
-@@ -44,6 +44,7 @@
-   'action.retry': '重试',
-   'action.rollback': '回退',
-   'action.inspect': '查看',
-+  'action.collapse': '折叠',
-   'render.failedAbdicated': '{slot} 渲染失败，已恢复默认界面：',
-   'render.failedHeld': '{slot} 渲染失败：',
-   'a11y.defining': '正在定义插件',
-@@ -109,6 +110,7 @@
-   'action.retry': 'Retry',
-   'action.rollback': 'Roll back',
-   'action.inspect': 'Inspect',
-+  'action.collapse': 'Collapse',
-   'render.failedAbdicated': 'Rendering failed in {slot}; the default UI was restored:',
-   'render.failedHeld': 'Rendering failed in {slot}:',
-   'a11y.defining': 'Defining the plugin',
-
+   'menu.userOnly': 'user-only',
+ } satisfies Record<SkillKey, string>
+ 
+@@ -39,6 +41,7 @@ export const ja = {
+   'row.stopped': 'スキルの読み込みが停止しました',
+   'row.instructions': '手順',
+   'row.inspect': '詳細を確認',
++  'row.collapse': '折りたたむ',
+   'menu.userOnly': 'ユーザー専用',
+ } satisfies Record<keyof typeof en, string>
+ 
+@@ -51,6 +54,7 @@ export const es = {
+   'row.stopped': 'Carga de habilidades detenida',
+   'row.instructions': 'Instrucciones',
+   'row.inspect': 'inspeccionar',
++  'row.collapse': 'Contraer',
+   'menu.userOnly': 'solo usuario',
+ } satisfies Record<keyof typeof en, string>
+ 
+@@ -63,6 +67,7 @@ export const fr = {
+   'row.stopped': 'Chargement de compétences arrêté',
+   'row.instructions': 'Instructions',
+   'row.inspect': 'Inspecter',
++  'row.collapse': 'Réduire',
+   'menu.userOnly': 'utilisateur uniquement',
+ } satisfies Record<keyof typeof en, string>
+ 
+@@ -75,6 +80,7 @@ export const de = {
+   'row.stopped': 'Das Laden der Fertigkeiten wurde gestoppt',
+   'row.instructions': 'Anweisungen',
+   'row.inspect': 'Inspizieren',
++  'row.collapse': 'Einklappen',
+   'menu.userOnly': 'Nur für Benutzer',
+ } satisfies Record<keyof typeof en, string>
+ 
+@@ -87,6 +93,7 @@ export const ru = {
+   'row.stopped': 'Загрузка навыков остановлена',
+   'row.instructions': 'Инструкции',
+   'row.inspect': 'Осмотреть',
++  'row.collapse': 'Свернуть',
+   'menu.userOnly': 'только для пользователей',
+ } satisfies Record<keyof typeof en, string>
+ 
+@@ -99,5 +106,6 @@ export const pt = {
+   'row.stopped': 'Carga de habilidade interrompida',
+   'row.instructions': 'Instruções',
+   'row.inspect': 'Inspecionar',
++  'row.collapse': 'Recolher',
+   'menu.userOnly': 'somente usuário',
+ } satisfies Record<keyof typeof en, string>
+diff --git a/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css b/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
+index 7d5bd8a6a6..17dfbd4a2f 100644
+--- a/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
++++ b/packages/client/ui-tool/src/client/tool/components/ToolRow.module.css
+@@ -213,6 +213,27 @@
+   }
+ }
+ 
++.collapseButton {
++  display: inline-flex;
++  align-self: flex-start;
++  align-items: center;
++  gap: 4px;
++  margin: 4px 0 2px 4px;
++  padding: 2px 8px;
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 999px;
++  background: var(--dsw-alias-bg-base);
++  color: var(--dsw-alias-label-secondary);
++  font-size: 11px;
++  line-height: 16px;
++  cursor: pointer;
++}
++
++.collapseButton:hover {
++  background: var(--dsw-alias-interactive-bg-hover-solid);
++  color: var(--dsw-alias-label-primary);
++}
++
+ .detailsBodyWrap {
+   position: relative;
+ }
+diff --git a/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx b/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
+index 9985614f80..6d3213602e 100644
+--- a/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
++++ b/packages/client/ui-tool/src/client/tool/components/ToolRow.tsx
+@@ -1,7 +1,7 @@
+ import { Fragment, memo, useCallback, useMemo, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+ import clsx from 'clsx'
+ import {
+-  CodeBlock, DiffBlock, DisclosureRow, IconInspectOutlineRegular, ReadBlock, SearchBlock,
++  CodeBlock, DiffBlock, DisclosureRow, IconChevronUpOutlineRegular, IconInspectOutlineRegular, ReadBlock, SearchBlock,
+   TerminalBlock, TextShimmer, WebBlock,
+   diffTotals,
+ } from '@deepseek-ai/dsh-client-ui-primitives'
+@@ -193,7 +193,7 @@ export const ToolRow = memo(function ToolRow({
+   inspect,
+   useDisclosure,
+ }: ToolRowProps) {
+-  const { expanded, toggle: toggleExpand } = useDisclosure()
++  const { expanded, toggle: toggleExpand, setExpanded } = useDisclosure()
+   const terminalLabels = useMemo(() => terminalBlockLabels(t), [t])
+   const diffLabels = useMemo(() => diffBlockLabels(t), [t])
+   const readLabels = useMemo(() => readBlockLabels(t), [t])
+@@ -450,10 +450,14 @@ export const ToolRow = memo(function ToolRow({
+           {t('row.inspect')}
+         </button>
+       )}
++      <button type="button" className={css.collapseButton} onClick={() => { setExpanded(false) }}>
++        <IconChevronUpOutlineRegular size={14} />
++        {t('row.collapse')}
++      </button>
+     </div>
+   ) : undefined, [
+     open, detailsBody, askQuestionBody, terminalBody, terminalLabels, diffBody, diffLabels, readBody, readLabels,
+-    imageBody, renderSlot, loadImage, searchBody, searchLabels, webBody, webLabels, inspect, t, onOpenFile,
++    imageBody, renderSlot, loadImage, searchBody, searchLabels, webBody, webLabels, inspect, setExpanded, t, onOpenFile,
+     variant, bodyText, cardBody, outputText, state,
+   ])
+   return (
+diff --git a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
+index 6f521dc8b3..5c65df331e 100644
+--- a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
++++ b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.module.css
+@@ -247,6 +247,27 @@
+ }
+ 
+ 
++.collapseButton {
++  display: inline-flex;
++  align-self: flex-start;
++  align-items: center;
++  gap: 4px;
++  margin: 4px 0 2px 4px;
++  padding: 2px 8px;
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 999px;
++  background: var(--dsw-alias-bg-base);
++  color: var(--dsw-alias-label-secondary);
++  font-size: 11px;
++  line-height: 16px;
++  cursor: pointer;
++}
++
++.collapseButton:hover {
++  background: var(--dsw-alias-interactive-bg-hover-solid);
++  color: var(--dsw-alias-label-primary);
++}
++
+ .visuallyHidden {
+   position: absolute;
+   width: 1px;
+diff --git a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
+index 22f239a308..a73c6864c3 100644
+--- a/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
++++ b/packages/client/ui-tool/src/client/tool/toolviews/bash-sample.tsx
+@@ -56,7 +56,7 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
+     ? 'error'
+     : model.state
+   const status = stateStatus(state, t)
+-  const { expanded, toggle: toggleExpand } = useDisclosure()
++  const { expanded, toggle: toggleExpand, setExpanded } = useDisclosure()
+   const background = isBackgroundShellCall(block)
+   // Failed or interrupted background launches retain raw input/output, as do
+   // other execution failures, persistent results, and spill previews.
+@@ -161,6 +161,10 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
+               {t('row.inspect')}
+             </button>
+           )}
++          <button type="button" className={css.collapseButton} onClick={() => { setExpanded(false) }}>
++            <IconChevronUpOutlineRegular size={14} />
++            {t('row.collapse')}
++          </button>
+         </div>
+       )}
+     </div>
+diff --git a/packages/client/ui-tool/tests/terminal-card.client.spec.tsx b/packages/client/ui-tool/tests/terminal-card.client.spec.tsx
+index 426170379f..11fa60e3f4 100644
+--- a/packages/client/ui-tool/tests/terminal-card.client.spec.tsx
++++ b/packages/client/ui-tool/tests/terminal-card.client.spec.tsx
+@@ -517,8 +517,8 @@ describe('BashRow terminal card', () => {
+     fireEvent.click(view.container.querySelector('[data-expandable]')!)
+     expect(view.getByText('a.ts  b.ts', RAW)).toBeTruthy()
+     expect(view.getByText('复制')).toBeTruthy()
+-    // Collapse back in place: the summary row returns, the card unmounts.
+-    fireEvent.click(view.container.querySelector('[data-expandable]')!)
++    // The local bottom action collapses the same upstream disclosure.
++    fireEvent.click(view.getByRole('button', { name: '折叠' }))
+     expect(view.queryByText(/a\.ts/)).toBeNull()
+     expect(view.getByText('List files')).toBeTruthy()
+   })
+diff --git a/packages/client/ui-tool/tests/tool-row.client.spec.tsx b/packages/client/ui-tool/tests/tool-row.client.spec.tsx
+index beadba5f5e..f0d3dc3804 100644
+--- a/packages/client/ui-tool/tests/tool-row.client.spec.tsx
++++ b/packages/client/ui-tool/tests/tool-row.client.spec.tsx
+@@ -371,7 +371,7 @@ describe('ToolRow', () => {
+     expect(view.getByText('List files')).toBeTruthy()
+     expect(view.getByText(/"a": 1/)).toBeTruthy()
+     expect(view.container.querySelector('[class*="ioCard"]')).not.toBeNull()
+-    fireEvent.click(view.getByRole('button'))
++    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
+     expect(view.queryByTestId('tool-icon')).not.toBeNull()
+     expect(view.getByText('List files')).toBeTruthy()
+   })
+@@ -396,6 +396,16 @@ describe('ToolRow', () => {
+     expect(view.queryByRole('button', { name: /展开其余/ })).toBeNull()
+   })
+ 
++  it('collapses from the bottom button without reopening the disclosure', () => {
++    const view = render(<ToolRow {...rowProps} />)
++    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
++    expect(view.getByText(/"a": 1/)).toBeTruthy()
++    fireEvent.click(view.getByRole('button', { name: t('row.collapse') }))
++    expect(view.queryByText(/"a": 1/)).toBeNull()
++    expect(view.container.querySelector('[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false')
++    expect(view.queryByRole('button', { name: t('row.collapse') })).toBeNull()
++  })
++
+   it('formats the argument body only while expanding it', () => {
+     const stringify = vi.spyOn(JSON, 'stringify')
+     const bodyFormatCalls = () => stringify.mock.calls.filter(
+@@ -413,7 +423,7 @@ describe('ToolRow', () => {
+     expect(bodyFormatCalls()).toBe(1)
+     expect(view.getByText(/"a": 1/)).toBeTruthy()
+ 
+-    fireEvent.click(view.getByRole('button'))
++    fireEvent.click(view.getByRole('button', { name: /Bash/ }))
+     expect(bodyFormatCalls()).toBe(1)
+     expect(view.queryByText(/"a": 1/)).toBeNull()
+   })
 diff --git a/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css b/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
-@@ -280,6 +280,27 @@
-   color: var(--dsw-alias-label-primary);
+index 23f9a7ab4e..bf94ee1996 100644
+--- a/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
++++ b/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
+@@ -287,6 +287,27 @@
+   }
  }
  
 +.collapseButton {
@@ -512,8 +669,10 @@ diff --git a/packages/extensions/ui-cordis/src/client/CordisDefineRow.module.css
  .visuallyHidden {
    position: absolute;
    width: 1px;
-
 diff --git a/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx b/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx
+index d33a4b9ae2..827522a1a3 100644
+--- a/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx
++++ b/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx
 @@ -2,7 +2,7 @@
  
  import { useId, useState } from 'react'
@@ -523,7 +682,7 @@ diff --git a/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx b/pack
  } from '@deepseek-ai/dsh-client-ui-primitives'
  import type { InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
  import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
-@@ -165,6 +165,10 @@
+@@ -165,6 +165,10 @@ function StartedCordisDefineRow({
                {t('action.inspect')}
              </button>
            )}
@@ -534,4 +693,71 @@ diff --git a/packages/extensions/ui-cordis/src/client/CordisDefineRow.tsx b/pack
          </div>
        </DisclosureRow>
      </div>
-
+diff --git a/packages/extensions/ui-cordis/src/client/locales.ts b/packages/extensions/ui-cordis/src/client/locales.ts
+index 524871507a..8e0e3443af 100644
+--- a/packages/extensions/ui-cordis/src/client/locales.ts
++++ b/packages/extensions/ui-cordis/src/client/locales.ts
+@@ -44,6 +44,7 @@ export const zh = {
+   'action.retry': '重试',
+   'action.rollback': '回退',
+   'action.inspect': '查看',
++  'action.collapse': '折叠',
+   'render.failedAbdicated': '{slot} 渲染失败，已恢复默认界面：',
+   'render.failedHeld': '{slot} 渲染失败：',
+   'a11y.defining': '正在定义插件',
+@@ -109,6 +110,7 @@ export const en = {
+   'action.retry': 'Retry',
+   'action.rollback': 'Roll back',
+   'action.inspect': 'Inspect',
++  'action.collapse': 'Collapse',
+   'render.failedAbdicated': 'Rendering failed in {slot}; the default UI was restored:',
+   'render.failedHeld': 'Rendering failed in {slot}:',
+   'a11y.defining': 'Defining the plugin',
+@@ -164,6 +166,7 @@ export const ja = {
+   'action.retry': '再試行',
+   'action.rollback': 'ロールバック',
+   'action.inspect': '検査',
++  'action.collapse': '折りたたむ',
+   'render.failedAbdicated': '{slot} でのレンダリングに失敗しました。デフォルト UI を復元しました:',
+   'render.failedHeld': '{slot} でのレンダリングに失敗しました:',
+   'a11y.defining': 'プラグインを定義中',
+@@ -219,6 +222,7 @@ export const es = {
+   'action.retry': 'Reintentar',
+   'action.rollback': 'retroceder',
+   'action.inspect': 'inspeccionar',
++  'action.collapse': 'Contraer',
+   'render.failedAbdicated': 'Error de renderizado en {slot}; se restauró la interfaz de usuario predeterminada:',
+   'render.failedHeld': 'Error de renderizado en {slot}:',
+   'a11y.defining': 'Definiendo el complemento',
+@@ -274,6 +278,7 @@ export const fr = {
+   'action.retry': 'Réessayer',
+   'action.rollback': 'Revenir en arrière',
+   'action.inspect': 'Inspecter',
++  'action.collapse': 'Réduire',
+   'render.failedAbdicated': "Le rendu a échoué dans {slot} ; l'interface utilisateur par défaut a été restaurée :",
+   'render.failedHeld': 'Échec du rendu dans {slot} :',
+   'a11y.defining': 'Définir le plugin',
+@@ -329,6 +334,7 @@ export const de = {
+   'action.retry': 'Erneut versuchen',
+   'action.rollback': 'Zurückrollen',
+   'action.inspect': 'Inspizieren',
++  'action.collapse': 'Einklappen',
+   'render.failedAbdicated': 'Das Rendern ist in {slot} fehlgeschlagen. Die Standard-Benutzeroberfläche wurde wiederhergestellt:',
+   'render.failedHeld': 'Das Rendern ist in {slot} fehlgeschlagen:',
+   'a11y.defining': 'Definieren des Plugins',
+@@ -384,6 +390,7 @@ export const ru = {
+   'action.retry': 'Повторить',
+   'action.rollback': 'Откат назад',
+   'action.inspect': 'Осмотреть',
++  'action.collapse': 'Свернуть',
+   'render.failedAbdicated': 'Не удалось выполнить рендеринг в {slot}; пользовательский интерфейс по умолчанию был восстановлен:',
+   'render.failedHeld': 'Не удалось выполнить рендеринг в {slot}:',
+   'a11y.defining': 'Определение плагина',
+@@ -439,6 +446,7 @@ export const pt = {
+   'action.retry': 'Tentar novamente',
+   'action.rollback': 'Reverter',
+   'action.inspect': 'Inspecionar',
++  'action.collapse': 'Recolher',
+   'render.failedAbdicated': 'A renderização falhou em {slot}; a IU padrão foi restaurada:',
+   'render.failedHeld': 'Falha na renderização em {slot}:',
+   'a11y.defining': 'Definindo o plug-in',

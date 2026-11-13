@@ -1,29 +1,16 @@
 diff --git a/src/dsh-adapter/channel/extensions.ts b/src/dsh-adapter/channel/extensions.ts
-@@ -31,7 +31,7 @@
- import type { DshNative } from '../../agent/capabilities.js'
- import type { AgentSession } from '../../agent/session.js'
- import { channelCapabilities } from '../../channel/capabilities.js'
--import { isCommandCompletionToken, LOCAL_COMMANDS } from '../../commands.js'
+--- a/src/dsh-adapter/channel/extensions.ts
++++ b/src/dsh-adapter/channel/extensions.ts
+@@ -34,1 +34,1 @@
+-import { isCommandCompletionToken, LOCAL_COMMANDS, type LocalCommand } from '../../commands.js'
 +import { BACKEND_PERMISSION_COMMAND, isCommandCompletionToken, LOCAL_COMMANDS, type LocalCommand } from '../../commands.js'
- import { touchSession } from '../../sessionHistory.js'
- import { snapshotLiveSessionEvents } from '../compat/liveSession.js'
- import { DEFAULT_SESSION_MODES, resolveSessionModes } from '../../sessionModes.js'
-@@ -225,6 +225,11 @@
-   const { modes: resolvedConfiguredSessionModes, dropped: droppedModeIds } = resolveSessionModes(options.modes)
-   const filteredConfiguredSessionModes = resolvedConfiguredSessionModes
-     .filter(spec => spec.permission === undefined || isCommandCompletionToken(spec.permission))
+@@ -230,0 +231,5 @@
 +  for (const spec of resolvedConfiguredSessionModes) {
 +    if (spec.permission !== undefined && !isCommandCompletionToken(spec.permission)) {
 +      ctx.logger.warn(`dsh-tui: session mode "${spec.id}" has an unsafe permission identity; dropped from Shift+Tab`)
 +    }
 +  }
-   const configuredSessionModes = filteredConfiguredSessionModes.length > 0
-     ? filteredConfiguredSessionModes
-     : DEFAULT_SESSION_MODES
-@@ -258,10 +263,22 @@
-   // service lookups, so both consumers may call it freely: the public
-   // `capabilities()` accessor and the command-list annotation below.
-   const capabilitiesOf = () => resolveAgentCapabilities(agentCapabilityEvidence(ctx, binding.agent))
+@@ -263,0 +264,12 @@
 +  // Chat also supports /permission through the service's own write path when
 +  // the command row is absent. Keep that picker discoverable in this roster.
 +  const withPermissionCommand = (commands: readonly LocalCommand[]): readonly LocalCommand[] => {
@@ -36,31 +23,15 @@ diff --git a/src/dsh-adapter/channel/extensions.ts b/src/dsh-adapter/channel/ext
 +    }
 +    return commands
 +  }
-   // Annotated from the start: Help and `/` completion read `commandList`
-   // before the first skill-catalog refresh publishes a new one, and a command
-   // whose capability is missing must never look usable in that window.
--  state.commandList = annotateCommandCapabilities(LOCAL_COMMANDS, capabilitiesOf())
-+  state.commandList = annotateCommandCapabilities(withPermissionCommand(LOCAL_COMMANDS), capabilitiesOf())
-   Object.defineProperty(state, 'autoRecapOnOpen', {
-     configurable: true,
-     enumerable: true,
-@@ -453,7 +470,7 @@
-       // Annotate before publishing: Help and `/` completion both read
-       // `commandList`, so a command whose capability is missing says so
-       // instead of looking usable and failing on use.
--      state.commandList = annotateCommandCapabilities(commands, capabilitiesOf())
-+      state.commandList = annotateCommandCapabilities(withPermissionCommand(commands), capabilitiesOf())
-       state.emit()
-     },
-     commandDescriptions: name => commandTrees?.descriptions(name),
+@@ -271,1 +283,1 @@
+-      withTeamCommandVisibility(commands, teamServiceActive(ctx)),
++      withTeamCommandVisibility(withPermissionCommand(commands), teamServiceActive(ctx)),
 diff --git a/src/dsh-adapter/channel/mode-permission-actions.ts b/src/dsh-adapter/channel/mode-permission-actions.ts
-@@ -324,6 +324,9 @@
-     const sessionEvent = event as SessionEvent
-     base.onSessionEvent(subject, sessionEvent)
+--- a/src/dsh-adapter/channel/mode-permission-actions.ts
++++ b/src/dsh-adapter/channel/mode-permission-actions.ts
+@@ -325,2 +325,5 @@
      const type = (sessionEvent as { type: string }).type
 +    if (type === 'sandbox/mode' || type === 'approval/policy') {
 +      refreshMode()
 +    }
      if (type === 'permission/preset') {
-       refreshMode()
-       // Every durable identity change on the bound session teaches the

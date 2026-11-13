@@ -5,13 +5,13 @@ let
 
   # Pin the upstream release and its submodules. GitHub source archives omit
   # submodule contents; materialize them below before fetching pnpm deps.
-  # v0.16.1 validates dsh 0.2.1-rc.2; vendor/dsh-std stays pinned in-tree.
-  dshTuiVersion = "0.16.1";
+  # v0.20.0 validates dsh 0.2.2-rc.2; vendor/dsh-std stays pinned in-tree.
+  dshTuiVersion = "0.20.0";
   dshTuiSrc = pkgs.fetchFromGitHub {
     owner = "ccch1mneyyy";
     repo = "dsh-TUI";
-    rev = "73ff99fbed56563bf154d719effd09f9f9725349";
-    hash = "sha256-n+l4GXR/iQUE5xvFCM1n1eiPE1SAE8/If5BuVcdm5bU=";
+    rev = "8958f08e3ba09a3db37d35c490d9589c114e7136";
+    hash = "sha256-CCVpHRfFfEvXXudVmBWoLlI7PkZObhftRYPz31HkJWw=";
   };
 
   dshStdSrc = pkgs.fetchFromGitHub {
@@ -51,7 +51,7 @@ let
   dshTuiPnpmDeps = pkgs.fetchPnpmDeps (fetchPnpmDepsArgs // {
     pname = "dsh-tui";
     src = sourceWithSubmodules;
-    hash = "sha256-JnhZx954mSq7Dr/gERGrwCaEy6/GjzzMAlZnICgoZTg=";
+    hash = "sha256-kL1ttBoLCJp3Uu+ORMa5wn44W2lm2mCdWyPMoo+aNfw=";
   });
 
   dshTui = pkgs.stdenv.mkDerivation {
@@ -77,7 +77,7 @@ let
     ];
 
     nativeBuildInputs = [
-      pkgs.nodejs_22
+      pkgs.nodejs_24
       pkgs.pnpm_11
       pkgs.pnpmConfigHook
       pkgs.sqlite
@@ -109,9 +109,7 @@ let
       # The current dsh-base supplies ptc-runtime/workflow-ptc. Remove the
       # obsolete worker-thread row INCLUDING its multi-line !!js expression;
       # deleting only the first lines leaves the YAML malformed.
-      sed -i \
-        -e '/^    - id: dsh-tui-code-runtime$/,/^    # 0.1.2 presets/{ /^    # 0.1.2 presets/!d; }' \
-        -e '/^- id: workflow-worker-thread$/,+1d' \
+      sed -i '/^    - id: dsh-tui-code-runtime$/,/^    # 0.1.2 presets/{ /^    # 0.1.2 presets/!d; }' \
         cordis.patch.yml
     '';
 
@@ -155,6 +153,16 @@ let
       # Includes external token/sign-in visibility, cross-process locking and
       # the local regression for session-scoped Web /auth questions.
       node scripts/verify-oauth.mjs
+      # 0.20 adds account/coupon notifications; exercise their ownership,
+      # polling, lifecycle and paint gates without real account credentials.
+      for script in verify-coupon-notification-lifecycle verify-account-notification-poll \
+        verify-account-notification-state verify-account-notification-owner; do
+        node --import tsx/esm "scripts/$script.ts"
+      done
+      for script in verify-coupon-paint verify-account-notification-paint \
+        verify-account-notification-stable-frame verify-account-notification-chat-geometry; do
+        node --import tsx/esm "scripts/$script.tsx"
+      done
       node scripts/verify-permission-modes.mjs
       node --input-type=module - <<'NODE'
       import assert from 'node:assert/strict'
@@ -216,6 +224,11 @@ let
       node --import tsx/esm scripts/verify-pointer-events.ts
       node --import tsx/esm scripts/verify-mouse-report-fragments.tsx
       node --import tsx/esm scripts/verify-math-renderer.tsx
+      # Keep the bundled working-activity integration (publish:false) on the
+      # supported TUI adapter, rather than loading its old bare peer manifest.
+      node --import tsx/esm scripts/verify-activity-store.ts
+      node --import tsx/esm scripts/verify-activity-store-render.tsx
+      node --import tsx/esm scripts/verify-activity-ownership.ts
       # Baseline screen regressions cover the touched Chat/Ink input seam.
       node --import tsx/esm scripts/repro-askpanel.tsx
       node --import tsx/esm scripts/verify-askpanel-layout.tsx
@@ -298,7 +311,9 @@ let
       NODE
 
       mkdir -p $out/package
-      cp -r bin lib assets guide cordis.patch.yml cordis.yml tui-profile package.json $out/package/
+      # cli/entry.mjs backs auth/run/workspace commands; locale is exported
+      # by the public package manifest. Both must survive Nix packaging.
+      cp -r bin cli lib locale assets guide cordis.patch.yml cordis.yml tui-profile package.json $out/package/
       # Keep the directory for legacy preset discovery, but do not ship or
       # register the upstream Liangshen preset (registration patched above).
       mkdir -p $out/package/presets
@@ -313,6 +328,8 @@ let
       assert.equal(existsSync(join(out, 'package/presets/liangshen')), false)
       assert.equal(existsSync(join(out, 'node_modules/@deepseek-harness-tui/dsh-auth')), false)
       for (const path of [
+        'cli/entry.mjs', 'cli/adapters', 'locale/en.json', 'locale/zh.json',
+        'lib/types/ink/notify-helper/activate.cs',
         'lib/types/oauth.js', 'lib/types/oauth.d.ts',
         'guide/dsh-tui-guide/SKILL.md', 'guide/dsh-tui-guide/user-guide.en.md',
         'assets/whale-girl/whale-girl.png',
@@ -345,7 +362,7 @@ let
 
   # No global provider patch is applied after this profile. The TUI bundle's
   # complete llm-deepseek row therefore remains authoritative; the omitted
-  # protocol follows dsh 0.2.1-rc.2's official Messages default.
+  # protocol follows dsh 0.2.2-rc.2's official Messages default.
   # Keep the previous seed for a safe, exact-match upgrade. A user-edited
   # runtime patch is never replaced just to add a new preset declaration.
   dshTuiProfilePatchText = ''
@@ -408,12 +425,12 @@ let
 
   dshTuiLauncher = pkgs.writeShellScriptBin "dsh-tui" ''
     export PATH="${runtimePath}:$PATH"
-    exec ${pkgs.nodejs_22}/bin/node --expose-internals ${dshTui}/package/bin/dsh-tui.js "$@"
+    exec ${pkgs.nodejs_24}/bin/node --expose-internals ${dshTui}/package/bin/dsh-tui.js "$@"
   '';
 
   dstLauncher = pkgs.writeShellScriptBin "dst" ''
     export PATH="${runtimePath}:$PATH"
-    exec ${pkgs.nodejs_22}/bin/node --expose-internals ${dshTui}/package/bin/dsh-tui.js "$@"
+    exec ${pkgs.nodejs_24}/bin/node --expose-internals ${dshTui}/package/bin/dsh-tui.js "$@"
   '';
 in
 {
@@ -537,7 +554,7 @@ in
       run mv "$tuiPatch.tmp" "$tuiPatch"
     fi
     if [ -f "$tuiPatch" ] && grep -Fq -- 'codex-registrar' "$tuiPatch"; then
-      run ${pkgs.nodejs_22}/bin/node ${./scripts/strip-codex-registrar.mjs} "$tuiPatch"
+      run ${pkgs.nodejs_24}/bin/node ${./scripts/strip-codex-registrar.mjs} "$tuiPatch"
     fi
     # Remove the compatibility row written by the previous generation after
     # the TUI bundle stopped needing code-runtime-worker-thread. Keep this

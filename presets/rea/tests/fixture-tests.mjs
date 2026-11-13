@@ -109,7 +109,7 @@ for (const definition of definitions) await test(`non-REA ${definition.id}: comp
   console.log(JSON.stringify({ preset: definition.id, tools: views[0].schemas.map(row => row.name), promptHash: hash(views[0].prompt), tsSdkHash: hash(views[0].tsSdk), pySdkHash: hash(views[0].pySdk), requestHash: requests.length ? hash(JSON.stringify(requests[0])) : null }))
 })
 
-await test('selected REA first pre-step only; MCP210; readonly call through actual ToolRuntime', async () => {
+await test('selected REA first pre-step only; MCP229; readonly call through actual ToolRuntime', async () => {
   const count = started().length
   const { ctx, capture } = await actualContext(root, { definitions, reaDefinition: reaDefinition(overrides('healthy')) })
   try {
@@ -126,9 +126,9 @@ await test('selected REA first pre-step only; MCP210; readonly call through actu
     assert(bootstrapStarts > count)
     assert.equal(started().slice(count).filter(row => alive(row.pid)).length, 1, 'selected root owns one live MCP process (SDK discovery probes may have exited)')
     assert(started().slice(count).every(row => row.cwd === currentDirectory), 'REA MCP startup must use the effective Session cwd, including discovery probes')
-    assert.equal(reaTools(ctx, handle.agent).length, 210)
+    assert.equal(reaTools(ctx, handle.agent).length, 229)
     assert.equal(capture.requests.length, 1)
-    assert.equal(capture.requests[0].tools.filter(row => row.name.startsWith('mcp__rea__')).length, 210)
+    assert.equal(capture.requests[0].tools.filter(row => row.name.startsWith('mcp__rea__')).length, 229)
     const view = await snapshot(ctx, handle.agent)
     assert(view.prompt.includes('REA fixture instructions'))
     assert(view.tsSdk.includes('mcp__rea__binary_session'))
@@ -146,16 +146,24 @@ await test('parallel selected roots own independent MCP; non-REA root stays clea
   const count = started().length
   const { ctx } = await actualContext(root, { definitions, reaDefinition: reaDefinition(overrides('healthy')) })
   try {
-    const [one, two, clean] = await Promise.all([createAgent(ctx, 'root-one', 'rea'), createAgent(ctx, 'root-two', 'rea'), createAgent(ctx, 'root-standard', 'standard')])
+    const one = await createAgent(ctx, 'root-one', 'rea')
+    // Durable fork ancestry is not delegated runtime ownership: rc2 rootOf
+    // must still admit this independent root, unlike a parentSession filter.
+    const [two, clean] = await Promise.all([
+      createAgent(ctx, 'root-two', 'rea', { meta: { cwd: join(root, 'workspace'), parentSession: one.agent.id } }),
+      createAgent(ctx, 'root-standard', 'standard'),
+    ])
+    assert.equal(two.agent.session.header.parentSession, one.agent.id)
+    assert.equal(ctx.subagents.rootOf(two.agent), two.agent)
     await Promise.all([turn(one.agent), turn(two.agent), turn(clean.agent)])
     assert.equal(started().slice(count).filter(row => alive(row.pid)).length, 2)
-    assert.equal(reaTools(ctx, one.agent).length, 210); assert.equal(reaTools(ctx, two.agent).length, 210)
+    assert.equal(reaTools(ctx, one.agent).length, 229); assert.equal(reaTools(ctx, two.agent).length, 229)
     noRea(await snapshot(ctx, clean.agent))
     const pids = started().slice(count).map(row => row.pid)
     const r1 = await execute(ctx, one.agent, 'mcp__rea__binary_session'), r2 = await execute(ctx, two.agent, 'mcp__rea__binary_session')
     assert.notDeepEqual(r1.content, r2.content, 'roots shared the same physical process')
     await one.dispose()
-    assert.equal(reaTools(ctx, two.agent).length, 210)
+    assert.equal(reaTools(ctx, two.agent).length, 229)
     assert(!(await execute(ctx, two.agent, 'mcp__rea__binary_session')).isError)
     await two.dispose(); await clean.dispose()
     await until(() => pids.every(pid => !alive(pid)), 'parallel root release')
@@ -177,7 +185,7 @@ await test('blank REA -> standard selection clears bootstrap/context; selection 
     // blank, then change preset. No turn/start is fabricated.
     const active = await createAgent(ctx, 'blank-with-bootstrap', 'rea')
     await snapshot(ctx, active.agent)
-    assert.equal(reaTools(ctx, active.agent).length, 210)
+    assert.equal(reaTools(ctx, active.agent).length, 229)
     const pid = started().at(-1).pid
     await ctx.agentPresets.select(active.agent, 'standard')
     noRea(await snapshot(ctx, active.agent))
@@ -201,7 +209,9 @@ await test('child cannot inherit REA or bypass public toolFilter; original globa
     assert.equal(started().slice(count).filter(row => alive(row.pid)).length, 1)
     const { applyChildComposition, childSessionMeta, appendDelegatedPolicyOverrides, captureDelegatedPolicyOverrides } = await sdk('@deepseek-ai/dsh-subagent')
     async function delegated(id, toolFilter) {
-      return ctx.agents.create({ sessionId: SessionId(id), parentAgent: parent.agent,
+      // Unmanaged child composition probes deliberately carry delegated
+      // metadata. Managed ownership is exercised separately via startActivation.
+      return ctx.agents.create({ sessionId: SessionId(id),
         meta: childSessionMeta(parent.agent, 1, false), agentOptions: { provider: 'fixture', model: 'fixture' },
         setup(childCtx, agent) {
           appendDelegatedPolicyOverrides(agent.session, captureDelegatedPolicyOverrides(parent.agent))
@@ -233,6 +243,90 @@ await test('child cannot inherit REA or bypass public toolFilter; original globa
     writeFileSync(join(root, 'skills/global-sentinel/SKILL.md'), '')
     await ctx.fiber.dispose()
   }
+})
+
+await test('rc2 managed child cancellation leaves parent REA authority and MCP intact', async () => {
+  const { ctx, capture } = await actualContext(root, { definitions, reaDefinition: reaDefinition(overrides('healthy')) })
+  try {
+    await ctx.plugin(await sdk('@deepseek-ai/dsh-subagent-spawn-in-process'), { providerName: 'rea-test-spawn' })
+    const parent = await createAgent(ctx, 'managed-rea-parent', 'rea')
+    await turn(parent.agent)
+    const parentPid = initialized().at(-1).pid
+    const count = started().length
+    let child, entered = false
+    ctx.on('agent/prepare-step', async ({ agent, signal }, next) => {
+      if (agent.id !== SessionId('managed-rea-child')) return next()
+      child = agent
+      entered = true
+      await new Promise(resolve => {
+        if (signal.aborted) return resolve()
+        signal.addEventListener('abort', resolve, { once: true })
+      })
+      return next()
+    })
+    const activation = await ctx.subagents.startActivation({
+      provider: 'rea-test-spawn', childId: SessionId('managed-rea-child'),
+      label: 'REA isolation probe', parent: parent.agent, delivery: 'caller',
+      prompt: [{ type: 'text', text: 'fixture child' }],
+      signal: new AbortController().signal,
+    })
+    await until(() => entered, 'managed child prepare-step')
+    assert.equal(ctx.subagents.rootOf(child), parent.agent)
+    noRea(await snapshot(ctx, child))
+    assert((await execute(ctx, child, 'mcp__rea__binary_session')).isError)
+    assert.equal(started().length, count, 'managed child spawned MCP')
+    const requests = capture.requests.length
+    await child.cancel({ kind: 'user' })
+    await deadline(activation.result, 'managed child cancellation')
+    await activation.dispose()
+    assert.equal(capture.requests.length, requests, 'canceled child reached the model')
+    assert(alive(parentPid), 'child cancellation killed parent MCP')
+    assert.equal(reaTools(ctx, parent.agent).length, 229)
+    assert(!(await execute(ctx, parent.agent, 'mcp__rea__binary_session')).isError)
+    await parent.dispose()
+    await until(() => !alive(parentPid), 'managed parent MCP release')
+  } finally { await ctx.fiber.dispose() }
+})
+
+await test('rc2 canceled startup and same-id replacement cannot revoke another live root', async () => {
+  const { ctx, capture } = await actualContext(root, { definitions, reaDefinition: reaDefinition(overrides('init-gated')) })
+  try {
+    const old = await createAgent(ctx, 'reused-rea-root', 'rea')
+    const sibling = await createAgent(ctx, 'cancel-isolated-root', 'rea')
+    const count = initialized().length
+    const oldTurn = turn(old.agent), siblingTurn = turn(sibling.agent)
+    await until(() => initialized().length >= count + 2, 'two independent pending roots')
+    const pendingPids = initialized().slice(count).map(row => row.pid)
+    await old.agent.cancel({ kind: 'user' })
+    await deadline(oldTurn, 'old root cancellation', 5000)
+    await until(() => pendingPids.filter(alive).length === 1, 'only canceled root MCP exited')
+    assert.equal(capture.requests.length, 0)
+    assert.equal(reaTools(ctx, old.agent).length, 0)
+    await old.dispose()
+    const replacement = await createAgent(ctx, 'reused-rea-root', 'rea')
+    assert.notEqual(replacement.agent, old.agent)
+    assert.equal(ctx.agents.get(old.agent.id), replacement.agent)
+    assert.equal(ctx.subagents.rootOf(replacement.agent), replacement.agent)
+    const before = initialized().length
+    const replacementTurn = turn(replacement.agent)
+    await until(() => initialized().length > before, 'replacement starts its own MCP')
+    const replacementPid = initialized().at(-1).pid
+    // Late cancellation/disposal of the exact old handle must not target a new
+    // agent merely because registry/session identities have been reused.
+    await old.agent.cancel({ kind: 'user' })
+    await old.dispose()
+    assert.equal(ctx.agents.get(old.agent.id), replacement.agent)
+    assert(alive(replacementPid))
+    await sibling.agent.cancel({ kind: 'user' })
+    await deadline(siblingTurn, 'sibling root cancellation', 5000)
+    assert(alive(replacementPid), 'sibling cancellation killed replacement MCP')
+    await replacement.agent.cancel({ kind: 'user' })
+    await deadline(replacementTurn, 'replacement cancellation', 5000)
+    await replacement.dispose(); await sibling.dispose()
+    await until(() => [...pendingPids, replacementPid].every(pid => !alive(pid)), 'all canceled MCPs exited')
+    assert.equal(capture.requests.length, 0)
+    assert.equal(ctx.tools.schemas().filter(row => row.name.startsWith('mcp__rea__')).length, 0)
+  } finally { await ctx.fiber.dispose() }
 })
 
 for (const mode of ['fail', 'malformed']) await test(`${mode}: selected startup fail-closed, no partial tools/request/process leak`, async () => {
@@ -273,12 +367,9 @@ await test('annotations/source helpers and actual approval pipeline coverage', a
     for (const name of ['source_list', 'source_read', 'source_search', 'source_detect', 'binary_session']) {
       const tool = ctx.tools.get(`mcp__rea__${name}`, handle.agent)
       assert(tool, `source helper ${name} missing`)
-      // The installed MCP bridge conservatively leaves all MCP tools exclusive;
-      // readOnlyHint is not a host parallel-execution grant. Check source/read
-      // authority through public effects + actual approval, not a fabricated
-      // requirement to add an SDK isConcurrencySafe callback.
-      const scheduling = ctx.tools.executionMode({ agent: handle.agent, name: tool.name, arguments: {} })
-      assert(['exclusive', 'parallel'].includes(scheduling.kind))
+      // DSH 0.2.2 no longer exposes the removed executionMode API. The installed
+      // MCP bridge keeps tool calls exclusive; verify effects and host approval
+      // through the actual ToolRuntime rather than requiring a parallel grant.
       const result = await execute(ctx, handle.agent, `mcp__rea__${name}`)
       assert(!result.isError, JSON.stringify(result))
     }

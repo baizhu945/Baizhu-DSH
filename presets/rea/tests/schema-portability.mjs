@@ -19,8 +19,8 @@ const { default: Ajv } = await load('ajv/dist/2020.js');
 const ajv = new Ajv({ strict: false, allErrors: true, validateFormats: false });
 const { TOOL_CONTRACTS } = await compiled('contracts/toolContracts.js');
 const { TOOL_EFFECTS } = await compiled('contracts/toolEffects.js');
-assert.equal(JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version, '6.7.0');
-assert.equal(expectedToolNames.length, 210);
+assert.equal(JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version, '6.8.0');
+assert.equal(expectedToolNames.length, 229);
 assert.deepEqual(TOOL_CONTRACTS.map(t => t.name), expectedToolNames);
 assert.deepEqual(Object.keys(TOOL_EFFECTS).sort(), [...expectedToolNames].sort());
 const { Client } = await load('@modelcontextprotocol/client');
@@ -121,8 +121,19 @@ compare('capture_process_scenario', tool('capture_process_scenario').inputSchema
 const rootValues = ['', '.', '..', 'a', 'a/b', '/a', 'a/', 'a//b', 'a/./b', 'a/../b', 'a\\b', 'a\0b',
   'a/\n', 'a\n/', 'a\n//b', 'a\n/../b', 'a\n/./b', 'a\n/b/', '.\n', '..\r\n', 'a\u2028//b', 'a\u2029/', 'a\u0085//b'];
 compare('trace_dylib_resolution', roots, value => ({ roots: [value] }), rootValues);
-// Upstream now enforces segment normalization across newlines. The archived
-// patch intentionally preserved the old dot/lookahead newline loopholes.
+const scenario = tool('capture_browser_scenario').inputSchema;
+const actions = deref(scenario.properties.actions, scenario);
+const steps = actions.items.oneOf ?? actions.items.anyOf;
+const requestStep = steps.map(step => deref(step, scenario))
+  .find(step => step.properties?.action?.const === 'request');
+assert(requestStep, 'request action schema missing');
+compare('capture_browser_scenario', requestStep.properties.path, value => ({
+  browser: { mode: 'launch', executable_path: '/usr/bin/chromium' },
+  start_url: { url: 'https://app.example.test/', query: [] },
+  actions: [{ step_id: 'request-path', action: 'request', method: 'GET', path: value }],
+}), ['/', '/api/folders', '//other-origin.test/path', '/\\\\other-origin.test/path']);
+// REA 6.8 enforces canonical segment normalization across newlines; the local
+// 6.8 patch only makes the request-path expression portable across Rust regex.
 for (const value of ['a\n//b', 'a\n/../b', 'a\n/./b', 'a\n/b/']) {
   assert.equal(contract('trace_dylib_resolution').inputSchema.safeParse({ roots: [value] }).success, false);
 }

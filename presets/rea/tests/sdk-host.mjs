@@ -67,11 +67,12 @@ export async function actualContext(root, { definitions = [], reaDefinition, hos
     'timer', 'llm', 'session', 'session-projection', 'agent', 'system-prompt', 'tools', 'agent-loop',
     'subprocess', 'jobs', 'sandbox', 'sandbox-policy', 'approval', 'shell-env', 'fs-sandbox',
     'fs-observation-policy', 'working-directory', 'tool-working-directory', 'bash-sandbox', 'skill', 'commands', 'goal', 'subagent', 'ptc-runtime',
-    'user-questions', 'web', 'mcp-resources', 'token-meter', 'permission',
+    'user-questions', 'web', 'mcp-resources', 'token-meter', 'permission', 'tool-executor-native', 'tool-executor-ptc',
   ])
   const base = loadYaml(join(runtimeRoot, 'packages/bundle/base/cordis.patch.yml')).flatMap(row => row.insert ?? [])
   const hostRows = base.filter(row => hostIds.has(row.id)).map(row => {
-    if (row.id === 'tools' && hostToolMode !== undefined) return { ...row, config: { ...row.config, mode: hostToolMode } }
+    if (hostToolMode !== undefined && row.id === 'tool-executor-native') return { ...row, disabled: hostToolMode !== 'native' }
+    if (hostToolMode !== undefined && row.id === 'tool-executor-ptc') return { ...row, disabled: hostToolMode !== 'ptc' }
     if (row.id === 'sandbox-policy') return { ...row, config: { mode: 'workspace-write', workspaceRoot: join(root, 'workspace') } }
     if (row.id === 'fs-sandbox') return { ...row, config: { cwd: join(root, 'workspace') } }
     if (row.id === 'ptc-runtime') return { ...row, config: { tempDir: join(root, 'ptc') } }
@@ -169,12 +170,18 @@ export async function snapshot(ctx, agent) {
   // change insertion order even without REA). Preserve ALL fields, canonically
   // order that view only. Captured model requests retain their exact tool order.
   const schemas = ctx.tools.schemas(agent).sort((one, two) => one.name.localeCompare(two.name))
-  const { renderToolsSdk, renderToolsSdkPy } = await sdk('@deepseek-ai/dsh-tools')
+  const { renderToolsSdk, renderToolsSdkPy } = await sdk('@deepseek-ai/dsh-tool-executor-ptc')
   const sdkRows = schemas.filter(row => row.name !== 'run_code').map(row => ({ ...row, output: ctx.tools.get(row.name, agent).output.schema }))
   return { schemas, prompt: renderPrompt(assembled), sections: assembled.sections, tsSdk: renderToolsSdk(sdkRows), pySdk: renderToolsSdkPy(sdkRows) }
 }
 export async function execute(ctx, agent, name, arguments_ = {}, signal = new AbortController().signal) {
-  return ctx.tools.execute({ agent, name, arguments: arguments_, callId: ToolCallId(`fixture-${Date.now()}`), signal })
+  const batch = await ctx.tools.execute({
+    calls: [{ type: 'tool-call', id: ToolCallId(`fixture-${Date.now()}`), name, arguments: JSON.stringify(arguments_) }],
+    agent, signal,
+  })
+  const outcome = batch.results[0]
+  if (outcome === undefined) throw new Error('Executor omitted the fixture tool result')
+  return outcome.result
 }
 export function stableRequest(request) {
   const stable = JSON.parse(JSON.stringify(request, function (key, value) {

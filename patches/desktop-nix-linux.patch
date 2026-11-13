@@ -1,6 +1,34 @@
+diff --git a/apps/desktop-host/src/index.ts b/apps/desktop-host/src/index.ts
+index 966e51a364..74179263e7 100644
+--- a/apps/desktop-host/src/index.ts
++++ b/apps/desktop-host/src/index.ts
+@@ -1,6 +1,7 @@
+ /** Launch the Desktop profile through the Web application and report its URL to Electron. */
+ 
+ import { delimiter, join } from 'node:path'
++import { pathToFileURL } from 'node:url'
+ import { randomUUID } from 'node:crypto'
+ import type { PluginOperationRunId } from '@deepseek-ai/dsh-plugin-manager/diagnostic'
+ import { formatFatalDiagnostic } from './fatal-diagnostic.ts'
+@@ -126,6 +127,13 @@ async function main(): Promise<void> {
+   })
+   process.once('disconnect', () => { void stop() })
+   const { ctx } = await application
++  // Preset registry diagnostics can await Host Loader settlement. Install the generic
++  // user registrar after application boot, never inside a pending declarative row.
++  if (process.env.DSH_DESKTOP_NIX === '1') {
++    const registrar = process.env.DSH_DESKTOP_PRESET_REGISTRAR
++    if (!registrar) throw new Error('desktop presets: DSH_DESKTOP_PRESET_REGISTRAR is required')
++    await ctx.plugin(await import(pathToFileURL(registrar).href))
++  }
+   installOperationDiagnostics(ctx, record => send({ type: 'plugin-operation', record }), 32, runId)
+   control.updateTasks = installDesktopUpdateTaskControl(ctx)
+   control.quitInspection = installDesktopQuitInspection(ctx)
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 8f9cd823a5..d70de45e66 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
-@@ -79,6 +79,34 @@
+@@ -90,6 +90,34 @@ let backendReady = false
  /** Error-level console output of the primary window, attached to crash reports. */
  const rendererConsole = new RendererConsoleTail()
  
@@ -35,7 +63,7 @@
  // Platform-conventional logs directory (macOS ~/Library/Logs/<name>, otherwise under userData);
  // set before ready so the first fatal report already resolves under it.
  app.setAppLogsPath()
-@@ -150,6 +178,16 @@
+@@ -206,6 +234,16 @@ interface RuntimeResources {
  }
  
  function runtimeResources(): RuntimeResources {
@@ -52,7 +80,7 @@
    const development = !app.isPackaged
    const node = process.execPath
    const nodeBin = development ? join(app.getAppPath(), 'scripts', 'node-bin') : join(process.resourcesPath, 'runtime', 'bin')
-@@ -227,6 +265,10 @@
+@@ -285,6 +323,10 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
        visualEffectState: 'active' as const,
        backgroundColor: '#00000000',
      } : {}),
@@ -63,7 +91,7 @@
      webPreferences: {
        preload,
        nodeIntegration: false,
-@@ -320,10 +362,10 @@
+@@ -385,10 +427,10 @@ async function main(): Promise<void> {
    const updateJournal = journalDirectory === undefined ? undefined : new DesktopUpdateJournal(journalDirectory, app.getVersion())
    const resources = runtimeResources()
    const paths = resolveDesktopPaths()
@@ -78,19 +106,17 @@
    const activeProject = paths.profile
    const manager = new DesktopProjectManager(paths, resources)
    // Dock and Finder launches inherit only launchd's environment; every Host shares one login-shell read.
-@@ -440,7 +482,10 @@
+@@ -529,7 +571,8 @@ async function main(): Promise<void> {
      return next.promise
    }
    const platformView = new DesktopPlatformView(join(app.getAppPath(), 'lib', 'preload-platform-account.cjs'),
--    () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US', process.platform === 'win32' ? 'win32' : 'darwin')
-+    // Linux is not a Platform desktop client. null reports the supported web wire identity
-+    // instead of claiming a macOS or Windows one, matching the Host's Linux default.
+-    () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US', process.platform === 'win32' ? 'win32' : 'darwin',
 +    () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US',
-+    process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : null)
++    process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : null,
+     owner => isMandatory() || updateOverlays.input(owner).blocked)
    const backend = new DesktopBackendController((onFailure) => {
      const hostInspectPort = developmentHostInspectPort(development)
-     const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject,
-@@ -926,8 +971,11 @@
+@@ -1155,8 +1198,11 @@ async function main(): Promise<void> {
      updates.dispose()
    })
  
@@ -104,7 +130,7 @@
    app.setAboutPanelOptions({
      applicationName: 'DeepSeek Harness',
      applicationVersion: app.getVersion(),
-@@ -956,7 +1004,9 @@
+@@ -1208,7 +1254,9 @@ async function main(): Promise<void> {
          click: () => { void showAbout().catch((error: unknown) => { console.error(error) }) } }
        : { label: currentDesktopLocale().messages.aboutMenu, role: 'about' },
      { type: 'separator' },
@@ -114,8 +140,8 @@
 +    ...(nixMode ? [] : [{ label: currentDesktopLocale().messages.checkUpdatesMenu, click: () => { void openUpdatePrompt(true) } }]),
      ...process.platform === 'darwin' || process.platform === 'win32'
        ? [{ label: currentDesktopLocale().messages.cliCommandMenu, click: () => { void commandManager.show() } }] : [],
-     ...development ? [
-@@ -1075,6 +1125,14 @@
+     { type: 'separator' },
+@@ -1328,6 +1376,14 @@ async function main(): Promise<void> {
      // Closing hides: the page and the Host keep running, and the next show resumes the same document.
      window.on('close', (event) => {
        if (quitting || shellInstallerOwnsQuit || sessionEnding) return
@@ -130,22 +156,27 @@
        event.preventDefault()
        if (updateDialog.isOpen) { updateDialog.focus(); return }
        const hide = (): void => {
+diff --git a/apps/desktop/src/platform-view.ts b/apps/desktop/src/platform-view.ts
+index 7cc85e8cf6..0c79a3b10a 100644
 --- a/apps/desktop/src/platform-view.ts
 +++ b/apps/desktop/src/platform-view.ts
-@@ -50,10 +50,11 @@
+@@ -51,11 +51,12 @@ export class DesktopPlatformView {
    /**
     * @param preload - bundled sandboxed Platform preload path.
     * @param getLocale - current resolved Desktop language.
 -   * @param platform - operating system this shell runs on, reported to Platform.
 +   * @param platform - operating system this shell runs on, reported to Platform; null
 +   *   identifies a client that is not a Platform desktop build.
+    * @param blocked - Whether shell policy or an update prompt prevents opening a product view.
     */
    constructor(private readonly preload: string, private readonly getLocale: () => PlatformLocale,
--    private readonly platform: 'darwin' | 'win32') {}
-+    private readonly platform: 'darwin' | 'win32' | null) {}
+-    private readonly platform: 'darwin' | 'win32', private readonly blocked: (owner: PlatformOwner) => boolean) {}
++    private readonly platform: 'darwin' | 'win32' | null, private readonly blocked: (owner: PlatformOwner) => boolean) {}
  
    /** @param next - private Host credentials; identity enrichment preserves an already open temporary document. */
    setSession(next: PlatformSession | null): void {
+diff --git a/apps/desktop/src/project-manager.ts b/apps/desktop/src/project-manager.ts
+index 9e96b91237..5553fbf26b 100644
 --- a/apps/desktop/src/project-manager.ts
 +++ b/apps/desktop/src/project-manager.ts
 @@ -1,5 +1,6 @@
@@ -155,7 +186,7 @@
  import {
    existsSync,
    fsyncSync,
-@@ -87,10 +88,28 @@
+@@ -86,10 +87,28 @@ export class DesktopProjectManager {
        migrateProfileSettings(this.paths.profile)
        createPluginProfile(this.paths.profile)
        removeLinkProjections(this.paths.profile)
@@ -184,50 +215,18 @@
      mkdirSync(this.paths.profile, { recursive: true, mode: 0o700 })
      const lockPath = join(realpathSync(this.paths.profile), 'lock')
      let descriptor: number
---- a/apps/desktop-host/src/index.ts
-+++ b/apps/desktop-host/src/index.ts
-@@ -1,6 +1,7 @@
- /** Launch the Desktop profile through the Web application and report its URL to Electron. */
+diff --git a/packages/bundle/web-app/cordis.patch.yml b/packages/bundle/web-app/cordis.patch.yml
+index e842d8e3e1..16c3dfe5aa 100644
+--- a/packages/bundle/web-app/cordis.patch.yml
++++ b/packages/bundle/web-app/cordis.patch.yml
+@@ -303,7 +303,9 @@
+       disabled: !!js "ctx.get('profileContext')?.name !== 'desktop' || !process.env.DSH_PRIMARY_RUNTIME"
+       config:
+         source: !!js process.env.DSH_PRIMARY_RUNTIME
+-        root: !!js dshHomePath('dsh-runtimes', 'dsh-primary-runtime')
++        # Nix already supplies an immutable runtime; consume it in place rather
++        # than dereferencing and copying its store payload into the Harness home.
++        root: !!js "process.env.DSH_DESKTOP_NIX === '1' ? undefined : dshHomePath('dsh-runtimes', 'dsh-primary-runtime')"
  
- import { delimiter, join } from 'node:path'
-+import { pathToFileURL } from 'node:url'
- import { inspect } from 'node:util'
- import { loadLayeredEnv, loadProfileDirectory, reportSkippedBundles } from '@deepseek-ai/dsh-app-boot'
- import { runProfile } from '@deepseek-ai/dsh/profile-boot'
-@@ -90,6 +91,13 @@
-   })
-   process.once('disconnect', () => { void stop() })
-   const { ctx } = await application
-+  // Preset registry diagnostics can await Host Loader settlement. Install the generic
-+  // user registrar after application boot, never inside a pending declarative row.
-+  if (process.env.DSH_DESKTOP_NIX === '1') {
-+    const registrar = process.env.DSH_DESKTOP_PRESET_REGISTRAR
-+    if (!registrar) throw new Error('desktop presets: DSH_DESKTOP_PRESET_REGISTRAR is required')
-+    await ctx.plugin(await import(pathToFileURL(registrar).href))
-+  }
-   control.updateTasks = installDesktopUpdateTaskControl(ctx)
-   control.quitInspection = installDesktopQuitInspection(ctx)
-   await ctx.plugin(desktopOffice, {
---- a/apps/desktop-host/src/office.ts
-+++ b/apps/desktop-host/src/office.ts
-@@ -20,13 +20,19 @@
-   readonly runtimeDir: string
- }
- 
-+/** Nix-packaged shell: an immutable store payload is consumed in place rather than copied. */
-+const nixMode = process.env.DSH_DESKTOP_NIX === '1'
-+
- /**
-  * Enable offline Office authoring and LibreOffice Kit operations in the Desktop profile.
-  * @param ctx - Profile scope; child plugins declare their own service requirements.
-  * @param config - Bundled payload source and Harness-home installation root.
-  */
- export async function apply(ctx: Context, config: Config): Promise<void> {
--  await ctx.plugin(workspaceDependencies, config)
-+  // A Nix payload is already an immutable store tree with every dependency resolved by Nix.
-+  // Passing only `source` keeps workspace dependencies in place; forwarding `root` and
-+  // `runtimeDir` would dereference and copy the payload wholesale under the harness home.
-+  await ctx.plugin(workspaceDependencies, nixMode ? { source: config.source } : config)
-   const archive = runtimeArchivePath(config.runtimeDir) === undefined ? undefined : dirname(realpathSync(config.runtimeDir))
-   const manifest = fileURLToPath(import.meta.resolve('@deepseek-ai/libreoffice-kit/package.json'))
-   const packageRoot = dirname(archive === undefined ? manifest : join(`${archive}.unpacked`, relative(archive, manifest)))
+     - id: skill-office
+       name: '@deepseek-ai/dsh-skill-office'

@@ -3,12 +3,12 @@
 let
   inherit (import ./environment.nix { }) pkgs runtimePath keepBuildInputs;
 
-  # deepseek-harness dsh-v0.2.1-rc.2 (latest upstream release tag)
+  # deepseek-harness dsh-v0.2.2-rc.2 (latest upstream release tag)
   dshSrc = pkgs.fetchFromGitHub {
     owner = "deepseek-ai";
     repo = "deepseek-harness";
-    rev = "687f282e8625c6b8d11ff58211a90524be2e4317";
-    hash = "sha256-WcPs3q4NFTRnH2y1Rc/o7/rvJAOe8s7isoTQYf8APFU=";
+    rev = "ddac96760b6edf8fa0fe17cbdcf0b512f4c12b2c";
+    hash = "sha256-lbRmFifO6+8YKn8kaR7gQzKeUQh9YBFu9wH/dWJ+3MA=";
   };
 
   # 声明式 pnpm 依赖(fetchPnpmDeps 为 fixed-output 派生,沙箱内可联网下载;
@@ -31,12 +31,12 @@ let
       pnpm config set network-concurrency 12
     '';
 
-    hash = "sha256-C9Aw9AS4r7zubaEuT6mLXQ+AhhMVlTxPZRKTpzRUkcU=";
+    hash = "sha256-md84fDBaEnqdQxlsTpaGTkGWWH1dLUGwlSp0EJ+aOA4=";
   };
 
   dsh = pkgs.stdenv.mkDerivation {
     pname = "dsh";
-    version = "0.2.1-rc.2";
+    version = "0.2.2-rc.2";
     src = dshSrc;
 
     pnpmDeps = dshPnpmDeps;
@@ -45,19 +45,20 @@ let
 
     patches = [
       ./patches/tool-bottom-collapse.patch
-      # CommandText now supplies upstream horizontal scrolling and keyboard
-      # access; the former bash-command-hscroll patch is fully superseded.
-      ./patches/web-fetch-clash-fake-ip.patch
+      # The 0.2.2 web-fetch provider no longer applies the public-IP DNS filter,
+      # so Clash/Mihomo's fake-IP answers are accepted without a local exception.
       # Native approval remains the sole composer/detail-slot owner. The user
       # addon may replace its presentation without changing request/answer semantics.
       ./patches/approval-presenter.patch
+      # Lazy REA must load before 0.2.2 snapshots the step's admitted tool set.
+      ./patches/dsh-agent-prepare-step.patch
       # Nix Node exposes internals through --expose-internals; its addon getter
       # probe is incompatible with the packaged Node 22 and 24 binaries.
       ./patches/profile-resolution-expose-internals.patch
     ];
 
     nativeBuildInputs = [
-      pkgs.nodejs_22 # dsh engines 要求 ^22.19 || >=24
+      pkgs.nodejs_24 # dsh 0.2.2 requires Node >=24.9
       pkgs.pnpm_11   # 与仓库 packageManager 相同的 pnpm 11 主版本
       pkgs.pnpmConfigHook # 离线恢复 pnpm store 并执行 pnpm install
       pkgs.python3   # node-gyp 编译 node-pty 原生模块所需
@@ -124,7 +125,14 @@ let
         packages/client/ui-approval/tests/ui-approval.client.spec.tsx \
         packages/extensions/ui-cordis/tests/card-model.client.spec.ts \
         packages/web/web-fetch-http/tests/fetch-http.spec.ts \
-        packages/boot/app-boot/tests/profile-resolution.spec.ts
+        packages/boot/app-boot/tests/profile-resolution.spec.ts \
+        packages/core/agent-loop/tests/cancel.spec.ts \
+        packages/core/agent-loop/tests/input-lifecycle.spec.ts \
+        packages/mcp/mcp-client/tests/apply.spec.ts \
+        packages/mcp/mcp-client/tests/negotiation-lifecycle.spec.ts \
+        packages/mcp/mcp-client/tests/generation.spec.ts \
+        packages/mcp/mcp-client/tests/reconnect.spec.ts \
+        packages/skill/tool-workspace-dependencies/tests/tool-workspace-dependencies.spec.ts
       runHook postCheck
     '';
 
@@ -138,14 +146,10 @@ let
       mkdir -p $out/bin
       cat > $out/bin/dsh <<EOF
       #!/bin/sh
-      # Clash/Mihomo TUN resolves public hostnames to 198.18.0.0/15 fake IPs.
-      # The patched fetch provider accepts this synthetic range only for DNS
-      # hostnames; callers can opt out with DSH_WEB_FETCH_ALLOW_FAKE_IP=0.
-      export DSH_WEB_FETCH_ALLOW_FAKE_IP="''${DSH_WEB_FETCH_ALLOW_FAKE_IP:-1}"
       # Codex web.run must load pi-ai from the same installation instance as
       # dsh-llm-pi-ai; the launcher must not depend on a shared profiles/node_modules link.
       export DSH_PI_AI_ROOT="$out/packages/llm/llm-pi-ai/node_modules/@earendil-works/pi-ai"
-      exec ${pkgs.nodejs_22}/bin/node --expose-internals $out/apps/cli/lib/bin.js "\$@"
+      exec ${pkgs.nodejs_24}/bin/node --expose-internals $out/apps/cli/lib/bin.js "\$@"
       EOF
       chmod +x $out/bin/dsh
       # 恢复 node-pty 预编译 spawn-helper 的可执行位(--ignore-scripts 跳过 postinstall)
@@ -170,9 +174,8 @@ let
   # execs $out/bin/dsh hides bin.js and forces a slower `dsh --profile` fallback.
   dshLauncher = pkgs.writeShellScriptBin "dsh" ''
     export PATH="${runtimePath}:$PATH"
-    export DSH_WEB_FETCH_ALLOW_FAKE_IP="''${DSH_WEB_FETCH_ALLOW_FAKE_IP:-1}"
     export DSH_PI_AI_ROOT="${dsh}/packages/llm/llm-pi-ai/node_modules/@earendil-works/pi-ai"
-    exec ${pkgs.nodejs_22}/bin/node --expose-internals ${dsh}/apps/cli/lib/bin.js "$@"
+    exec ${pkgs.nodejs_24}/bin/node --expose-internals ${dsh}/apps/cli/lib/bin.js "$@"
   '';
 
   # Files copied by dshPlugins rather than linked through home.file. The
@@ -192,6 +195,7 @@ in
   imports = [
     ./rea.nix
     ./tui.nix
+    ./skin-center.nix
    
     # Official Electron Desktop, packaged against the same immutable runtime above.
     ./desktop.nix
@@ -246,7 +250,7 @@ in
         if ! cmp -s "$target" "$template"; then
           # Reconcile only managed entry ids; runtime-owned settings rows
           # remain in the Web patch across future Home Manager switches.
-          run ${pkgs.nodejs_22}/bin/node --input-type=module - "$template" "$target" "${dsh}/apps/cli/package.json" <<'NODE'
+          run ${pkgs.nodejs_24}/bin/node --input-type=module - "$template" "$target" "${dsh}/apps/cli/package.json" <<'NODE'
           import { readFileSync, renameSync, writeFileSync } from 'node:fs'
           import { createRequire } from 'node:module'
           const [template, target, anchor] = process.argv.slice(2)
@@ -303,7 +307,7 @@ in
       target="$1"
       [ -f "$target" ] || return 0
       grep -Fq -- 'codex-registrar' "$target" || return 0
-      run ${pkgs.nodejs_22}/bin/node ${./scripts/strip-codex-registrar.mjs} "$target"
+      run ${pkgs.nodejs_24}/bin/node ${./scripts/strip-codex-registrar.mjs} "$target"
     }
     strip_codex_registrar "$HOME/.dsh/profiles/web/cordis.patch.yml"
     webCodexRegistrar="$HOME/.dsh/profiles/web/plugins/codex-registrar.mjs"

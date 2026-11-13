@@ -1,6 +1,7 @@
 { config, pkgs, lib, dsh, ... }:
 
 let
+  nodejs = (import ./environment.nix { }).pkgs.nodejs_24;
   runtimeSource = lib.cleanSourceWith {
     src = ./presets/rea;
     filter = path: type: type == "directory"
@@ -10,7 +11,7 @@ let
     pname = "dsh-rea-session-runtime";
     version = "1.0.0";
     src = runtimeSource;
-    nativeBuildInputs = [ pkgs.nodejs_22 ];
+    nativeBuildInputs = [ nodejs ];
     dontConfigure = true;
     buildPhase = ''
       runHook preBuild
@@ -44,7 +45,7 @@ let
     { name = "presets/rea/dsh-rea.nix"; path = ./presets/rea/dsh-rea.nix; }
   ];
   checks = pkgs.runCommand "dsh-rea-all-preset-regressions" {
-    nativeBuildInputs = [ pkgs.nodejs_22 pkgs.coreutils ];
+    nativeBuildInputs = [ nodejs pkgs.coreutils ];
   } ''
     export DSH_TELEMETRY_DISABLED=1
     export DSH_REA_PRESETS_ROOT=${presetFixture}
@@ -53,7 +54,7 @@ let
     mkdir -p "$DSH_REA_PROFILES_ROOT"
     cp -R ${testSources} "$TMPDIR/dsh-rea-tests"
     chmod -R u+w "$TMPDIR/dsh-rea-tests"
-    ${pkgs.nodejs_22}/bin/node "$TMPDIR/dsh-rea-tests/run.mjs" \
+    ${nodejs}/bin/node "$TMPDIR/dsh-rea-tests/run.mjs" \
       ${dsh} ${presetFixture}/rea
     touch "$out"
   '';

@@ -1,28 +1,24 @@
 # DSH REA schema portability verification
 
-## 6.4.0 upgrade audit (deployment verification pending)
+## REA 6.8.0 schema audit — package gates pass
 
-Pin: `a2d8b94dd50dab8d966239dd63ab84718aa8b4b4`, 187 tools / 6 prompts.
-The existing locally corrected `schema-portability.patch` is retained unchanged
-as a historical artifact, **not applied** to 6.4.0. Upstream now spells ObjC
-brackets as `\x5b/\x5d`, NUL as `\x00`, relative-root paths as a segment grammar,
-and reserved process environment names as a lookaround-free complement.
-No downstream wire projection is needed. This also avoids hashing output
-validator identities before rewriting their schemas.
+Pin: `160d821ac9a0310afcb8d1fc427862dd6508add5`. The old local 6.1 projection
+patch was deleted. REA 6.8's canonical schemas include one request-path
+lookahead; `schema-portability-6.8.patch` rewrites it to an equivalent
+Rust-compatible expression. The MCP server defaults to compact input-schema
+advertisements, so the DSH integration explicitly selects
+`REA_MCP_INPUT_SCHEMA_PROFILE=full` for nested constraints and PTC SDK parity.
 
-Upstream's root-path grammar intentionally tightens old newline loopholes:
-`a\n//b`, `a\n/../b`, `a\n/./b`, `a\n/b/` are now rejected. The live MCP gate
-compares advertised constraints to the **new canonical parser**, with exhaustive
-short Unicode/newline fixtures, rather than claiming old-language equivalence.
-It audits every schema-position input/output pattern with JS Unicode and Rust,
-checks exact ordered contracts/effects, and preserves metadata memoization tests.
-The 6.1 projection-helper sentinel tests no longer describe production code.
-
-This scoped edit has passed JS syntax, Nix parsing and static catalog checks.
-Nix package/install checks and real DSH/Ghidra/JS/EVM/SQLite acceptance require
-the parent-built package. Real Codex list/schema admission remains the parent's
-compatibility gate; JS/Rust parsing alone is not a claim that it passed.
-No Home Manager build/switch was run in this scoped task.
+The installed-package schema gate passes for 229 tools, all 2,333 pattern
+occurrences (145 unique patterns), JavaScript/Rust regex acceptance, and the
+live canonical/AJV Unicode/newline fixtures. The Nix install check also passes
+Ghidra-startup budget validation and the production SQLite MCP smoke on Node
+24.22.1. The exact-SDK fixture suite passes against patched DSH 0.2.2: selected
+and parallel roots, 229-tool first request, blank recomposition, cancellation,
+permission approval, and non-REA surface equality. It ran without `realReaExe`,
+so it does not establish target Ghidra/JS/EVM acceptance. Real Codex list/schema
+admission remains the parent's compatibility gate; JS/Rust parsing alone cannot
+prove that client integration.
 
 ## Historical 6.1.0 deployed verification — 2026-10-09
 

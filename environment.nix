@@ -4,14 +4,38 @@
 let
   # Private, complete package-set pin for every pinned DSH surface. Do not
   # import <nixpkgs> or inherit the caller's config/overlays: both follow channels.
-  # This immutable release archive is the exact package set used on 2026-10-06.
+  # Pin the main package set and use the 26.05 Node 24.22.1 build: REA 6.8.0
+  # requires that release line (24.21 lacks native DatabaseSync.limits), while
+  # dsh 0.2.2 requires Node >=24.9. Node 22.23.4 remains available for REA's
+  # alternate supported runtime range.
   source = builtins.fetchTarball {
-    url = "https://releases.nixos.org/nixos/unstable/nixos-26.11pre1085777.494ce7fd23ff/nixexprs.tar.xz";
-    sha256 = "02inprq5g2hlmrrbrfapy117d32mdam6vmfrrl3a7jp2n2xsknqb";
+    url = "https://github.com/NixOS/nixpkgs/archive/1d060086d60cb76a40cf37109f979d88a5bd6396.tar.gz";
+    sha256 = "0br4sv8vf37pbasihv20kq62cmpxl925x4q40i5nghfvmg07a2ld";
+  };
+  node24Source = builtins.fetchTarball {
+    url = "https://github.com/NixOS/nixpkgs/archive/7dcdd87373d72e7a2173e4db02e20d3d7f495cfd.tar.gz";
+    sha256 = "09f5ys7xly8gaip09yxpp1xawqm4dlzrjq0ib8x80y9wsdpnp2xl";
+  };
+  node24Pkgs = import node24Source {
+    system = "x86_64-linux";
+    overlays = [ ];
+    config = { allowUnfree = true; cudaSupport = true; };
   };
   pkgs = import source {
     system = "x86_64-linux";
-    overlays = [ ];
+    overlays = [ (final: prev: {
+      nodejs_24 = node24Pkgs.nodejs_24;
+      # Nix's npm dependency prefetch uses libcurl over HTTP/2, which fails through
+      # this host's Clash tunnel. Limit the prefetch helper to HTTP/1.1; runtime
+      # Node/fetch behavior and the project package sources are untouched.
+      prefetch-npm-deps = prev.prefetch-npm-deps.overrideAttrs (old: {
+        src = prev.applyPatches {
+          name = "prefetch-npm-deps-http11-source";
+          src = old.src;
+          patches = [ ./patches/prefetch-npm-deps-http1.patch ];
+        };
+      });
+    }) ];
     config = {
       allowUnfree = true;
       # Preserve the existing package variants without inheriting ambient config.
@@ -29,7 +53,7 @@ let
     pkgs.gnugrep
     pkgs.gnused
     pkgs.git
-    pkgs.nodejs_22
+    pkgs.nodejs_24
     pkgs.pnpm_11
     pkgs.ripgrep
     pkgs.bubblewrap

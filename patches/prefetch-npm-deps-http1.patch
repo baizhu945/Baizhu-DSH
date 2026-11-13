@@ -1,0 +1,11 @@
+diff --git a/src/util.rs b/src/util.rs
+--- a/src/util.rs
++++ b/src/util.rs
+@@ -7,1 +7,1 @@
+-    config::{CaCertificate, Configurable, RedirectPolicy, SslOption},
++    config::{CaCertificate, Configurable, RedirectPolicy, SslOption, VersionNegotiation},
+@@ -38,1 +38,3 @@ pub fn get_url(url: &Url) -> Result<Body, anyhow::Error> {
+-    let mut request = Request::get(url.as_str()).redirect_policy(RedirectPolicy::Limit(10));
++    let mut request = Request::get(url.as_str())
++        .version_negotiation(VersionNegotiation::http11())
++        .redirect_policy(RedirectPolicy::Limit(10));

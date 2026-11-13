@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 
 export const name = 'rea-bootstrap'
-export const inject = ['agentPresets', 'agents', 'systemPrompt', 'tools']
+export const inject = ['agentPresets', 'agents', 'subagents', 'systemPrompt', 'tools']
 export const REA_PROMPT = `REA preset is explicitly selected for this root session.
 Use mcp__rea__ tools to inspect caller-selected artifacts, functions and runtime observations.
 Distinguish observations, derived relationships and analyst inference. Cite Evidence IDs, artifact SHA-256, provider/profile and source locations. Preserve unknowns and limitations; decompiler output is not original source or proof of execution.
@@ -26,7 +26,7 @@ export function validateConfig(value) {
   if (!isRecord(value.env) || Object.entries(value.env).some(([key, val]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof val !== 'string' || val.includes('\0'))) throw new TypeError('REA env must be literal strings')
   if (typeof value.hostPackageJson !== 'string' || !value.hostPackageJson.startsWith('/') || !value.hostPackageJson.endsWith('/apps/cli/package.json')) throw new TypeError('REA needs the exact host SDK anchor')
   if (!Number.isSafeInteger(value.toolCallTimeoutMs) || value.toolCallTimeoutMs < 1 || value.toolCallTimeoutMs > 86400000) throw new TypeError('Invalid REA tool timeout')
-  const expectedTools = value.expectedTools ?? 210
+  const expectedTools = value.expectedTools ?? 229
   if (!Number.isSafeInteger(expectedTools) || expectedTools < 1 || expectedTools > 10000) throw new TypeError('Invalid REA expected tool count')
   if (value.effectsPath !== undefined && (typeof value.effectsPath !== 'string' || !value.effectsPath.startsWith('/'))) throw new TypeError('REA effectsPath must be absolute')
   return { ...value, args: [...value.args], env: { ...value.env }, expectedTools }
@@ -49,14 +49,17 @@ export async function apply(ctx, input) {
   if (generationKey === undefined) throw new Error('REA bootstrap must be mounted in its preset standing scope')
   const agents = ctx.get('agents')
   const presets = ctx.get('agentPresets')
-  const prompt = ctx.get('systemPrompt')
+  const subagents = ctx.get('subagents')
   const records = new Map()
-  const rebuilding = Symbol('rea-rebuild')
   let stopped = false
   let effects
 
-  const eligible = agent => !stopped && agents.get(agent.id) === agent && agents.roots().includes(agent)
-    && !child(agent) && presets.composedPreset(agent.ctx) === 'rea'
+  // rc2's registry owns liveness, not tree membership. The subagent service
+  // resolves exact live runtime roots independently of durable fork lineage.
+  // Reject delegated metadata first, including orphaned/unmanaged children;
+  // never substitute registry.list() or session.parentSession for ownership.
+  const eligible = agent => !stopped && agents.get(agent.id) === agent
+    && !child(agent) && subagents.rootOf(agent) === agent && presets.composedPreset(agent.ctx) === 'rea'
     && scopeChainOf(scopeOf(agent.ctx)).includes(generationKey)
 
   async function stop(record) {
@@ -172,20 +175,27 @@ export async function apply(ctx, input) {
     } finally { if (onAbort) signal.removeEventListener('abort', onAbort) }
   }
 
-  // Register globally routed listeners, but own every disposer in this exact
-  // standing revision. This is necessary to clean a blank Agent re-bound OUT
-  // of REA; a standing-scoped listener would stop receiving its assemblies.
-  ctx.effect(() => ctx.root.on('system-prompt/assemble', async (_assembly, context, next) => {
-    if (context[rebuilding]) return next()
+  // Resolve the selected root's async capabilities before DSH snapshots its
+  // admitted tool set for this step. DSH 0.2.2 adds this pre-resolution hook;
+  // mounting during prompt assembly is too late for that immutable snapshot.
+  ctx.effect(() => ctx.root.on('agent/prepare-step', async ({ agent, signal }, next) => {
+    const before = records.get(agent)
+    if (eligible(agent)) await ensure(agent, signal)
+    else await stop(before)
+    return next()
+  }), 'rea-bootstrap.prepare-step')
+
+  // Direct prompt diagnostics also need async capabilities before providers are
+  // collected. The AgentLoop has an earlier prepare-step hook so its immutable
+  // tool admission is ready before this assembly runs.
+  ctx.effect(() => ctx.root.on('system-prompt/prepare', async (context, next) => {
     const agent = context.agent
     if (!agent || context.scope !== agent) return next()
     const before = records.get(agent)
-    const changed = eligible(agent) ? await ensure(agent, context.signal) : await stop(before)
-    // assemble collects sections/tools BEFORE its expert waterfall. Recollect
-    // once after actual mount/unmount; never send a stale first request.
-    if (changed) return prompt.assemble({ ...context, [rebuilding]: true })
+    if (eligible(agent)) await ensure(agent, context.signal)
+    else await stop(before)
     return next()
-  }), 'rea-bootstrap.assembly')
+  }), 'rea-bootstrap.prompt-prepare')
   ctx.effect(() => ctx.root.on('agent-preset/selected', id => {
     const agent = agents.get(id)
     const record = agent && records.get(agent)

@@ -1,0 +1,13 @@
+diff --git a/src/domain/browserScenarioValues.ts b/src/domain/browserScenarioValues.ts
+index 8c748df..afbef1d 100644
+--- a/src/domain/browserScenarioValues.ts
++++ b/src/domain/browserScenarioValues.ts
+@@ -319,7 +319,7 @@ export const browserScenarioActionSchema = z.discriminatedUnion("action", [
+     method: z.enum(BROWSER_SCENARIO_REQUEST_METHODS),
+     path: z
+       .string()
+-      .regex(/^\/(?![/\\])/u)
++      .regex(/^\/(?:[^/\\]|$)/u)
+       .describe(
+         "Path, and optional literal query, on the start URL's origin, such as /api/folders; it must resolve to that origin.",
+       ),

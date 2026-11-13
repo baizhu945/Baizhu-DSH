@@ -2,27 +2,29 @@
 
 let
   inherit (import ../../environment.nix { }) keepBuildInputs;
+  pinnedPkgs = (import ../../environment.nix { }).pkgs;
+  nodejs = pinnedPkgs.nodejs_24;
 
   # Independent DSH recipe; do not import any Pi module or source file.
   # Ambient packages deliberately do not change DSH's pinned build/toolchain.
-  rea = import ./rea-package.nix { inherit pkgs; };
+  rea = import ./rea-package.nix { pkgs = pinnedPkgs; };
   readonlyRoot = dsh;
   hostPackageJson = "${readonlyRoot}/apps/cli/package.json";
   effects = pkgs.runCommand "dsh-rea-tool-effects.json" {
-    nativeBuildInputs = [ pkgs.nodejs ];
+    nativeBuildInputs = [ nodejs ];
   } ''
     node --input-type=module - "${rea}/lib/rea-agents/dist/contracts/toolEffects.js" "$out" <<'NODE'
     import { writeFileSync } from 'node:fs'
     import { pathToFileURL } from 'node:url'
     const { TOOL_EFFECTS } = await import(pathToFileURL(process.argv[2]).href)
-    if (Object.keys(TOOL_EFFECTS).length !== 210) throw new Error('REA effects catalog is incomplete')
+    if (Object.keys(TOOL_EFFECTS).length !== 229) throw new Error('REA effects catalog is incomplete')
     writeFileSync(process.argv[3], JSON.stringify(TOOL_EFFECTS))
     NODE
   '';
   systemPackageConfigJson = builtins.toJSON {
     inherit hostPackageJson;
     effectsPath = "${effects}";
-    expectedTools = 210;
+    expectedTools = 229;
     serverName = "rea";
     command = "${rea}/bin/rea";
     args = [ "mcp" ];
@@ -39,6 +41,9 @@ let
       REA_SIGROK_PRLIMIT_COMMAND = "${pkgs.util-linux}/bin/prlimit";
       REA_FIRMWARE_PRLIMIT_COMMAND = "${pkgs.util-linux}/bin/prlimit";
       REA_LOG_LEVEL = "silent";
+      # 6.8 defaults to compact advertised schemas; DSH parity and schema
+      # validation need the complete upstream nested input guidance.
+      REA_MCP_INPUT_SCHEMA_PROFILE = "full";
     };
     # Outer MCP call budget must exceed Ghidra's complete startup analysis.
     toolCallTimeoutMs = 1860000;
@@ -51,7 +56,7 @@ let
   # rows and numeric config) from the same host that executes this preset.
   # Never flatten a group or copy global/profile settings into the preset.
   composition = pkgs.runCommand "dsh-rea-agent.cordis.yml" {
-    nativeBuildInputs = [ pkgs.nodejs_22 ];
+    nativeBuildInputs = [ nodejs ];
   } ''
     node --input-type=module - "${hostPackageJson}" \
       "${readonlyRoot}/packages/bundle/web-app/presets/standard.patch.yml" \
@@ -137,7 +142,7 @@ in
       # Atomic replace, including any former HM symlink. Only the REA id is
       # reconciled; unrelated rows/expressions/defaults keep their semantics.
       # Fail closed on malformed config instead of reseeding a user's patch.
-      run ${pkgs.nodejs_22}/bin/node --input-type=module - \
+      run ${nodejs}/bin/node --input-type=module - \
         "${hostPackageJson}" "${registrarPatch}" "$profileRoot/cordis.patch.yml" <<'NODE'
       import { existsSync, lstatSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
       import { createRequire } from 'node:module'

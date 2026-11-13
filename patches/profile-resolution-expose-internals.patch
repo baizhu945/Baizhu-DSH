@@ -1,8 +1,8 @@
 diff --git a/packages/boot/app-boot/src/profile-resolution/resolver.ts b/packages/boot/app-boot/src/profile-resolution/resolver.ts
-index 85c53066..0ea6a6ec 100644
+index 468ec82e24..e33df01d92 100644
 --- a/packages/boot/app-boot/src/profile-resolution/resolver.ts
 +++ b/packages/boot/app-boot/src/profile-resolution/resolver.ts
-@@ -611,18 +611,23 @@ class ResolutionRouter {
+@@ -732,18 +732,23 @@ class ResolutionRouter {
  
  function internalModules(): InternalModules {
    const require = createRequire(import.meta.url)
@@ -33,10 +33,10 @@ index 85c53066..0ea6a6ec 100644
        specifier: string,
        context: { parentURL?: string; conditions?: readonly string[] },
 diff --git a/packages/boot/app-boot/tests/profile-resolution.spec.ts b/packages/boot/app-boot/tests/profile-resolution.spec.ts
-index 82cf24b0..4eaff86c 100644
+index b56d1a1774..a7f627bf33 100644
 --- a/packages/boot/app-boot/tests/profile-resolution.spec.ts
 +++ b/packages/boot/app-boot/tests/profile-resolution.spec.ts
-@@ -29,6 +29,11 @@ import {
+@@ -30,6 +30,11 @@ import {
  } from '../src/profile.ts'
  import { registerHooksThreadStacks } from './hooks-thread-stack.ts'
  
@@ -48,7 +48,7 @@ index 82cf24b0..4eaff86c 100644
  const roots: string[] = []
  const registrations: RuntimeInterception[] = []
  
-@@ -76,10 +81,7 @@ function conditionalPkg(dir: string, name: string, importMarker: number, require
+@@ -77,10 +82,7 @@ function conditionalPkg(dir: string, name: string, importMarker: number, require
  }
  
  async function importFrom(specifier: string, parent: string): Promise<Record<string, unknown>> {
@@ -60,7 +60,7 @@ index 82cf24b0..4eaff86c 100644
      getOrInitializeCascadedLoader(): {
        import(specifier: string, parent: string, attributes: ImportAttributes): Promise<Record<string, unknown>>
      }
-@@ -90,10 +92,7 @@ async function importFrom(specifier: string, parent: string): Promise<Record<str
+@@ -91,10 +93,7 @@ async function importFrom(specifier: string, parent: string): Promise<Record<str
  function resolveFrom(
    specifier: string, parent: string | undefined, attributes: ImportAttributes = {}, skipSyncHooks = false,
  ): string {
@@ -72,7 +72,7 @@ index 82cf24b0..4eaff86c 100644
      getOrInitializeCascadedLoader(): {
        getOrCreateModuleJob?: unknown
        resolveSync(
-@@ -853,8 +852,7 @@ describe('runtime resolution', { concurrent: false }, () => {
+@@ -854,8 +853,7 @@ describe('runtime resolution', { concurrent: false }, () => {
      expect(resolveFrom('fs', parent)).toBe('node:fs')
      expect(resolveFrom('node:path', pathToFileURL(join(f.root, 'outside.mjs')).href, {}, true)).toBe('node:path')
  
@@ -82,7 +82,7 @@ index 82cf24b0..4eaff86c 100644
        Module: {
          _resolveFilename(
            request: string, parent: { filename?: string } | undefined, isMain: boolean,
-@@ -1363,8 +1361,7 @@ describe('runtime resolution', { concurrent: false }, () => {
+@@ -1364,8 +1362,7 @@ describe('runtime resolution', { concurrent: false }, () => {
      registrations.push(registration)
      expect(await importFrom('conditional-lib', pathToFileURL(join(f.profile.dir, 'entry.mjs')).href))
        .toMatchObject({ marker: 21 })
@@ -92,7 +92,7 @@ index 82cf24b0..4eaff86c 100644
        Module: {
          new(id?: string): { filename?: string; paths?: string[] }
          _nodeModulePaths(path: string): string[]
-@@ -1393,8 +1390,7 @@ describe('runtime resolution', { concurrent: false }, () => {
+@@ -1394,8 +1391,7 @@ describe('runtime resolution', { concurrent: false }, () => {
      conditionalPkg(f.installed, 'conditional-lib', 11, 12)
      const registration = installRuntimeInterception(await resolutionOf(f))
      registrations.push(registration)
@@ -102,7 +102,7 @@ index 82cf24b0..4eaff86c 100644
        Module: {
          new(id?: string): { filename?: string; paths?: string[] }
          _nodeModulePaths(path: string): string[]
-@@ -1420,8 +1416,7 @@ describe('runtime resolution', { concurrent: false }, () => {
+@@ -1421,8 +1417,7 @@ describe('runtime resolution', { concurrent: false }, () => {
      const f = fixture()
      const registration = installRuntimeInterception(await resolutionOf(f))
      registrations.push(registration)
@@ -113,7 +113,7 @@ index 82cf24b0..4eaff86c 100644
          new(id?: string): { children: unknown[]; filename?: string; paths?: string[] }
          _nodeModulePaths(path: string): string[]
 diff --git a/vitest.shared.ts b/vitest.shared.ts
-index 7c6ca2be..197ed80f 100644
+index 7c6ca2bee8..197ed80f2e 100644
 --- a/vitest.shared.ts
 +++ b/vitest.shared.ts
 @@ -6,7 +6,10 @@ const decoratorSyntax = /^\s*@[A-Za-z_$][\w$]*/m

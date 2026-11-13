@@ -1,5 +1,5 @@
 diff --git a/packages/client/ui-approval/src/client/index.ts b/packages/client/ui-approval/src/client/index.ts
-index ca6d674e..8d170727 100644
+index 4073a85aa2..c9d8b55327 100644
 --- a/packages/client/ui-approval/src/client/index.ts
 +++ b/packages/client/ui-approval/src/client/index.ts
 @@ -1,4 +1,5 @@
@@ -8,16 +8,16 @@ index ca6d674e..8d170727 100644
  import type { Context as ClientContext } from '@deepseek-ai/cordis'
  import type {} from '@deepseek-ai/dsh-api-remotes/client'
  import type {} from '@deepseek-ai/dsh-api-session-controller/client'
-@@ -9,7 +10,7 @@ import type { TypertClientEventListener } from '@deepseek-ai/dsh-typert-protocol
- import type {} from '@deepseek-ai/dsh-client-locale/client'
+@@ -10,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
  import type { ShortcutCommandId } from '@deepseek-ai/dsh-client-shortcuts/client'
+ import { ApprovalCard } from './ApprovalCard.tsx'
  import { ApprovalPanel } from './ApprovalPanel.tsx'
 -import { PendingApproval } from './contract/slots.ts'
 +import { PendingApproval, type ApprovalComposerProps } from './contract/slots.ts'
- import { en, zh } from './locales.ts'
+ import { en, ja, es, fr, de, ru, pt, zh } from './locales.ts'
  
  export type {
-@@ -21,6 +22,15 @@ export type {
+@@ -23,6 +24,15 @@ export type {
  } from './contract/slots.ts'
  export type { ApprovalKey } from './locales.ts'
  
@@ -33,14 +33,14 @@ index ca6d674e..8d170727 100644
  /** Required services: Agent scopes, Remote Events, Session UI, Slot registry, and copy. */
  export const inject = ['sessions', 'remote', 'uiSession', 'slots', 'locale']
  
-@@ -100,7 +110,12 @@ export function apply(ctx: ClientContext): void {
-     children: {
-       'conversation.approval.detail': { kind: 'single', scope: 'session' },
-     },
+@@ -103,7 +113,12 @@ export function apply(ctx: ClientContext): void {
+     inject: () => ({
+       resolveReason: (reason: NonNullable<PendingApproval['displayReason']>) => ctx.locale.resolveText(reason),
+     }),
 -  }, ApprovalPanel))
 +  }, (props: ApprovalComposerProps): ReactNode => {
-+    // This native entry still owns the child slot and supplies its authorized
-+    // renderSlot/resolveReason props. Extensions may replace presentation only.
++    // The native entry retains composer ownership and authorized slot props.
++    // Extensions may replace presentation only; answer semantics stay native.
 +    const presentation = ctx.bail('ui-approval/render', props)
 +    return presentation === undefined ? createElement(ApprovalPanel, props) : presentation
 +  }))
@@ -48,16 +48,18 @@ index ca6d674e..8d170727 100644
      return answerApproval(ctx, this, request, next, registerPendingInteraction)
    })
 diff --git a/packages/client/ui-approval/tests/ui-approval.client.spec.tsx b/packages/client/ui-approval/tests/ui-approval.client.spec.tsx
-index e9edc316..36cbd65a 100644
+index 2357857a72..aaffdd1521 100644
 --- a/packages/client/ui-approval/tests/ui-approval.client.spec.tsx
 +++ b/packages/client/ui-approval/tests/ui-approval.client.spec.tsx
-@@ -1,4 +1,5 @@
- // @vitest-environment jsdom
-+import { isValidElement } from 'react'
- import { Context } from '@deepseek-ai/cordis'
- import { createScope, scopeOf } from '@deepseek-ai/dsh-api-session-controller/client'
+@@ -4,6 +4,7 @@ import { createScope, scopeOf } from '@deepseek-ai/dsh-api-session-controller/cl
  import type { ToolCallId } from '@deepseek-ai/dsh-llm'
-@@ -229,7 +230,22 @@ describe('approval Remote Event consumer', () => {
+ import type { SessionId } from '@deepseek-ai/dsh-session/types'
+ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
++import { isValidElement } from 'react'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import { ApprovalCard } from '../src/client/ApprovalCard.tsx'
+ import { ApprovalWarning } from '../src/client/ApprovalWarning.tsx'
+@@ -241,7 +242,22 @@ describe('approval Remote Event consumer', () => {
      const pending = bench.pending.getSnapshot()[0]!
      const { options, component } = bench.registration()
  

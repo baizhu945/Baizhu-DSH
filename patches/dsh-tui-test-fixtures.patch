@@ -1,21 +1,14 @@
 diff --git a/scripts/verify-agent-capabilities.ts b/scripts/verify-agent-capabilities.ts
-index 1b878ecd..591f4ae6 100644
 --- a/scripts/verify-agent-capabilities.ts
 +++ b/scripts/verify-agent-capabilities.ts
-@@ -293,7 +293,7 @@ for (const [presetId, services, expected] of [
-   // 读三者拼接（scripts/lib/channel-composition.mjs），断言不变。
-   const source = compositionSource()
-   ok(
--    source.includes('annotateCommandCapabilities(commands, capabilitiesOf())'),
-+    source.includes('annotateCommandCapabilities(withPermissionCommand(commands), capabilitiesOf())'),
-     'the command-list refresh path annotates through the shared capability facts',
-   )
- }
+@@ -298,1 +298,1 @@
+-    /annotateCommandCapabilities\(\s*withTeamCommandVisibility\(commands, teamServiceActive\(ctx\)\),\s*capabilitiesOf\(\),/.test(source) &&
++    /annotateCommandCapabilities\(\s*withTeamCommandVisibility\(withPermissionCommand\(commands\), teamServiceActive\(ctx\)\),\s*capabilitiesOf\(\),/.test(source) &&
+     source.includes('publishCommandList(commands)'),
 diff --git a/scripts/verify-permission-modes.mjs b/scripts/verify-permission-modes.mjs
-index 11f3d3f0..8d64875e 100644
 --- a/scripts/verify-permission-modes.mjs
 +++ b/scripts/verify-permission-modes.mjs
-@@ -133,13 +133,17 @@ function makeEnv({ modes, names, bundles, history = [], permission = {}, withCom
+@@ -133,13 +133,17 @@ function makeEnv({ modes, names, bundles, history = [], permission = {}, withCommand = true }) {
      }
    }
    const registry = new PermissionRegistry()

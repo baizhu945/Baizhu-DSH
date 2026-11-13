@@ -13,7 +13,11 @@ let
   # The Host, the package manager, and every dsh child process run on the same Node the
   # Nix dsh derivation was built against, so nothing in the runtime tree is ever rebuilt
   # against Electron's ABI. Electron itself only ever runs the UI process.
-  node = pkgs.nodejs_22;
+  node = pkgs.nodejs_24;
+  # Nixpkgs selects a full Chromium source build for Linux `electron_44`.
+  # Use its same-version, upstream GitHub binary package instead of compiling
+  # Electron's ~57k-object Chromium tree on every cache miss.
+  electronBin = pkgs.electron_44-bin;
 
   # The Nix shell launches the official Electron Desktop against an immutable store
   # runtime. dsh.nix already builds every Desktop library, preload, the private Host, and
@@ -44,11 +48,31 @@ let
       import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
       import { join } from 'node:path'
       import { pathToFileURL } from 'node:url'
+      import { runInNewContext } from 'node:vm'
 
       const out = process.env.out
       const modules = join(out, 'node_modules')
       const require = createRequire(join(out, 'apps', 'desktop', 'package.json'))
       const { valid } = require('semver')
+      // rc.2 moved Office assembly from desktop-host/office.ts into web-app.
+      // Evaluate the actual packaged YAML expression in both modes: Nix must
+      // consume its immutable payload in place; ordinary hosts keep their root.
+      const yaml = require('js-yaml')
+      const { entryListSchema } = await import(pathToFileURL(
+        require.resolve('@deepseek-ai/cordis-plugin-include')).href)
+      const bundle = yaml.load(readFileSync(join(out,
+        'packages/bundle/web-app/cordis.patch.yml'), 'utf8'), { schema: entryListSchema })
+      const workspace = bundle.flatMap(patch => patch.insert ?? [])
+        .find(entry => entry.id === 'workspace-dependencies')
+      assert.ok(workspace, 'rc.2 workspace-dependencies row')
+      const rootExpression = workspace.config.root.__jsExpr
+      const scope = nix => ({
+        process: { env: { DSH_DESKTOP_NIX: nix } },
+        dshHomePath: (...parts) => '/fixture-home/' + parts.join('/'),
+      })
+      assert.equal(runInNewContext(rootExpression, scope('1')), undefined)
+      assert.equal(runInNewContext(rootExpression, scope('0')),
+        '/fixture-home/dsh-runtimes/dsh-primary-runtime')
       const { DESKTOP_HOST_PROTOCOL_VERSION } = await import(
         pathToFileURL(join(out, 'apps', 'desktop', 'lib', 'types', 'host-protocol.js')).href)
 
@@ -132,8 +156,9 @@ let
   # ---------------------------------------------------------------------------
   # Primary runtime payload
   #
-  # apps/desktop-host/src/office.ts reads `<primaryRuntime>/runtime.json` and resolves
-  # `dependencies/{python,node,pnpm}` from it. Nix supplies every entry as a symlink
+  # The web-app bundle mounts tool-workspace-dependencies, which reads
+  # `<primaryRuntime>/runtime.json` and resolves dependencies/{python,node,pnpm}.
+  # Nix supplies every entry as a symlink
   # into the store: nothing is downloaded, unpacked, or installed at run time, and no
   # upstream bundle needs ELF repair.
   # ---------------------------------------------------------------------------
@@ -187,7 +212,7 @@ let
       "$runtime/dependencies/python/lib/python${pythonAbi}" \
       "$runtime/dependencies/node/bin"
 
-    # office.ts resolves Office skills as a *sibling* of the payload directory.
+    # Retain the legacy sibling layout; rc.2 also ships Office skills in dsh.
     ln -s ${dshDesktopRuntime}/packages/skill/skill-office/assets "$out/office-skills"
 
     ln -s ${pythonEnv}/bin/python3 "$runtime/dependencies/python/bin/python3"
@@ -248,7 +273,7 @@ sys.exit(0) if actual == '${runtimePnpmVersion}' else sys.exit('pnpm version mis
     pkgs.coreutils
     pkgs.git
     pkgs.glib
-    pkgs.nodejs_22
+    pkgs.nodejs_24
     pkgs.ripgrep
     pkgs.xdg-utils
     pkgs.zenity
@@ -295,7 +320,7 @@ sys.exit(0) if actual == '${runtimePnpmVersion}' else sys.exit('pnpm version mis
       # Official DeepSeek Harness Desktop, packaged for Nix. Updates arrive through
       # Home Manager; this application carries no in-app updater.
       export DSH_DESKTOP_NIX="''${DSH_DESKTOP_NIX:-1}"
-      export DSH_DESKTOP_LAUNCHER_BIN="''${DSH_DESKTOP_LAUNCHER_BIN-${pkgs.electron_44}/bin/electron}"
+      export DSH_DESKTOP_LAUNCHER_BIN="''${DSH_DESKTOP_LAUNCHER_BIN-${electronBin}/bin/electron}"
       export DSH_DESKTOP_APP_ROOT="''${DSH_DESKTOP_APP_ROOT-${dshDesktopAppRoot}}"
       export DSH_DESKTOP_HOST_NODE="''${DSH_DESKTOP_HOST_NODE-${node}/bin/node}"
       export DSH_DESKTOP_NODE_BIN="''${DSH_DESKTOP_NODE_BIN-${nodeBin}}"
@@ -307,7 +332,6 @@ sys.exit(0) if actual == '${runtimePnpmVersion}' else sys.exit('pnpm version mis
       export DSH_DESKTOP_PRESET_REGISTRAR="''${DSH_DESKTOP_PRESET_REGISTRAR-${./scripts/register-desktop-presets.mjs}}"
       export DSH_PI_AI_ROOT="''${DSH_PI_AI_ROOT-${dshDesktopRuntime}/packages/llm/llm-pi-ai/node_modules/@earendil-works/pi-ai}"
       export DSH_CODEX_REQUIRE_ANCHOR="''${DSH_CODEX_REQUIRE_ANCHOR-''${DSH_HOME:-$HOME/.dsh}/profiles/desktop/package.json}"
-      export DSH_WEB_FETCH_ALLOW_FAKE_IP="''${DSH_WEB_FETCH_ALLOW_FAKE_IP:-1}"
       export PATH="${launcherPath}:''${PATH}"
 
       # An inherited Electron or Node launcher variable would silently start this command

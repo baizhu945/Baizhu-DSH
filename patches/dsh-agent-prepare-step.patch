@@ -1,0 +1,70 @@
+diff --git a/packages/core/agent-loop/src/agent.ts b/packages/core/agent-loop/src/agent.ts
+index 7ec43dd132..f617865111 100644
+--- a/packages/core/agent-loop/src/agent.ts
++++ b/packages/core/agent-loop/src/agent.ts
+@@ -295,6 +295,11 @@ export class ReactLoopAgent implements Agent {
+     if (selection === undefined) {
+       throw new Error(`agent "${this.id}" has no provider/model: set AgentOptions.provider and AgentOptions.model or record a model selection`)
+     }
++    await this.dispatch.waterfall(
++      'agent/prepare-step', { ...position, signal, modelSelection: selection },
++      (): Promise<void> => Promise.resolve(),
++    )
++    signal.throwIfAborted()
+     const toolSet = await this.loopCtx.tools.resolve({ agent: this, modelSelection: selection, signal })
+     try {
+       const assembly = await this.loopCtx.systemPrompt.assemble({ ...assembleContextFor(this, signal), modelSelection: selection, toolSet })
+diff --git a/packages/core/agent/src/runtime-types.ts b/packages/core/agent/src/runtime-types.ts
+index 7012dfdf50..230d1fc8dd 100644
+--- a/packages/core/agent/src/runtime-types.ts
++++ b/packages/core/agent/src/runtime-types.ts
+@@ -336,6 +336,18 @@ declare module '@deepseek-ai/cordis' {
+      */
+     'agent/inbox/discarded'(this: Scoped<Agent>, payload: { agent: Agent; message: UserMessage }): void
+     // ---- the machine's extension points ----
++    /**
++     * Prepare async, agent-scoped capabilities before the loop resolves this
++     * step's tool set and assembles its prompt.
++     * @param payload.agent - the agent whose step is being prepared.
++     * @param payload.turn - the turn that will own the step.
++     * @param payload.step - the proposed step.
++     * @param payload.signal - the current turn's cancellation signal.
++     * @param payload.modelSelection - the captured model selection.
++     * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
++     * @mode waterfall
++     */
++    'agent/prepare-step'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; signal: AbortSignal; modelSelection: Readonly<ModelSelection> }, next: () => Promise<void>): Promise<void>
+     /**
+      * Reject a proposed step or replace the messages that enter it. Calling
+      * `next()` preserves the current messages.
+diff --git a/packages/core/system-prompt/src/index.ts b/packages/core/system-prompt/src/index.ts
+index 66d0e53a39..317ceece0c 100644
+--- a/packages/core/system-prompt/src/index.ts
++++ b/packages/core/system-prompt/src/index.ts
+@@ -16,6 +16,14 @@ declare module '@deepseek-ai/cordis' {
+   }
+ 
+   interface Events {
++    /**
++     * Prepare async capabilities before this assembly snapshots tool providers.
++     * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): scoped listeners
++     * receive only that scope's assemblies.
++     * @param context - the caller's per-assembly context.
++     * @mode waterfall
++     */
++    'system-prompt/prepare'(this: Scoped<SystemPrompt>, context: AssembleContext, next: () => Promise<void>): Promise<void>
+     /**
+      * Presentation waterfall over assembled sections, contexts, and variables.
+      * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): scoped listeners
+@@ -619,6 +627,11 @@ export class SystemPrompt extends Service {
+    */
+   // Keep configuration failures on the declared asynchronous error path.
+   async assemble(context: AssembleContext = {}): Promise<PromptAssembly> {
++    await this.ctx.waterfall(
++      scopeTarget(this, context.scope), 'system-prompt/prepare', context,
++      (): Promise<void> => Promise.resolve(),
++    )
++    context.signal?.throwIfAborted()
+     const scope = context.scope
+     const scopeLayers = this.layers.chainLayers(scope)
+     const runtimeContextSuppressed = !this.layers.global.runtimeContextSuppressors.isEmpty()

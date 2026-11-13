@@ -77,14 +77,8 @@ diff --git a/src/screens/Chat.tsx b/src/screens/Chat.tsx
 index aa966133..95fc13a3 100644
 --- a/src/screens/Chat.tsx
 +++ b/src/screens/Chat.tsx
-@@ -60,6 +60,7 @@ import { ApprovalPanel } from '../components/approvals/ApprovalPanel.js'
- import { ExtensionDialog } from '../components/ExtensionDialog.js'
- import { consumeBoundaryRecoveryRemount } from '../ink/update-overflow-guard.js'
- import type { DOMElement } from '../ink/dom.js'
+@@ -63,0 +64,1 @@
 +import { WHEEL_NOTCH_LINES } from '../ink/wheel-notch.js'
- import { useSearchHighlight } from '../ink/hooks/use-search-highlight.js'
- import { useTerminalTitle } from '../ink/hooks/use-terminal-title.js'
- import { useTerminalFocus } from '../ink/hooks/use-terminal-focus.js'
 @@ -4281,7 +4282,7 @@ export function Chat({
          overlay.kind !== 'none' &&
          (overlay.kind !== 'workspace-picker' || workspaceTargets.length > 0)

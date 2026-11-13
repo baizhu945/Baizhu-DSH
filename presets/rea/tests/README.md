@@ -1,20 +1,18 @@
 # Independent REA preset acceptance
 
-Current source pin: REA 6.4.0 at a2d8b94dd50dab8d966239dd63ab84718aa8b4b4,
-187 tools / 6 prompts. `catalog.mjs` records
-all exact canonical ordered names; the package install gate checks names/effects
-and upstream Ghidra budget parsing/forwarding. Changes from 5.0.0: add
-inspect_binary_layout, inspect_recorded_crash, inspect_evm_interface,
-observe_native_calls, trace_dylib_resolution; remove set_current_document.
-The 134-tool logs and 5.0.0 store paths below are retained historical evidence,
-not fresh 6.4.0 validation. New package and exact-SDK fixture runs are pending.
-The archived 6.1 schema patch is not applied: upstream canonical patterns fix
-ObjC/NUL/lookahead portability. The live schema gate still scans every input
-and output pattern with JavaScript Unicode and Rust engines and compares
-affected wire constraints with canonical validation, including newline cases.
-The root-path producer now rejects newline-separated normalization loopholes.
-Real acceptance requests complete JS/EVM payloads explicitly and exercises the
-new target-free inspect_analysis_view retained EVM bytecode paging workflow.
+Current source pin: REA 6.8.0 at `160d821ac9a0310afcb8d1fc427862dd6508add5`.
+`catalog.mjs` records the exact canonical ordered tool names for this pin; the
+package install gate checks actual MCP names/effects and Ghidra budget parsing.
+REA 6.8 defaults to compact MCP input schemas, so the DSH preset explicitly
+sets `REA_MCP_INPUT_SCHEMA_PROFILE=full` for the complete nested constraints.
+The older 6.4/6.1 tool counts, catalog snapshots and store paths below are
+historical only, not acceptance evidence for 6.8.0. The 6.8.0 Nix package/install gates pass (doctor, schema portability, Ghidra
+budget and SQLite smoke). The exact-SDK DSH fixture suite also passes in isolated
+staging; real Ghidra/JS/EVM acceptance remains separate.
+The schema gate scans every input/output pattern with JavaScript Unicode and
+Rust engines, compares wire constraints with canonical validation, and covers
+newline/canonical-path cases. Real acceptance also checks complete JS/EVM
+payloads and target-free `inspect_analysis_view` retained EVM bytecode paging.
 Real Codex compatibility remains a parent-run deployment gate; JS/Rust alone
 does not establish that client integration.
 
@@ -73,7 +71,7 @@ Prompt, section metadata and generated TS/Python SDK remain exact comparisons.
 
 - `host-smoke.mjs`: each actual non-REA preset starts clean twice, all tools,
   prompt, schema, TS/Python SDK and complete first requests match.
-- `fixture-smoke.mjs`: checks our genuine newline stdio MCP187 fixture against
+- `fixture-smoke.mjs`: checks our genuine newline stdio MCP229 fixture against
   the installed actual MCP client, readonly DSH pipeline and physical cleanup.
   This is **not** a claim about the new lazy bootstrap.
 - `import-guard.mjs`: monkeypatches Node's public file/probe/process operations
@@ -84,7 +82,7 @@ Prompt, section metadata and generated TS/Python SDK remain exact comparisons.
   composition constraints, ordinary headless unchanged; immutable Codex source
   SHA-256 inventory.
 - `fixture-tests.mjs`: every non-REA preset absent-vs-registered-bootstrap full
-  equality, cold roster/lease, selected root first pre-step, 187 tools/first
+  equality, cold roster/lease, selected root first pre-step, 229 tools/first
   request and readonly call, repeat-turn reuse, parallel-root isolation,
   physical cleanup, blank warm/cold REA-to-standard recomposition, first-turn
   selection lock, public `applyChildComposition`/toolFilter, default child
@@ -94,7 +92,7 @@ Prompt, section metadata and generated TS/Python SDK remain exact comparisons.
   actual PermissionPresetService Read Only deny / Full Access allow / Workspace
   ask. Upstream MCP deliberately uses exclusive scheduling rather than treating
   readOnlyHint as a parallel-execution grant.
-- `real-acceptance.mjs`: selected actual REA catalog187, static JS fixture graph,
+- `real-acceptance.mjs`: selected actual REA catalog229, static JS fixture graph,
   tiny C fixture compiled by the preinstalled `cc`, Ghidra native analysis and
   pseudocode, all through actual DSH ToolRuntime. JDK/Ghidra/Chromium paths are
   read from deployed Config, never guessed. A fake model alone supplies the
@@ -108,7 +106,30 @@ not merely mocked close calls. The installed MCP SDK uses a transient
 count **live owners**, while unselected-preset tests require absolutely **zero
 spawn events**, including probes.
 
-## Execution status at handoff
+## DSH 0.2.2-rc.2 integration (2026-11-13)
+
+The rc.2 Nix and complete Home Manager regression closures pass all five groups.
+Runtime ownership now uses `subagents.rootOf(agent)` plus exact registry identity,
+not the removed `agents.roots()`/`parentAgent` API. Added real-host regressions
+cover managed-child cancellation without parent revocation, concurrent pending
+roots, cancellation/disposal of replaced same-ID agents, and durable forks that
+remain independent runtime roots. No paid provider call or real Ghidra target
+analysis is included in these fixture results.
+
+## Historical 6.8.0 package status (2026-11-06)
+
+Installed REA output: `/nix/store/gllsndjbqfkiqigjzhmq5xg6j9z1j8mp-rea-agents-6.8.0`.
+Its Nix install checks pass: MCP doctor reports 229 tools/6 prompts and the
+pinned catalog digest; schema portability audits 2,333 occurrences/145 unique
+patterns against JS, Rust and AJV; Ghidra startup-budget and SQLite MCP smoke
+also pass. The exact-SDK DSH fixture suite passes: four non-REA host presets,
+stdio MCP229, import guard, desktop/profile registrars, and lifecycle, cancellation,
+permissions and parallel-root checks. No `realReaExe` was supplied, so this does
+not claim target Ghidra analysis. The broader Nix module check was stopped when
+its pinned Chromium dependency began a 57,124-object source build; no Home Manager
+switch or live-profile mutation was performed.
+
+## Historical execution status at prior handoff
 
 Actual SDK: `/nix/store/asdxh9s7gswydivma3gjk0g697lsc0ky-dsh-0.2.0-rc.2`.
 `host-smoke.pass.log` and `fixture-smoke.pass.log` pass. The deployment's actual
